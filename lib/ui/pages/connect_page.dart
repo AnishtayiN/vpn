@@ -229,7 +229,7 @@ class ConnectPage extends StatelessWidget {
     return Material(
       color: const Color(0xFF163149),
       child: InkWell(
-        onTap: () => Links.openTelegram(),
+        onTap: () => c.downloadUpdate(),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
           child: Column(

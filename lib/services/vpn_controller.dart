@@ -40,6 +40,11 @@ class VpnController extends ChangeNotifier {
   bool busy = false;
   bool downloading = false;
   double downloadProgress = 0;
+  bool downloadFailed = false;
+  bool installStarted = false;
+
+  /// 0..100 for the update progress bar.
+  int get downloadPercent => (downloadProgress.clamp(0.0, 1.0) * 100).round();
   String? downloadedPath;
   String? toast;
   String? lanEndpoint;
@@ -383,6 +388,8 @@ class VpnController extends ChangeNotifier {
     }
     downloading = true;
     downloadProgress = 0;
+    downloadFailed = false;
+    installStarted = false;
     notifyListeners();
     try {
       final file = await updates.download(
@@ -401,15 +408,15 @@ class VpnController extends ChangeNotifier {
           throw const FileSystemException('APK signing certificate mismatch');
         }
       }
+      installStarted = true;
+      notifyListeners();
       await engine.installUpdate(file.path);
     } catch (e) {
-      _log('update download failed: $e — opening Telegram channel ${AppInfo.telegramHandle}');
+      _log('update download failed: $e');
+      downloadFailed = true;
       toast = '$e';
-      // On failure, fall back to Telegram channel — the only link shown to user.
-      try {
-        final target = info.htmlUrl ?? AppInfo.telegramUrl;
-        await launchUrl(Uri.parse(target), mode: LaunchMode.externalApplication);
-      } catch (_) {}
+      // Stay on the update screen so the user can just tap the button again;
+      // the Telegram channel stays available elsewhere on the page.
     } finally {
       downloading = false;
       notifyListeners();

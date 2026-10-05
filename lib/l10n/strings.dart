@@ -83,6 +83,14 @@ class S {
   String get upToDate => isFa ? 'برنامه به‌روز است' : 'You are up to date';
   String get updateAvailable => isFa ? 'نسخه جدید آماده است' : 'Update available';
   String get updateFailed => isFa ? 'بررسی ناموفق بود' : 'Update check failed';
+  String get installNow => isFa ? 'دانلود و نصب خودکار' : 'Download & install now';
+  String get installingUpdate =>
+      isFa ? 'در حال دانلود… %SUM%' : 'Downloading… %SUM%';
+  String get updateReadyInstalling => isFa
+      ? 'دانلود کامل شد — نصب شروع شد'
+      : 'Download complete — installation started';
+  String get updateDownloadFailed =>
+      isFa ? 'دانلود ناموفق بود — دوباره تلاش کنید' : 'Download failed — try again';
   String get checking => isFa ? 'در حال بررسی…' : 'Checking…';
   String get updateChannel => isFa ? 'کانال انتشار نسخه‌ها' : 'Release channel';
 

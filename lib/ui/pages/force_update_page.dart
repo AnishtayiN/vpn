@@ -96,6 +96,62 @@ class ForceUpdatePage extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 18),
+            // ── One-tap automatic update: download with progress, then install.
+            FilledButton.icon(
+              onPressed: (c.downloading || c.installStarted)
+                  ? null
+                  : () => c.downloadUpdate(),
+              icon: c.downloading
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.download_rounded),
+              label: Text(
+                c.installStarted
+                    ? s.updateReadyInstalling
+                    : c.downloading
+                        ? s.installingUpdate
+                            .replaceAll('%SUM%', '${c.downloadPercent}%')
+                        : c.downloadFailed
+                            ? s.updateDownloadFailed
+                            : s.installNow,
+              ),
+              style: FilledButton.styleFrom(
+                minimumSize: const Size.fromHeight(52),
+                backgroundColor: c.downloadFailed
+                    ? VoidrauColors.coral
+                    : VoidrauColors.cyan,
+                foregroundColor: Colors.black,
+              ),
+            ),
+            if (c.downloading) ...[
+              const SizedBox(height: 10),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: TweenAnimationBuilder<double>(
+                  tween: Tween(begin: 0, end: c.downloadProgress),
+                  duration: const Duration(milliseconds: 250),
+                  builder: (context, v, _) => LinearProgressIndicator(
+                    value: v,
+                    minHeight: 10,
+                    backgroundColor: VoidrauColors.surface,
+                    valueColor:
+                        const AlwaysStoppedAnimation(VoidrauColors.cyan),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '${c.downloadPercent}%',
+                style: const TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 15,
+                    color: VoidrauColors.cyan),
+              ),
+            ],
+            const SizedBox(height: 14),
             Text(s.updateRequiredTelegramLead,
                 style: const TextStyle(height: 1.6)),
             const SizedBox(height: 12),
