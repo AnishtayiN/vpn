@@ -1,5 +1,5 @@
 {
-  "aether": "v2.1.0",
+  "aether": "v2.3.0",
   "aether_repo": "https://github.com/CluvexStudio/Aether",
   "hev_socks5_tunnel": "2.17.1",
   "hev_repo": "https://github.com/heiher/hev-socks5-tunnel",
@@ -16,17 +16,17 @@
   "min_android_api": 24,
   "min_windows": "6.3",
   "min_windows_for_current_tun2socks": "10.0",
-  "ios_aether_revision": "a9703a723dff6d820252799a2ff32bd26d6638ee",
+  "ios_aether_revision": "6175b67df370ab856bcee07fe85b524031903956",
   "ios_hev_revision": "9a06bc6e7989da54e3d32ff701ef7a7ce4995d3a",
   "ios_rust": "1.98.0",
   "sha256": {
-    "aether_windows_x86_64": "16221819f57b1519302dec4488ff2890a1e64ebab233ed27a289be167138677b",
-    "aether_android_arm64": "797cda06f5d651603b3b0c0cb8de7a5832d69e62241b3396b289d8bb0fca5374",
-    "aether_android_armv7": "2816df2a7cd7db675e73111e1131ec469afe252a35e4d3ac9bd226d479b5abf2",
+    "aether_windows_x86_64": "0cc32dd2d7573f91d2e55d4f427bfe4c6f6252342494e1b410d61b12d1e4dc79",
+    "aether_android_arm64": "038748745244828ea41a808958f16a1c25053dc61db977c95ceb2d3a0b2f7970",
+    "aether_android_armv7": "9e9c59b188ff235053ae22b9f007f31de3e9bc71c8252ef73b0d626b85b64dae",
     "hev_windows_win64": "08c85eb47eea60fad4a2ace9f85577b05056be08118924f8305f2f03b7dd9994",
     "tun2socks_windows_amd64": "1429e2e3b1ea09052da2c65e5005538b5730d63da37e304f4ad6fd2698a66695",
     "tun2socks_legacy_windows_amd64": "50cf6bcfb14dc0fd05eb46a5b8a804541879a555c1e50ce64b766af9d486294b",
     "wintun_0_14_1": "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51",
-    "aether_android_x64": "645cf27c09daab8723567b0a841f4ebecbb3060e207f8b0b127fea17255711ce"
+    "aether_android_x64": "9acd35dc7bafd4bbf0f4bd8337cb26c4efe6ab0d84ec01d1a0a9fa68168b09c1"
   }
 }

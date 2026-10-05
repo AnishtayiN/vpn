@@ -33,7 +33,7 @@ env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   FLUTTER_VERSION: "3.27.4"
   JAVA_VERSION: "17"
-  AETHER_TAG: "v2.1.0"
+  AETHER_TAG: "v2.3.0"
   HEV_TAG: "2.17.1"
   CHANNEL_URL: "https://t.me/Voidrau"
 

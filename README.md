@@ -131,7 +131,7 @@ core decide”.
 
 ### Tunnel core 2.1.0
 
-`scripts/pins.json` pins Aether **v2.1.0** (and the iOS source revision built
+`scripts/pins.json` pins Aether **v2.3.0** (and the iOS source revision built
 from it). What the app uses from it:
 
 - **exit lock** — `AETHER_EXIT_LOC` / `AETHER_EXIT_LOC_SECS` (see above);
@@ -350,7 +350,7 @@ QUIC و ۱۵۰۰ روی TCP.
 
 ### هستهٔ تونل 2.1.0
 
-`scripts/pins.json` نسخهٔ Aether را روی **v2.1.0** ثابت می‌کند (و revision مبدأ برای iOS). آنچه
+`scripts/pins.json` نسخهٔ Aether را روی **v2.3.0** ثابت می‌کند (و revision مبدأ برای iOS). آنچه
 برنامه از آن استفاده می‌کند: **قفل کشور خروجی** داخل هسته، **پرش دوم** با Psiphon/Tor
 (`chain`/`reverse`/`only`) با منطقه، حالت CDN و پورت‌های اختصاصی، **شمارنده‌های ترافیک**
 (`AETHER_STATS`) که تنها منبع آمار در ویندوز و خوراک نمای زنده است، **پروفایل سرعت** و

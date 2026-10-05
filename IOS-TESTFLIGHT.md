@@ -56,7 +56,7 @@ Apple Developer Program، App Store Connect و گواهی‌های معتبر ل
 
 ## هشدار مهم مجوز Aether
 
-Aether در revision پین‌شدهٔ v2.1.0 دارای **AGPL-3.0-only** است، نه MIT. HEV در نسخهٔ
+Aether در revision پین‌شدهٔ v2.3.0 دارای **AGPL-3.0-only** است، نه MIT. HEV در نسخهٔ
 پین‌شده MIT است. اطلاعات اشتباه قبلی در `NOTICE.md` اصلاح شده است.
 
 لینک استاتیک AGPL با اپ و شرایط توزیع TestFlight/App Store باید **قبل از آپلود** از نظر

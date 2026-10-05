@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="${1:-${TARGET:-all}}"
 TARGET="$(echo "$TARGET" | tr '[:upper:]' '[:lower:]')"
-AETHER_TAG="${AETHER_TAG:-v2.1.0}"
+AETHER_TAG="${AETHER_TAG:-v2.3.0}"
 HEV_TAG="${HEV_TAG:-2.17.1}"
 TUN2SOCKS_TAG="${TUN2SOCKS_TAG:-v2.6.0}"
 # v2.5.1 is the last tun2socks release built with Go 1.20 — the last Go that
