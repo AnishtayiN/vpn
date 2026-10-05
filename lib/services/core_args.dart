@@ -9,7 +9,7 @@ import 'split.dart';
 /// CLI flags; that is its documented configuration contract, and env-only
 /// keeps the Android and Windows launchers behaviourally identical.
 ///
-/// The list below tracks Aether 2.1.0 (`aether --help`, `Docs/DOCS.en.md`):
+/// The list below tracks Aether 2.3.0 (`aether --help`, `Docs/DOCS.en.md`):
 /// transports, the QUIC v2 opener, ECH, the exit lock, traffic counters, the
 /// performance profile, the Psiphon/Tor chains and the routing rules.
 class CoreLaunch {

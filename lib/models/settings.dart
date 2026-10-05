@@ -8,7 +8,7 @@ enum ScanMode { turbo, balanced, thorough, stealth, ironclad }
 ///
 /// The tunnel core picks its own gateway, so the choice happens on the client:
 /// after the core reports `connected`, the exit IP is looked up and the tunnel
-/// is torn down and re-dialled when the country does not match. Core 2.1.0 can
+/// is torn down and re-dialled when the country does not match. Core 2.3.0 can
 /// also be told the same rule up front (`AETHER_EXIT_LOC`), which is what
 /// [VpnSettings.coreExitLoc] switches on — the core then refuses to open the
 /// proxy on a tunnel that lands in the wrong country, so far fewer re-dials are
@@ -62,7 +62,7 @@ enum PerfProfile {
 
 /// A second hop that carries the tunnel itself.
 ///
-/// Aether 2.1.0 ships Psiphon and Tor inside the core. In a country where WARP
+/// Aether 2.3.0 ships Psiphon and Tor inside the core. In a country where WARP
 /// endpoints answer but the handshake is being probed, "the tunnel through
 /// Psiphon"/"through Tor" is the difference between a working connection and a
 /// dead one — and it is a checkbox here instead of a second app.
@@ -222,7 +222,7 @@ class VpnSettings {
   int perfRxKb;
   int perfTxKb;
 
-  /// QUIC v2 opener (core 2.1.0): one v2-shaped packet before the v1 handshake
+  /// QUIC v2 opener (core 2.3.0): one v2-shaped packet before the v1 handshake
   /// so filters that only know v1 let the flow through.
   bool quicV2;
 

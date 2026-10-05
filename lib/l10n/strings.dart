@@ -307,7 +307,7 @@ class S {
       ? 'پروتکل روی WireGuard تنظیم شد'
       : 'Protocol set to WireGuard';
 
-  // ── speed (2.1.0 performance profile, live meter, throughput test) ────────
+  // ── speed (2.3.0 performance profile, live meter, throughput test) ────────
   String get speedTitle => isFa ? 'سرعت و پروفایل کارایی' : 'Speed & performance';
   String get speedHelp => isFa
       ? 'هسته به‌طور خودکار از روی تعداد هسته و رم دستگاه یک سطح کارایی انتخاب می‌کند. اگر خط شما پرسرعت است و هنوز سرعت کم است، سطح را دستی بالا ببرید.'

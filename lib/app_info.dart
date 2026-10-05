@@ -16,7 +16,7 @@ class AppInfo {
       String.fromEnvironment('VOIDRAU_VERSION', defaultValue: '1.0.0');
 
   /// Version of the bundled tunnel core.
-  static const core = '2.1.0';
+  static const core = '2.3.0';
 
   static const socksHost = '127.0.0.1';
   static const socksPort = 1819;
