@@ -13,7 +13,7 @@ import 'split.dart';
 /// transports, the QUIC v2 opener, ECH, the exit lock, traffic counters, the
 /// performance profile, the Psiphon/Tor chains and the routing rules.
 class CoreLaunch {
-  static const coreVersion = '2.1.0';
+  static const coreVersion = '2.3.0';
 
   /// Obfuscation profile given to the core. The core accepts
   /// off|light|balanced|aggressive (plus aliases like gfw/firewall); anything
