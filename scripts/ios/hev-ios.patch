@@ -1,0 +1,24 @@
+diff -ruN a/src/misc/hev-exec.c b/src/misc/hev-exec.c
+--- a/src/misc/hev-exec.c	2026-09-22 22:12:03.115780635 +0000
++++ b/src/misc/hev-exec.c	2026-09-22 22:12:03.115780635 +0000
+@@ -22,7 +22,7 @@
+ 
+ #include "hev-exec.h"
+ 
+-#if TARGET_OS_TV
++#if TARGET_OS_TV || TARGET_OS_IOS
+ void
+ hev_exec_run (const char *script_path, const char *tun_name,
+               const char *tun_index, int wait)
+diff -ruN a/src/misc/hev-utils.c b/src/misc/hev-utils.c
+--- a/src/misc/hev-utils.c	2026-09-22 22:12:03.115780635 +0000
++++ b/src/misc/hev-utils.c	2026-09-22 22:12:03.119780709 +0000
+@@ -43,7 +43,7 @@
+ 
+ #pragma GCC diagnostic push
+ #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+-#if !(TARGET_OS_TV)
++#if !(TARGET_OS_TV) && !(TARGET_OS_IOS)
+     if (daemon (0, 0)) {
+         /* ignore return value */
+     }

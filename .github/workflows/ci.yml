@@ -1,0 +1,209 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main, "arena/**"]
+
+permissions:
+  contents: read
+
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.27.4"
+          channel: stable
+      - run: flutter pub get
+      # Both steps record their own status instead of failing fast: a test that
+      # does not compile must not hide the analyzer's explanation of why.
+      - name: Test
+        shell: bash
+        run: |
+          set -uo pipefail
+          flutter test 2>&1 | tee test.txt
+          echo "${PIPESTATUS[0]}" > .test-status
+      - name: Analyze
+        shell: bash
+        run: |
+          set -uo pipefail
+          flutter analyze 2>&1 | tee analyze.txt
+          echo "${PIPESTATUS[0]}" > .analyze-status
+      - name: Fail on test or analyze findings
+        shell: bash
+        run: |
+          set -euo pipefail
+          rc=0
+          [ "$(cat .test-status 2>/dev/null || echo 1)" = "0" ] || rc=1
+          [ "$(cat .analyze-status 2>/dev/null || echo 1)" = "0" ] || rc=1
+          exit "$rc"
+      - name: Upload raw analyzer and test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-findings-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            analyze.txt
+            test.txt
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Publish findings as check annotations
+        if: failure()
+        shell: bash
+        run: |
+          # Raw logs sit behind a signed-in browser session (and a CDN that
+          # scripts cannot always reach); check-run annotations are readable
+          # through the API, so a red build says *what* is red.
+          python3 - <<'PY'
+          import pathlib, re
+
+          seen = {}
+
+          def emit(level, text):
+              text = " ".join(text.split())[:400]
+              if not text:
+                  return
+              # An action's annotations are deduplicated by message, and every
+              # line here is printed from the same step: number them so a second
+              # identical finding still shows up.
+              seen[text] = seen.get(text, 0) + 1
+              print(f"::{level}::[{seen[text]}] {text}")
+
+          analyze = pathlib.Path("analyze.txt")
+          if analyze.exists():
+              lines = analyze.read_text(errors="replace").splitlines()
+              findings = [l for l in lines if " • " in l]
+              for line in findings[:60]:
+                  emit("error", line)
+              # A count higher than the lines we understood means the format
+              # drifted, and the whole file is more useful than a wrong summary.
+              counted = 0
+              for line in lines:
+                  m = re.match(r"^\s*(\d+) issues? found", line)
+                  if m:
+                      counted = int(m.group(1))
+              if counted > len(findings):
+                  for line in lines[:80]:
+                      emit("error", line)
+              summary = [
+                  l for l in lines
+                  if re.match(r"^\s*(No issues|\d+ issues? found)", l)
+              ]
+              for line in summary[:2]:
+                  emit("error", line)
+
+          tests = pathlib.Path("test.txt")
+          if tests.exists():
+              body = tests.read_text(errors="replace").splitlines()
+              # A failing test prints its own block; the block is what says
+              # *why* it failed, so every failure line drags its context in.
+              context = set()
+              for i, line in enumerate(body):
+                  if re.search(r"\[E\]|failed to load|Error:", line):
+                      context.update(range(i, min(i + 14, len(body))))
+              interesting = [
+                  l for l in body
+                  if re.search(
+                      r"(Some tests failed|failed to load|Expected:|Actual:|\[E\]"
+                      r"|^\S+\.dart:\d+:\d+:|Error:|error \u2022)",
+                      l,
+                      re.I,
+                  )
+              ]
+              for i in sorted(context)[:120]:
+                  emit("error", body[i])
+              for line in interesting[:80]:
+                  emit("error", line)
+          PY
+
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax
+        run: |
+          set -euo pipefail
+          for f in scripts/*.sh scripts/ios/*.sh; do
+            bash -n "$f" && echo "ok $f"
+          done
+      - name: iOS configuration and signing tests
+        run: python3 -m unittest discover -s scripts/ios/tests -v
+      - name: Pins are valid and referenced
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib, sys
+
+          pins = json.loads(pathlib.Path("scripts/pins.json").read_text())
+          script = pathlib.Path("scripts/fetch_cores.sh").read_text()
+
+          # Every pin the release build depends on must exist and be consumed by
+          # the fetch script — a pin nobody reads is a pin that silently drifts.
+          for key in ("aether", "hev_socks5_tunnel", "tun2socks",
+                      "tun2socks_legacy", "tun2socks_legacy_max_go", "wintun",
+                      "tun2socks_windows_asset", "hev_windows_asset"):
+              if not pins.get(key):
+                  sys.exit(f"pins.json is missing {key}")
+          for key in ("AETHER_TAG", "HEV_TAG", "TUN2SOCKS_TAG",
+                      "TUN2SOCKS_LEGACY_TAG", "WINTUN_URL"):
+              if key not in script:
+                  sys.exit(f"fetch_cores.sh no longer honours {key}")
+
+          # Only real download lines are inspected, so comments may keep naming
+          # the assets they warn about.
+          urls = [l for l in script.splitlines() if "releases/download/" in l]
+          if not urls:
+              sys.exit("fetch_cores.sh has no release download URLs")
+          if any("releases/latest" in l for l in script.splitlines()):
+              sys.exit("fetch_cores.sh must pin tags, not track 'latest'")
+          # GitHub lists the GOAMD64=v3 zip first: it dies with an illegal
+          # instruction on pre-AVX2 CPUs, i.e. most Windows 8.1 hardware.
+          if any("-v3.zip" in l for l in urls):
+              sys.exit("fetch_cores.sh downloads a GOAMD64=v3 asset")
+          for key in ("tun2socks_windows_asset", "hev_windows_asset"):
+              if not any(pins[key] in l for l in urls):
+                  sys.exit(f"fetch_cores.sh never downloads {pins[key]}")
+          # The legacy slot exists for Windows 8.1: without it the app has no
+          # bridge that can run there.
+          if "tun2socks-legacy.exe" not in script:
+              sys.exit("fetch_cores.sh no longer stages tun2socks-legacy.exe")
+          print("pins.json and fetch_cores.sh agree")
+          PY
+      - name: Pinned Windows sidecar assets exist
+        run: |
+          set -uo pipefail
+          # A renamed upstream asset means the release ships without a device
+          # VPN bridge. Verified through the API (no downloads); an unreachable
+          # API is a warning, a missing asset is an error.
+          assets() {
+            curl -fsSL -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$1/releases/tags/$2" \
+            | python3 -c "import json,sys;[print(a['name']) for a in json.load(sys.stdin).get('assets',[])]"
+          }
+          check() {
+            local repo="$1" tag="$2" want="$3"
+            local list
+            if ! list="$(assets "$repo" "$tag")"; then
+              echo "::warning::could not list $repo@$tag (rate limited?)"
+              return 0
+            fi
+            if grep -Fxq "$want" <<<"$list"; then
+              echo "ok $repo@$tag → $want"
+            else
+              echo "::error::$repo@$tag no longer publishes $want"
+              return 1
+            fi
+          }
+          # Tags come from pins.json so this check cannot drift from the build.
+          read -r T2S T2S_LEG HEV <<<"$(python3 -c 'import json; p = json.load(open("scripts/pins.json")); print(p["tun2socks"], p["tun2socks_legacy"], p["hev_socks5_tunnel"])')"
+          rc=0
+          check xjasonlyu/tun2socks "$T2S" tun2socks-windows-amd64.zip || rc=1
+          check xjasonlyu/tun2socks "$T2S_LEG" tun2socks-windows-amd64.zip || rc=1
+          check heiher/hev-socks5-tunnel "$HEV" hev-socks5-tunnel-win64.zip || rc=1
+          exit $rc

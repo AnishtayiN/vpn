@@ -1,0 +1,333 @@
+name: Release APK and EXE
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "App version to build and publish (example: 1.0.0). Required before the workflow starts."
+        required: true
+        type: string
+        default: "1.0.0"
+      notes:
+        description: "Release notes shown on GitHub Releases and in the in-app updater"
+        required: false
+        type: string
+        default: ""
+      prerelease:
+        description: "Mark this GitHub Release as a pre-release"
+        required: false
+        type: boolean
+        default: false
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+  FLUTTER_VERSION: "3.27.4"
+  JAVA_VERSION: "17"
+  AETHER_TAG: "v2.1.0"
+  HEV_TAG: "2.17.1"
+  CHANNEL_URL: "https://t.me/Voidrau"
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      notes: ${{ steps.v.outputs.notes }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - id: v
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_NOTES: ${{ github.event.inputs.notes }}
+          INPUT_PRE: ${{ github.event.inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            VERSION="${INPUT_VERSION:-}"
+            NOTES="${INPUT_NOTES:-}"
+            PRE="${INPUT_PRE:-false}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+            NOTES=""
+            PRE="false"
+          fi
+          VERSION="${VERSION#v}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must look like 1.0.0 (got '$VERSION')"
+            exit 1
+          fi
+          {
+            echo "version=${VERSION}"
+            echo "prerelease=${PRE}"
+            echo "notes<<EOF"
+            echo "${NOTES}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building VoidrauVPN v${VERSION}"
+
+  android:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: ''
+      - name: Install NDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "ndk;27.0.12077973"
+          echo "ANDROID_HOME=${ANDROID_SDK_ROOT}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/27.0.12077973" >> "$GITHUB_ENV"
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Stamp version
+        run: python3 scripts/stamp_version.py "${{ needs.version.outputs.version }}"
+      - name: Scaffold Android platform
+        run: flutter create . --project-name voidrauvpn --org pm.dnschanger --platforms=android
+      - name: Apply overlays
+        run: python3 scripts/apply_overlays.py
+      - name: Sanitize Gradle properties (AGP 8.1+ fix)
+        run: |
+          echo "Cleaning deprecated android.bundle.enableUncompressedNativeLibs (removed in AGP 8.1)"
+          sed -i '/android.bundle.enableUncompressedNativeLibs/d' android/gradle.properties || true
+          if [ -f android/app/gradle.properties ]; then
+            sed -i '/android.bundle.enableUncompressedNativeLibs/d' android/app/gradle.properties || true
+          fi
+          echo "=== android/gradle.properties ==="
+          cat android/gradle.properties || true
+          echo "=== android/app/build.gradle.kts ==="
+          cat android/app/build.gradle.kts 2>/dev/null | head -n 150 || cat android/app/build.gradle 2>/dev/null | head -n 150 || true
+      - name: Fetch tunnel core (Android)
+        run: bash scripts/fetch_cores.sh android
+      - name: Build HEV JNI
+        run: bash scripts/build_hev.sh
+      - run: flutter pub get
+      - name: Build APKs (universal + per-ABI)
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ secrets.ANDROID_KEYSTORE_PATH }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            mkdir -p android/.android-signing
+            echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android/.android-signing/voidrauvpn.jks
+            export ANDROID_KEYSTORE_PATH="$GITHUB_WORKSPACE/android/.android-signing/voidrauvpn.jks"
+          fi
+          VER="${{ needs.version.outputs.version }}"
+          flutter build apk --release \
+            --target-platform android-arm,android-arm64,android-x64 \
+            --dart-define=VOIDRAU_VERSION=$VER
+          flutter build apk --release --split-per-abi \
+            --target-platform android-arm,android-arm64,android-x64 \
+            --dart-define=VOIDRAU_VERSION=$VER
+          mkdir -p release
+          cp build/app/outputs/flutter-apk/app-release.apk \
+            "release/VoidrauVPN-v${VER}-Android-Universal.apk"
+          cp build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk \
+            "release/VoidrauVPN-v${VER}-Android-armeabi-v7a.apk"
+          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk \
+            "release/VoidrauVPN-v${VER}-Android-arm64-v8a.apk"
+          cp build/app/outputs/flutter-apk/app-x86_64-release.apk \
+            "release/VoidrauVPN-v${VER}-Android-x86_64.apk"
+          flutter build appbundle --release \
+            --dart-define=VOIDRAU_VERSION=$VER
+          cp build/app/outputs/bundle/release/app-release.aab \
+            "release/VoidrauVPN-v${VER}-Android.aab"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: |
+            release/*.apk
+            release/*.aab
+
+  windows:
+    needs: version
+    # Pin to windows-2022: the VS2026 "windows-latest" image isn't supported by
+    # Flutter 3.27.4, whose tooling maps any non-17 VS major version to the
+    # "Visual Studio 16 2019" CMake generator (flutter_tools visual_studio.dart).
+    runs-on: windows-2022
+    env:
+      CMAKE_GENERATOR: "Visual Studio 17 2022"
+      CMAKE_GENERATOR_PLATFORM: "x64"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.28'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Stamp version
+        run: python scripts/stamp_version.py "${{ needs.version.outputs.version }}"
+      - name: Scaffold Windows platform
+        run: flutter create . --project-name voidrauvpn --org pm.dnschanger --platforms=windows
+      - name: Apply overlays
+        run: python scripts/apply_overlays.py
+      - name: Fetch tunnel core (Windows)
+        shell: bash
+        run: bash scripts/fetch_cores.sh windows
+      - name: Verify Windows sidecars
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd third_party/windows
+          # The app degrades to SOCKS5 when a device-VPN file is missing, so a
+          # silent download failure would ship an installer whose "full VPN"
+          # never works. Fail the release here instead.
+          for f in aether.exe tun2socks.exe tun2socks-legacy.exe wintun.dll; do
+            if [[ ! -s "$f" ]]; then echo "::error::missing required sidecar $f"; exit 1; fi
+          done
+          # The C bridge is a fallback for old Windows: loud warning, not fatal.
+          for f in hev-socks5-tunnel.exe msys-2.0.dll; do
+            if [[ ! -s "$f" ]]; then echo "::warning::optional sidecar $f is missing"; fi
+          done
+          for f in *; do
+            [[ -f "$f" ]] || continue
+            printf '%-30s %8d KiB  sha256:%s\n' "$f" $(( $(stat -c%s "$f") / 1024 )) "$(sha256sum "$f" | cut -c1-16)"
+          done
+      - run: flutter pub get
+      - name: Clean previous build
+        run: |
+          flutter clean
+          if (Test-Path build) { Remove-Item build -Recurse -Force }
+        shell: pwsh
+      - name: Verify Visual Studio
+        shell: pwsh
+        run: |
+          vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          cmake --version
+          msbuild -version
+          echo "CMAKE_GENERATOR=$env:CMAKE_GENERATOR"
+      - name: Build Windows
+        env:
+          CMAKE_GENERATOR: "Visual Studio 17 2022"
+        run: flutter build windows --release --dart-define=VOIDRAU_VERSION=${{ needs.version.outputs.version }}
+      - name: Stage sidecars
+        shell: pwsh
+        run: |
+          $out = "build\windows\x64\runner\Release"
+          if (-not (Test-Path $out)) { $out = "build\windows\runner\Release" }
+          Copy-Item third_party\windows\* $out -Force
+          Get-ChildItem $out -Filter *.exe | Select-Object Name, Length | Format-Table -AutoSize
+          Get-ChildItem $out -Filter *.dll | Select-Object Name, Length | Format-Table -AutoSize
+          New-Item -ItemType Directory -Force release | Out-Null
+          $ver = "${{ needs.version.outputs.version }}"
+          Compress-Archive -Path "$out\*" -DestinationPath "release\VoidrauVPN-v$ver-Windows-x64-Portable.zip" -Force
+          # Export an ABSOLUTE path: ISCC resolves relative Source paths against
+          # the script directory (scripts\), not the workspace root.
+          echo "OUT=$((Resolve-Path $out).Path)" >> $env:GITHUB_ENV
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          $ver = "${{ needs.version.outputs.version }}"
+          $out = $env:OUT
+          if ([string]::IsNullOrWhiteSpace($out)) { $out = "build\windows\x64\runner\Release" }
+          # ISCC resolves relative paths against the script's directory, so make
+          # BuildDir absolute before handing it to Inno Setup.
+          if ([System.IO.Path]::IsPathRooted($out)) {
+            $buildDir = $out
+          } else {
+            $buildDir = Join-Path $env:GITHUB_WORKSPACE $out
+          }
+          if (-not (Test-Path $buildDir)) {
+            throw "Flutter build output directory not found: $buildDir"
+          }
+          $buildDir = (Resolve-Path $buildDir).Path
+          & $iscc "/DMyAppVersion=$ver" "/DBuildDir=$buildDir" scripts\voidrau.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          Get-ChildItem release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: |
+            release/*.exe
+            release/*.zip
+
+  publish:
+    needs: [version, android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Checksums and publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NOTES_BODY: ${{ needs.version.outputs.notes }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.version.outputs.version }}"
+          TAG="v${VERSION}"
+          PRE="${{ needs.version.outputs.prerelease }}"
+          mkdir -p release
+          find dist -type f \( -name '*.apk' -o -name '*.aab' -o -name '*.exe' -o -name '*.zip' \) -exec cp {} release/ \;
+          (cd release && sha256sum * > SHA256SUMS.txt)
+          ls -la release
+          USER_NOTES="${NOTES_BODY:-}"
+          NOTES=$(cat <<EOF
+          ## VoidrauVPN v${VERSION}
+
+          ${USER_NOTES}
+
+          > **Important:** as soon as a release is published, older builds stop
+          > working. If you are running an older version, the app tells you to
+          > install this one — the installer, the notes and support live in the
+          > Telegram channel: ${CHANNEL_URL}
+
+          ### Downloads
+          - \`VoidrauVPN-v${VERSION}-Android-Universal.apk\` — Android 7.0 (API 24) and newer (all ABIs)
+          - \`VoidrauVPN-v${VERSION}-Android-arm64-v8a.apk\` — 64-bit ARM (most phones)
+          - \`VoidrauVPN-v${VERSION}-Android-armeabi-v7a.apk\` — 32-bit ARM
+          - \`VoidrauVPN-v${VERSION}-Android-x86_64.apk\` — 64-bit x86 emulators
+          - \`VoidrauVPN-v${VERSION}-Android.aab\` — Play App Bundle
+          - \`VoidrauVPN-v${VERSION}-Windows-x64-Installer.exe\` — Windows 8.1 through 11 (x64)
+          - \`VoidrauVPN-v${VERSION}-Windows-x64-Portable.zip\` — portable Windows build
+
+          Installing over an older version keeps your settings. The in-app updater
+          reads this GitHub Release.
+
+          EOF
+          )
+          # The heredoc body keeps the workflow's indentation; strip it so the
+          # notes render as Markdown (and read cleanly inside the app).
+          NOTES=$(printf '%s\n' "$NOTES" | sed -e 's/^ *//')
+          PREFLAG=()
+          if [[ "$PRE" == "true" ]]; then PREFLAG=(--prerelease); fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber
+            gh release edit "$TAG" --title "VoidrauVPN v${VERSION}" --notes "$NOTES" ${PREFLAG[@]+"${PREFLAG[@]}"}
+          else
+            gh release create "$TAG" release/* --title "VoidrauVPN v${VERSION}" --notes "$NOTES" ${PREFLAG[@]+"${PREFLAG[@]}"}
+          fi

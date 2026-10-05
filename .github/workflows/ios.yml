@@ -1,0 +1,309 @@
+name: iOS - Build and TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'iOS marketing version (e.g. 1.1.0)'
+        required: true
+        default: '1.1.0'
+        type: string
+      build_number:
+        description: 'Unique increasing Apple build number; empty uses run number + attempt'
+        required: false
+        type: string
+      upload_testflight:
+        description: 'Sign and upload to App Store Connect (requires Apple secrets)'
+        default: false
+        type: boolean
+      publish_release:
+        description: 'Publish the signed IPA + corresponding source as a GitHub pre-release (needs upload_testflight)'
+        default: false
+        type: boolean
+      distribution_rights_reviewed:
+        description: 'I have reviewed Aether AGPL licensing and Apple VPN/privacy/export requirements'
+        default: false
+        type: boolean
+  pull_request:
+    paths:
+      - 'lib/**'
+      - 'test/**'
+      - 'pubspec.yaml'
+      - 'overlays/ios/**'
+      - 'native/ios-core/**'
+      - 'scripts/ios/**'
+      - 'scripts/pins.json'
+      - '.github/workflows/ios.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+    # The publish job must release exactly the artifact this job produced, so the
+    # names are computed once and handed over instead of being repeated.
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      build_number: ${{ steps.meta.outputs.build_number }}
+      artifact: ${{ steps.meta.outputs.artifact }}
+      signed: ${{ steps.meta.outputs.signed }}
+    env:
+      IOS_BUNDLE_ID: ${{ vars.IOS_BUNDLE_ID || 'pm.dnschanger.voidrauvpn' }}
+      APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+      IOS_VERSION: ${{ inputs.version || '1.1.0' }}
+      IOS_BUILD_NUMBER: ${{ inputs.build_number || format('{0}.{1}', github.run_number, github.run_attempt) }}
+      IOS_UPLOAD: ${{ inputs.upload_testflight && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Release metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          {
+            echo "version=$IOS_VERSION"
+            echo "build_number=$IOS_BUILD_NUMBER"
+            echo "artifact=VoidrauVPN-iOS-$IOS_VERSION-$IOS_BUILD_NUMBER"
+            echo "signed=$IOS_UPLOAD"
+          } >> "$GITHUB_OUTPUT"
+      - name: Validate inputs and Apple SDK
+        env:
+          RIGHTS_REVIEWED: ${{ inputs.distribution_rights_reviewed }}
+          PUBLISH_RELEASE: ${{ inputs.publish_release }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re
+          assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', os.environ['IOS_VERSION']), 'Use version x.y.z'
+          assert re.fullmatch(r'[0-9]+(?:\.[0-9]+){0,2}', os.environ['IOS_BUILD_NUMBER']), 'Invalid Apple build number'
+          assert re.fullmatch(r'[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+', os.environ['IOS_BUNDLE_ID']), 'Invalid bundle ID'
+          if os.environ['IOS_UPLOAD'] == 'true':
+              assert os.environ.get('RIGHTS_REVIEWED') == 'true', 'Review distribution rights before upload'
+              assert re.fullmatch(r'[A-Z0-9]{10}', os.environ.get('APPLE_TEAM_ID', '')), 'Set APPLE_TEAM_ID variable'
+          if os.environ.get('PUBLISH_RELEASE') == 'true':
+              # An unsigned archive has no IPA and is not installable; publishing it
+              # would put a file nobody can use behind a release page.
+              assert os.environ['IOS_UPLOAD'] == 'true', 'publish_release needs upload_testflight: only a signed build produces an IPA'
+          PY
+          # Apple requires an accepted SDK; do not silently archive with an old one.
+          XCODE=$(find /Applications -maxdepth 1 -name 'Xcode_26*.app' | sort -V | tail -1)
+          test -n "$XCODE" || { echo '::error::Runner lacks Xcode 26; update the macOS runner image'; exit 1; }
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.7'
+          channel: stable
+          cache: true
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - name: Build dependencies
+        run: |
+          brew install cmake ninja
+          gem install xcodeproj -v 1.27.0 --no-document
+          gem install cocoapods -v 1.16.2 --no-document
+          python3 -m venv "$RUNNER_TEMP/ios-python"
+          "$RUNNER_TEMP/ios-python/bin/pip" install Pillow==11.3.0
+          echo "$RUNNER_TEMP/ios-python/bin" >> "$GITHUB_PATH"
+      - name: Install signing material
+        if: inputs.upload_testflight
+        env:
+          IOS_SIGNING_DIR: ${{ runner.temp }}/ios-signing
+          IOS_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          IOS_APP_PROFILE_BASE64: ${{ secrets.IOS_APP_PROFILE_BASE64 }}
+          IOS_TUNNEL_PROFILE_BASE64: ${{ secrets.IOS_TUNNEL_PROFILE_BASE64 }}
+          ASC_PRIVATE_KEY_BASE64: ${{ secrets.ASC_PRIVATE_KEY_BASE64 }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.IOS_KEYCHAIN_PASSWORD }}
+        run: |
+          bash scripts/ios/install_signing.sh
+          echo "IOS_SIGNING_DIR=$IOS_SIGNING_DIR" >> "$GITHUB_ENV"
+      - name: Generate iOS app and extension
+        run: bash scripts/ios/bootstrap.sh
+      - name: Verify generated Xcode targets and idempotency
+        run: |
+          cp ios/Runner.xcodeproj/project.pbxproj "$RUNNER_TEMP/project-before.pbxproj"
+          ruby scripts/ios/configure_project.rb
+          cmp "$RUNNER_TEMP/project-before.pbxproj" ios/Runner.xcodeproj/project.pbxproj
+          ruby scripts/ios/tests/verify_project.rb
+      - name: Flutter analyze
+        run: |
+          set -euo pipefail
+          mkdir -p build/ios/logs
+          # Legacy UI APIs still support the Android/Windows Flutter 3.27 pin.
+          # New-SDK deprecation infos are visible but don't block an iOS archive;
+          # warnings and errors remain fatal, and Linux CI keeps its strict gate.
+          flutter analyze --no-fatal-infos 2>&1 | tee build/ios/logs/analyze.txt
+      - name: Flutter tests
+        run: |
+          set -euo pipefail
+          mkdir -p build/ios/logs
+          flutter test 2>&1 | tee build/ios/logs/test.txt
+      - name: iOS contract tests
+        run: python3 -m unittest discover -s scripts/ios/tests -v
+      - name: Build native VPN libraries
+        shell: bash
+        run: |
+          # +e: the runner template enables -e; capture the pipeline status first.
+          set +e -u -o pipefail
+          mkdir -p build/ios/logs
+          bash scripts/ios/build_native.sh 2>&1 | tee build/ios/logs/native.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" != "0" ]; then
+            # Raw-log CDN is often unreachable through the API; surface the tail
+            # as annotations (10/step cap) so failures are diagnosable from checks.
+            tail -n 40 build/ios/logs/native.log | python3 -c 'import sys; print("::error::native tail%0A" + "%0A".join(l.rstrip() for l in sys.stdin).replace("%", "%25"))'
+            exit "$status"
+          fi
+      - name: Test shared Swift configuration
+        run: |
+          xcrun swiftc overlays/ios/Shared/TunnelConfiguration.swift scripts/ios/tests/ConfigurationTests.swift -o "$RUNNER_TEMP/ios-config-tests"
+          "$RUNNER_TEMP/ios-config-tests"
+      - name: Archive app and embedded extension
+        shell: bash
+        run: |
+          set +e -u -o pipefail
+          bash scripts/ios/archive.sh
+          status=$?
+          if [ "$status" != "0" ]; then
+            tail -n 40 build/ios/logs/archive.log 2>/dev/null | python3 -c 'import sys; print("::error::archive tail%0A" + "%0A".join(l.rstrip() for l in sys.stdin).replace("%", "%25"))'
+            exit "$status"
+          fi
+      - name: Bundle corresponding source and licenses
+        if: inputs.upload_testflight
+        run: bash scripts/ios/package_source.sh
+      - name: Save signed IPA and corresponding source
+        if: inputs.upload_testflight
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.artifact }}
+          path: |
+            build/ios/ipa/*.ipa
+            build/ios/source/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload to App Store Connect
+        if: inputs.upload_testflight
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          API_PRIVATE_KEYS_DIR: ${{ runner.temp }}/ios-signing
+        run: |
+          set -euo pipefail
+          test -n "$ASC_KEY_ID" && test -n "$ASC_ISSUER_ID"
+          IPA=$(find build/ios/ipa -name '*.ipa' -maxdepth 1 -print -quit)
+          test -n "$IPA"
+          xcrun altool --upload-app --type ios --file "$IPA" --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+          echo '### Uploaded to App Store Connect' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Apple must finish processing. Configure TestFlight groups, export compliance and external beta review in App Store Connect. This is not an App Store publication.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Unsigned build result
+        if: ${{ !inputs.upload_testflight }}
+        run: |
+          echo '### Unsigned iPhone archive built successfully' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Compilation only: this archive is not installable and has not been uploaded. Enable upload_testflight after configuring Apple signing.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Save build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iOS-build-logs-${{ github.run_number }}-${{ github.run_attempt }}
+          path: build/ios/logs/
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Remove Apple secrets and temporary keychain
+        if: always()
+        env:
+          IOS_SIGNING_DIR: ${{ runner.temp }}/ios-signing
+        run: python3 scripts/ios/cleanup_signing.py
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build
+    # Opt-in and dispatch-only: a pull request, a test-only run or an unsigned
+    # archive never publishes anything to the Releases page.
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      VERSION: ${{ needs.build.outputs.version }}
+      BUILD_NUMBER: ${{ needs.build.outputs.build_number }}
+      TAG: ios-v${{ needs.build.outputs.version }}
+      CHANNEL_URL: 'https://t.me/Voidrau'
+    steps:
+      - name: Download the signed build
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: staging
+      - name: Stage IPA, corresponding source and checksums
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          IPA=$(find staging -type f -name '*.ipa' -print -quit)
+          SOURCE=$(find staging -type f -name 'VoidrauVPN-ios-source.tar.gz' -print -quit)
+          NOTICE=$(find staging -type f -name 'NOTICE.md' -print -quit)
+          test -n "$IPA" || { echo '::error::No IPA in the signed build artifact'; exit 1; }
+          # A binary release without its source bundle is not an AGPL correspondence:
+          # refuse to publish rather than ship a partial release.
+          test -n "$SOURCE" || { echo '::error::No corresponding-source archive in the build artifact'; exit 1; }
+          cp "$IPA" "release/VoidrauVPN-iOS-${VERSION}-${BUILD_NUMBER}.ipa"
+          cp "$SOURCE" "release/VoidrauVPN-iOS-${VERSION}-${BUILD_NUMBER}-corresponding-source.tar.gz"
+          if [ -n "$NOTICE" ]; then cp "$NOTICE" release/NOTICE.md; fi
+          (cd release && sha256sum * > SHA256SUMS.txt)
+          ls -l release
+      - name: Publish GitHub Release
+        run: |
+          set -euo pipefail
+          TITLE="VoidrauVPN iOS v${VERSION} (build ${BUILD_NUMBER})"
+          NOTES=$(cat <<EOF
+          ## VoidrauVPN iOS v${VERSION} (build ${BUILD_NUMBER})
+
+          Signed iPhone/iPad build of commit \`${GITHUB_SHA}\`, produced by the
+          \`iOS - Build and TestFlight\` workflow and uploaded to App Store Connect for
+          TestFlight.
+
+          > **This is deliberately a pre-release.** GitHub keeps \`releases/latest\`
+          > pointing at the Android/Windows \`v*\` release, so the in-app updater of
+          > existing installs is untouched by an iOS build. Install on a device through
+          > TestFlight (build ${BUILD_NUMBER}) or a sideloading tool; the App Store
+          > listing is a separate, manual step.
+          >
+          > Notes, support and Android/Windows installers: ${CHANNEL_URL}
+
+          ### Downloads
+          - \`VoidrauVPN-iOS-${VERSION}-${BUILD_NUMBER}.ipa\` — signed app with the embedded PacketTunnel extension
+          - \`VoidrauVPN-iOS-${VERSION}-${BUILD_NUMBER}-corresponding-source.tar.gz\` — complete corresponding source for this binary (pinned Aether revision and HEV patch)
+          - \`NOTICE.md\` — license notices
+          - \`SHA256SUMS.txt\` — checksums of the files above
+
+          EOF
+          )
+          # The heredoc body keeps the workflow's indentation; strip it so the notes
+          # render as Markdown on the release page.
+          NOTES=$(printf '%s\n' "$NOTES" | sed -e 's/^ *//')
+          printf '%s\n' "$NOTES" > notes.md
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber --repo "$REPO"
+            gh release edit "$TAG" --title "$TITLE" --notes-file notes.md --prerelease --repo "$REPO"
+          else
+            # Re-running for the same version updates the release instead of piling up
+            # tags; the tag always points at the commit that produced the IPA.
+            gh release create "$TAG" release/* --title "$TITLE" --notes-file notes.md --prerelease --target "$GITHUB_SHA" --repo "$REPO"
+          fi
+          URL=$(gh release view "$TAG" --repo "$REPO" --json url --jq .url)
+          {
+            echo '### Published GitHub pre-release'
+            echo
+            echo "- ${URL} (tag \`${TAG}\`)"
+            echo '- Pre-release on purpose: `releases/latest` — the endpoint the in-app updater reads — still resolves to the Android/Windows `v*` release.'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,20 @@
+[package]
+name = "voidrau-ios-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "voidrau_ios_core"
+crate-type = ["staticlib"]
+
+[dependencies]
+aether = { path = "../../third_party/aether/aether" }
+tokio = { version = "1.47", features = ["rt-multi-thread", "sync", "time"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
