@@ -166,6 +166,12 @@ class SettingsPage extends StatelessWidget {
           icon: const Icon(Icons.open_in_new, size: 16),
           label: Text(s.openRelease),
         ),
+        const SizedBox(height: 8),
+        FilledButton.icon(
+          onPressed: () => Links.openBot(),
+          icon: const Icon(Icons.smart_button_rounded, size: 18),
+          label: Text(s.getFromBot),
+        ),
         ListTile(
           contentPadding: EdgeInsets.zero,
           leading: TelegramButton(

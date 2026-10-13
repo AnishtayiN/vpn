@@ -16,4 +16,7 @@ class Links {
 
   /// Official VoidrauVPN channel — new releases and install instructions.
   static Future<bool> openTelegram() => open(AppInfo.telegramUrl);
+
+  /// The license/download bot — where users fetch the newest build.
+  static Future<bool> openBot() => open(AppInfo.botUrl);
 }

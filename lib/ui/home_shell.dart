@@ -12,7 +12,6 @@ import 'pages/about_page.dart';
 import 'pages/config_page.dart';
 import 'pages/connect_page.dart';
 import 'pages/diagnostics_page.dart';
-import 'pages/downloads_page.dart';
 import 'pages/license_page.dart';
 import 'pages/settings_page.dart';
 import 'pages/speed_page.dart';
@@ -181,7 +180,6 @@ class _HomeShellState extends State<HomeShell> {
           s.navDiag,
           s.navAbout,
           s.navLicense,
-          s.navDownloads,
         ];
         final toast = c.toast;
         if (toast != null && toast.isNotEmpty) {
@@ -235,7 +233,6 @@ class _HomeShellState extends State<HomeShell> {
               DiagnosticsPage(controller: c),
               AboutPage(controller: c),
               VoidrauLicensePage(onChanged: () => setState(() {})),
-              const DownloadsPage(),
             ],
           ),
         );
@@ -360,7 +357,6 @@ class _Drawer extends StatelessWidget {
             item(5, Icons.terminal, s.navDiag),
             item(6, Icons.info_outline, s.navAbout),
             item(7, Icons.verified_user_outlined, s.navLicense),
-            item(8, Icons.download_rounded, s.navDownloads),
             const Spacer(),
             const Divider(),
             ListTile(

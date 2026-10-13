@@ -96,6 +96,13 @@ class ForceUpdatePage extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 18),
+            // ── Alternative: let the Telegram bot deliver the new build.
+            FilledButton.tonalIcon(
+              onPressed: () => Links.openBot(),
+              icon: const Icon(Icons.smart_button_rounded, size: 18),
+              label: Text(s.getFromBot),
+            ),
+            const SizedBox(height: 10),
             // ── One-tap automatic update: download with progress, then install.
             FilledButton.icon(
               onPressed: (c.downloading || c.installStarted)

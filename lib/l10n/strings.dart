@@ -470,9 +470,10 @@ class S {
 
 
   // ── downloads ────────────────────────────────────────────────────────────
-  String get navDownloads => isFa ? 'دانلود' : 'Downloads';
   String get downloadsError => isFa ? 'خطا در دریافت لیست نسخه‌ها' : 'Failed to load releases';
   String get retry => isFa ? 'تلاش دوباره' : 'Retry';
+  String get getFromBot => isFa ? 'دریافت نسخه جدید از ربات' : 'Get the new build from the bot';
+  String get getFromBotHelp => isFa ? 'نسخهٔ جدید را ربات تلگرام برایت می‌فرستد' : 'The Telegram bot sends you the new build';
   String downloadsAssets(int n) => isFa ? '$n فایل' : '$n files';
   String get downloadsTrialLocked => isFa
       ? 'دانلود نسخه‌های جدید فقط برای لایسنس خریداری‌شده فعال است'

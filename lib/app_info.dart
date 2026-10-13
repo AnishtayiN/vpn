@@ -31,6 +31,8 @@ class AppInfo {
   /// This is the only link shown to the user when an update is available.
   static const telegramHandle = '@Voidrau';
   static const telegramUrl = 'https://t.me/Voidrau';
+  static const botUsername = 'VoidRauBot';
+  static const botUrl = 'https://t.me/$botUsername';
 
   /// License bot — trials, purchases, referrals and keys.
   static const botHandle = '@VoidrauLicenseBot';
