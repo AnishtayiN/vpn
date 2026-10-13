@@ -233,7 +233,7 @@ jobs:
       - name: Build Windows
         env:
           CMAKE_GENERATOR: "Visual Studio 17 2022"
-        run: flutter build windows --release --dart-define=VOIDRAU_VERSION=${{ needs.version.outputs.version }} --dart-define=VOIDRAU_LICENSE_API=https://voidrau-license.anishtayin.workers.dev
+        run: flutter build windows --release --dart-define=VOIDRAU_VERSION=${{ needs.version.outputs.version }} --dart-define=VOIDRAU_LICENSE_API=https://voidrau.massagetoanishtayin.workers.dev
       - name: Stage sidecars
         shell: pwsh
         run: |
