@@ -6,6 +6,7 @@ import '../l10n/strings.dart';
 import '../models/settings.dart';
 import '../services/links.dart';
 import '../models/engine_state.dart';
+import '../services/license_service.dart';
 import '../services/vpn_controller.dart';
 import '../theme/voidrau_theme.dart';
 import 'pages/about_page.dart';
@@ -204,6 +205,15 @@ class _HomeShellState extends State<HomeShell> {
             hasUpdate: c.update?.available == true,
             phase: c.snapshot.phase,
             onSelect: (i) {
+              // Config & Settings are paid-only: trial/referral users cannot
+              // enter them at all (user request).
+              if ((i == 1 || i == 4) && !LicenseService.instance.isPaid) {
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                  content: Text('🔒 این بخش قفل است — لایسنس خریداری کنید'),
+                ));
+                return;
+              }
               setState(() => index = i);
               Navigator.pop(context);
             },
@@ -319,11 +329,15 @@ class _Drawer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    Widget item(int i, IconData icon, String label, {bool badge = false}) {
+    Widget item(int i, IconData icon, String label,
+        {bool badge = false, bool lockable = false}) {
+      final showLock = lockable && !LicenseService.instance.isPaid;
       final active = index == i;
       return ListTile(
         selected: active,
-        leading: Icon(icon, color: active ? VoidrauColors.cyan : VoidrauColors.muted),
+        leading: showLock
+            ? const Icon(Icons.lock_outline_rounded, color: VoidrauColors.coral)
+            : Icon(icon, color: active ? VoidrauColors.cyan : VoidrauColors.muted),
         title: Text(label),
         trailing: badge
             ? const CircleAvatar(
@@ -350,10 +364,10 @@ class _Drawer extends StatelessWidget {
             ),
             const Divider(),
             item(0, Icons.shield_outlined, s.navConnect),
-            item(1, Icons.tune, s.navConfig),
+            item(1, Icons.tune, s.navConfig, lockable: true),
             item(2, Icons.speed_rounded, s.navSpeed),
             item(3, Icons.alt_route_rounded, s.navSplit),
-            item(4, Icons.settings_outlined, s.navSettings, badge: hasUpdate),
+            item(4, Icons.settings_outlined, s.navSettings, badge: hasUpdate, lockable: true),
             item(5, Icons.terminal, s.navDiag),
             item(6, Icons.info_outline, s.navAbout),
             item(7, Icons.verified_user_outlined, s.navLicense),
