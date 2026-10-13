@@ -32,7 +32,6 @@ class ConfigPage extends StatelessWidget {
             style: Theme.of(context).textTheme.bodySmall,
           ),
         ),
-en: [
         if (Platform.isIOS)
           Text(IosPolicy.help(s.isFa),
               style: const TextStyle(color: VoidrauColors.muted, height: 1.5)),

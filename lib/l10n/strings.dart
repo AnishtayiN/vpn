@@ -472,6 +472,7 @@ class S {
   // ── downloads ────────────────────────────────────────────────────────────
   String get navDownloads => isFa ? 'دانلود' : 'Downloads';
   String get downloadsError => isFa ? 'خطا در دریافت لیست نسخه‌ها' : 'Failed to load releases';
+  String get retry => isFa ? 'تلاش دوباره' : 'Retry';
   String downloadsAssets(int n) => isFa ? '$n فایل' : '$n files';
   String get downloadsTrialLocked => isFa
       ? 'دانلود نسخه‌های جدید فقط برای لایسنس خریداری‌شده فعال است'
