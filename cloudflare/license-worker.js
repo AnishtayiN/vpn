@@ -156,21 +156,46 @@ async function releaseFiles(env) {
 
 const humanSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.round(n / 1024) + ' KB';
 
+const DL_FILES_KEY = 'dlfiles';
+const dlLabel = (n) => n.replace(/^VoidrauVPN-/, '').replace(/\.apk$|\.exe$|\.zip$/i, '');
+
 async function doDownloads(env, tid) {
   const files = (await releaseFiles(env)) || [];
   const apk = files.filter((f) => f.name.toLowerCase().endsWith('.apk'));
   const exe = files.filter((f) => f.name.toLowerCase().endsWith('.exe'));
   const other = files.filter((f) => f.name.toLowerCase().endsWith('.zip'));
-  const pick = [...apk, ...exe, ...other].slice(0, 5);
+  const pick = [...apk, ...exe, ...other].slice(0, 8);
   if (!pick.length) return { text: '⚠️ فعلاً فایلی برای ارسال پیدا نشد. بعداً دوباره امتحان کنید.' };
-  // Send each file as a real document inside the chat (Telegram fetches it from GitHub).
-  for (const f of pick) {
-    await tg(env.BOT_TOKEN, 'sendDocument', { chat_id: tid, document: f.url });
-  }
+  // remember the list so callback indexes resolve to the same file
+  await env.LICENSES.put(`${DL_FILES_KEY}:${tid}`, JSON.stringify(pick), { expirationTtl: 3600 });
+  const rows = pick.map((f, i) => [{ text: `📄 ${dlLabel(f.name)} (${humanSize(f.size)})`, callback_data: `file:${i}` }]);
   return {
-    text: '📥 نسخه‌های برنامه بالا فرستاده شد 👆\nروی فایل بزنید و ذخیره/نصب کنید.\n\n🤖 اندروید: فایل APK را نصب کنید\n🪟 ویندوز: Installer یا Portable',
-    reply_markup: { inline_keyboard: [[{ text: '🔄 ارسال دوباره فایل‌ها', callback_data: 'dl' }]] },
+    text: '📥 نسخهٔ مورد نظر را انتخاب کنید تا همین‌جا برایتان ارسال شود:',
+    reply_markup: { inline_keyboard: [...rows] },
   };
+}
+
+// send one file as a real document: worker downloads from GitHub and uploads
+// to Telegram as multipart (send-by-URL fails on GitHub release redirects).
+async function sendReleaseFile(env, tid, url, name) {
+  const ghHeaders = {};
+  if (env.GITHUB_TOKEN) ghHeaders.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
+  const res = await fetch(url, { headers: ghHeaders, redirect: 'follow' });
+  if (!res.ok || !res.body) throw new Error(`github ${res.status}`);
+  const buf = await res.arrayBuffer();
+  if (buf.byteLength > 45 * 1024 * 1024) {
+    await tg(env.BOT_TOKEN, 'sendMessage', {
+      chat_id: tid,
+      text: `⚠️ فایل ${name} حجمش بیش از حد مجاز ربات است (${humanSize(buf.byteLength)}).\nاز نسخهٔ مخصوص دستگاه‌تان استفاده کنید (arm64 برای اکثر گوشی‌ها).`,
+    });
+    return;
+  }
+  const fd = new FormData();
+  fd.append('chat_id', String(tid));
+  fd.append('document', new Blob([buf]), name);
+  const out = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`, { method: 'POST', body: fd });
+  const j = await out.json().catch(() => ({}));
+  if (!j.ok) throw new Error(j.description || 'telegram upload failed');
 }
 
 async function doHelp() {
@@ -319,6 +344,24 @@ async function handle(upd, env, steps) {
       await env.LICENSES.put('stat:pending', String(np));
     }
     else if (cb.data === 'dl') out = await doDownloads(env, tid);
+    else if (cb.data.startsWith('file:')) {
+      const idx = parseInt(cb.data.slice(5));
+      let pick = [];
+      try { pick = JSON.parse((await env.LICENSES.get(`${DL_FILES_KEY}:${tid}`)) || '[]'); } catch (_) {}
+      const f = pick[idx];
+      if (!f) {
+        out = await doDownloads(env, tid);
+      } else {
+        await tg(token, 'answerCallbackQuery', { callback_query_id: cb.id, text: '⏳ در حال ارسال...' }, env, steps);
+        try {
+          await sendReleaseFile(env, tid, f.url, f.name);
+          await tg(token, 'sendMessage', { chat_id: tid, text: '✅ فایل ارسال شد 👆\n🤖 اندروید: نصب کنید\n🪟 ویندوز: اجرا کنید' });
+        } catch (e) {
+          await tg(token, 'sendMessage', { chat_id: tid, text: `❌ ارسال فایل ناموفق بود: ${e.message}\nیک‌بار دیگر امتحان کنید.`, reply_markup: { inline_keyboard: [[{ text: '🔄 دوباره', callback_data: `file:${idx}` }], [{ text: '📜 لیست فایل‌ها', callback_data: 'dl' }]] } });
+        }
+        out = null;
+      }
+    }
     else if (cb.data === 'help') out = await doHelp();
     else if (cb.data === 'support') out = await doSupport(env);
     else if (cb.data === 'status') out = await doStatus(env, tid);
