@@ -30,6 +30,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+          LICAPI: https://voidrau-license.anishtayin.workers.dev
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   FLUTTER_VERSION: "3.27.4"
   JAVA_VERSION: "17"
@@ -135,10 +136,12 @@ jobs:
           VER="${{ needs.version.outputs.version }}"
           flutter build apk --release \
             --target-platform android-arm,android-arm64,android-x64 \
-            --dart-define=VOIDRAU_VERSION=$VER
+            --dart-define=VOIDRAU_VERSION=$VER \
+            --dart-define=VOIDRAU_LICENSE_API=$LICAPI
           flutter build apk --release --split-per-abi \
             --target-platform android-arm,android-arm64,android-x64 \
-            --dart-define=VOIDRAU_VERSION=$VER
+            --dart-define=VOIDRAU_VERSION=$VER \
+            --dart-define=VOIDRAU_LICENSE_API=$LICAPI
           mkdir -p release
           cp build/app/outputs/flutter-apk/app-release.apk \
             "release/VoidrauVPN-v${VER}-Android-Universal.apk"
@@ -149,7 +152,8 @@ jobs:
           cp build/app/outputs/flutter-apk/app-x86_64-release.apk \
             "release/VoidrauVPN-v${VER}-Android-x86_64.apk"
           flutter build appbundle --release \
-            --dart-define=VOIDRAU_VERSION=$VER
+            --dart-define=VOIDRAU_VERSION=$VER \
+            --dart-define=VOIDRAU_LICENSE_API=$LICAPI
           cp build/app/outputs/bundle/release/app-release.aab \
             "release/VoidrauVPN-v${VER}-Android.aab"
       - uses: actions/upload-artifact@v4
@@ -229,7 +233,7 @@ jobs:
       - name: Build Windows
         env:
           CMAKE_GENERATOR: "Visual Studio 17 2022"
-        run: flutter build windows --release --dart-define=VOIDRAU_VERSION=${{ needs.version.outputs.version }}
+        run: flutter build windows --release --dart-define=VOIDRAU_VERSION=${{ needs.version.outputs.version }} --dart-define=VOIDRAU_LICENSE_API=https://voidrau-license.anishtayin.workers.dev
       - name: Stage sidecars
         shell: pwsh
         run: |

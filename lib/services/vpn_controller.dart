@@ -12,6 +12,7 @@ import '../l10n/strings.dart';
 import '../models/engine_state.dart';
 import '../models/settings.dart';
 import 'core_args.dart';
+import 'license_service.dart';
 import 'exit_pin.dart';
 import 'ios_policy.dart';
 import 'platform_engine.dart';
@@ -211,6 +212,8 @@ class VpnController extends ChangeNotifier {
     // The mandatory gate runs regardless of the "automatic checks" preference:
     // a published release has to reach every running app.
     unawaited(refreshUpdate(force: true));
+    // Load the cached license so the gate works offline from the first tap.
+    await LicenseService.instance.load();
     _updateTimer = Timer.periodic(_updateInterval, (_) {
       if (settings.autoUpdate) unawaited(refreshUpdate());
     });
@@ -428,6 +431,13 @@ class VpnController extends ChangeNotifier {
       toast = s.updateRequiredHeadline;
       notifyListeners();
       unawaited(refreshUpdate());
+      return;
+    }
+    // License gate: connecting requires an active (or graced) license.
+    if (snapshot.phase != EnginePhase.connected &&
+        !(await LicenseService.instance.check())) {
+      toast = s.licenseRequiredToast;
+      notifyListeners();
       return;
     }
     if (snapshot.phase == EnginePhase.connected ||

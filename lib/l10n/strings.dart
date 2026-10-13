@@ -468,6 +468,28 @@ class S {
       ? 'قواعد تفکیکی ذخیره شد — برای اعمال، اتصال دوباره لازم است'
       : 'Split rules saved — reconnect to apply them';
 
+
+  // ── license ──────────────────────────────────────────────────────────────
+  String get navLicense => isFa ? 'لایسنس' : 'License';
+  String get licenseActiveTitle => isFa ? 'لایسنس فعال است' : 'License active';
+  String get licenseInactiveTitle => isFa ? 'لایسنس فعال نیست' : 'No active license';
+  String get licenseInactiveBody => isFa
+      ? 'برای استفاده از VPN ابتدا لایسنس بگیرید — تست رایگان ۲۴ ساعته از طریق ربات تلگرام.'
+      : 'Get a license to use the VPN — start with a free 24h trial via the Telegram bot.';
+  String get licenseRemaining => isFa ? 'زمان باقی‌مانده' : 'Time remaining';
+  String get licensePlan => isFa ? 'پلن' : 'Plan';
+  String get licenseTrial => isFa ? 'تست رایگان ۲۴ ساعته (ربات تلگرام)' : 'Free 24h trial (Telegram bot)';
+  String get licenseBuy => isFa ? 'خرید لایسنس / شارژ' : 'Buy / top-up license';
+  String get licenseKeyLabel => isFa ? 'کد لایسنس' : 'License key';
+  String get licenseActivate => isFa ? 'فعال‌سازی' : 'Activate';
+  String get licenseOk => isFa ? '✅ لایسنس فعال شد' : '✅ License activated';
+  String get licenseBadKey => isFa ? '❌ کد نامعتبر یا منقضی است' : '❌ Invalid or expired key';
+  String get licenseSignOut => isFa ? 'خروج از لایسنس' : 'Sign out of license';
+  String get licenseReferral => isFa ? 'دعوت دوستان و گرفتن روز هدیه' : 'Invite friends, earn free days';
+  String get licenseRequiredToast => isFa
+      ? 'لایسنس فعال نیست — از تب «لایسنس» تست رایگان بگیرید'
+      : 'No active license — get a free trial from the License tab';
+
   // ── diagnostics additions ────────────────────────────────────────────────
   String get exitLock => isFa ? 'قفل کشور خروجی در هسته' : 'Core exit lock';
   String get httpProxy => isFa ? 'پروکسی HTTP محلی' : 'Local HTTP proxy';

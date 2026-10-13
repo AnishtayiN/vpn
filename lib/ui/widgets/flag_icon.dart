@@ -524,31 +524,83 @@ class _FlagPainter extends CustomPainter {
   }
 
   void _iranEmblem(Canvas canvas, Offset center, double r, Paint paint) {
-    // Stylised stand-in for the emblem: a central tulip stroke with two
-    // symmetric wings, plus the "bowl" stroke underneath.
+    // Lion & Sun (شیر و خورشید) — drawn from primitives, sized for tiny flags:
+    // a radiant sun disc behind a stylised walking lion holding a sword.
     final stroke = Paint()
       ..style = PaintingStyle.stroke
-      ..strokeWidth = math.max(0.8, r * 0.16)
+      ..strokeWidth = math.max(0.6, r * 0.10)
       ..strokeCap = StrokeCap.round
       ..color = paint.color;
-    canvas.drawLine(center.translate(0, -r * 0.9), center.translate(0, r * 0.5), stroke);
-    for (final s in [-1.0, 1.0]) {
-      final p = Path()
-        ..moveTo(center.dx + s * r * 0.75, center.dy - r * 0.15)
-        ..quadraticBezierTo(center.dx + s * r * 0.35, center.dy - r * 0.95,
-            center.dx + s * r * 0.12, center.dy - r * 0.85);
-      canvas.drawPath(p, stroke);
-      final hook = Path()
-        ..moveTo(center.dx + s * r * 0.72, center.dy - r * 0.2)
-        ..quadraticBezierTo(center.dx + s * r * 0.55, center.dy + r * 0.5,
-            center.dx + s * r * 0.18, center.dy + r * 0.62);
-      canvas.drawPath(hook, stroke);
+
+    // Sun: circle + alternating straight/wavy rays.
+    canvas.drawCircle(center, r * 0.52, Paint()..color = paint.color..style = PaintingStyle.stroke..strokeWidth = math.max(0.8, r * 0.12));
+    final rayCount = 12;
+    for (var i = 0; i < rayCount; i++) {
+      final a = i * 2 * math.pi / rayCount;
+      final dir = Offset(math.cos(a), math.sin(a));
+      canvas.drawLine(
+        center + dir * r * 0.62,
+        center + dir * r * 0.95,
+        stroke,
+      );
     }
-    final bowl = Path()
-      ..moveTo(center.dx - r * 0.82, center.dy + r * 0.55)
-      ..quadraticBezierTo(center.dx, center.dy + r * 1.05,
-          center.dx + r * 0.82, center.dy + r * 0.55);
-    canvas.drawPath(bowl, stroke);
+
+    // Lion (facing left): body, mane head, legs, raised sword tail.
+    final lion = Path()
+      // back line from tail to shoulders
+      ..moveTo(center.dx + r * 0.42, center.dy - r * 0.10)
+      ..quadraticBezierTo(center.dx + r * 0.20, center.dy - r * 0.34,
+          center.dx - r * 0.05, center.dy - r * 0.28)
+      // head top
+      ..quadraticBezierTo(center.dx - r * 0.25, center.dy - r * 0.30,
+          center.dx - r * 0.30, center.dy - r * 0.12)
+      // muzzle
+      ..quadraticBezierTo(center.dx - r * 0.40, center.dy - r * 0.05,
+          center.dx - r * 0.36, center.dy)
+      // chest down
+      ..quadraticBezierTo(center.dx - r * 0.28, center.dy + r * 0.10,
+          center.dx - r * 0.18, center.dy + r * 0.16)
+      // belly
+      ..quadraticBezierTo(center.dx + r * 0.05, center.dy + r * 0.24,
+          center.dx + r * 0.30, center.dy + r * 0.10)
+      // hind quarter down to tail root
+      ..quadraticBezierTo(center.dx + r * 0.46, center.dy + r * 0.02,
+          center.dx + r * 0.42, center.dy - r * 0.10)
+      ..close();
+    canvas.drawPath(lion, stroke);
+
+    // Mane: small arcs around the head.
+    for (var i = 0; i < 5; i++) {
+      final a = math.pi * 0.85 + i * math.pi * 0.14;
+      final d1 = Offset(math.cos(a), -math.sin(a));
+      canvas.drawLine(
+        center + Offset(-r * 0.30, -r * 0.14) + d1 * r * 0.10,
+        center + Offset(-r * 0.30, -r * 0.14) + d1 * r * 0.24,
+        stroke,
+      );
+    }
+
+    // Legs.
+    for (final dx in [-0.24, -0.10, 0.10, 0.26]) {
+      canvas.drawLine(
+        center.translate(r * dx, center.dy * 0 + r * 0.18),
+        center.translate(r * dx - r * 0.03, r * 0.40),
+        stroke,
+      );
+    }
+
+    // Sword: raised diagonal line from the lion's front paws.
+    canvas.drawLine(
+      center.translate(-r * 0.20, r * 0.05),
+      center.translate(-r * 0.52, -r * 0.55),
+      stroke,
+    );
+    // Hilt.
+    canvas.drawLine(
+      center.translate(-r * 0.46, -r * 0.44),
+      center.translate(-r * 0.60, -r * 0.36),
+      stroke,
+    );
   }
 
   Path _polygon(Offset center, double r, int sides, double startAngle) {

@@ -12,6 +12,7 @@ import 'pages/about_page.dart';
 import 'pages/config_page.dart';
 import 'pages/connect_page.dart';
 import 'pages/diagnostics_page.dart';
+import 'pages/license_page.dart';
 import 'pages/settings_page.dart';
 import 'pages/speed_page.dart';
 import 'pages/split_page.dart';
@@ -178,6 +179,7 @@ class _HomeShellState extends State<HomeShell> {
           s.navSettings,
           s.navDiag,
           s.navAbout,
+          s.navLicense,
         ];
         final toast = c.toast;
         if (toast != null && toast.isNotEmpty) {
@@ -230,6 +232,7 @@ class _HomeShellState extends State<HomeShell> {
               SettingsPage(controller: c),
               DiagnosticsPage(controller: c),
               AboutPage(controller: c),
+              LicensePage(onChanged: () => setState(() {})),
             ],
           ),
         );
@@ -353,6 +356,7 @@ class _Drawer extends StatelessWidget {
             item(4, Icons.settings_outlined, s.navSettings, badge: hasUpdate),
             item(5, Icons.terminal, s.navDiag),
             item(6, Icons.info_outline, s.navAbout),
+            item(7, Icons.verified_user_outlined, s.navLicense),
             const Spacer(),
             const Divider(),
             ListTile(
