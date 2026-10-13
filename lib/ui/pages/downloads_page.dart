@@ -59,11 +59,13 @@ class _DownloadsPageState extends State<DownloadsPage> {
         _progress.remove(a.name);
         _done[a.name] = path;
       });
+      if (!mounted) return;
       if (Platform.isAndroid && a.name.endsWith('.apk')) {
         await launchUrl(Uri.parse('file://$path'),
             mode: LaunchMode.externalApplication);
       }
     } catch (e) {
+      if (!mounted) return;
       setState(() => _progress.remove(a.name));
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('$e')));
