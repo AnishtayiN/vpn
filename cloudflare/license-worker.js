@@ -90,13 +90,14 @@ async function extend(env, key, days) {
   return lic;
 }
 
-async function tg(token, method, body, env) {
+async function tg(token, method, body, env, steps) {
   const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
   const out = await r.json();
+  if (steps) steps.push('tg:' + method + ':' + (out.ok ? 'ok#' + out.result?.message_id : out.description));
   if (env && env.LICENSES) {
     if (!out.ok) {
       await env.LICENSES.put('lastError', `tg ${method}: ${out.error_code || ''} ${out.description || 'unknown'}`);
@@ -169,10 +170,16 @@ export default {
         }));
         await env.LICENSES.delete('lastError');
       } catch (_) {}
-      // fire-and-forget so the webhook returns 200 immediately
-      (async () => { try { await handle(upd, env); }
-       catch (e) { await env.LICENSES.put('lastError', String(e && e.stack || e)); }
-     })();
+      // synchronous + traced: every step recorded so /diag shows exactly where it stops
+      const steps = ['recv'];
+      try {
+        await handle(upd, env, steps);
+        steps.push('done');
+      } catch (e) {
+        steps.push('ERROR: ' + String(e && e.stack || e).slice(0, 300));
+        try { await env.LICENSES.put('lastError', steps.join(' > ')); } catch (_) {}
+      }
+      try { await env.LICENSES.put('lastSteps', steps.join(' > ')); } catch (_) {}
       return new Response('ok');
     }
 
@@ -193,7 +200,9 @@ export default {
       const lastUpdate = await env.LICENSES.get('lastUpdate');
       const lastSentId = await env.LICENSES.get('lastSentId');
       const lastSetup = await env.LICENSES.get('lastSetup');
+      const lastSteps = await env.LICENSES.get('lastSteps');
       return json({
+        lastSteps,
         lastSetup: lastSetup ? JSON.parse(lastSetup) : null,
         lastUpdate: lastUpdate ? JSON.parse(lastUpdate) : null,
         lastSentId,
@@ -210,12 +219,13 @@ export default {
   },
 };
 
-async function handle(upd, env) {
+async function handle(upd, env, steps) {
   const token = env.BOT_TOKEN;
   const msg = upd.message;
   const cb = upd.callback_query;
 
   if (cb) {
+    steps.push('cb:' + cb.data);
     const tid = cb.from.id;
     let out = null;
     if (cb.data === 'trial') out = await doTrial(env, tid);
@@ -223,15 +233,17 @@ async function handle(upd, env) {
     else if (cb.data === 'ref') out = await doReferral(env, tid);
     else if (cb.data === 'mykey') out = await doMyKey(env, tid);
     else if (cb.data.startsWith('plan:')) out = await doPlan(env, tid, cb.data.slice(5));
-    if (out) await tg(token, 'sendMessage', { chat_id: tid, ...out }, env);
-    await tg(token, 'answerCallbackQuery', { callback_query_id: cb.id }, env);
+    if (out) await tg(token, 'sendMessage', { chat_id: tid, ...out }, env, steps);
+    await tg(token, 'answerCallbackQuery', { callback_query_id: cb.id }, env, steps);
     return;
   }
-  if (!msg) return;
+  if (!msg) { steps.push('no-msg'); return; }
   const tid = msg.from.id;
   const text = (msg.text || '').trim();
+  steps.push('msg:' + text.slice(0, 20));
 
   if (text.startsWith('/start')) {
+    steps.push('start-branch');
     // referral payload: /start ref_<referrerId>
     const payload = text.split(' ')[1] || '';
     if (payload.startsWith('ref_')) {
@@ -255,8 +267,13 @@ async function handle(upd, env) {
       }
     }
     const key = await userKey(env, tid);
+    steps.push('key:' + (key || 'none'));
     const lic = key ? await getLic(env, key) : null;
-    await tg(token, 'sendMessage', { chat_id: tid, ...mainMenu(msg.from, lic) }, env);
+    steps.push('lic:' + (lic ? (lic.expiresAt ? 'valid' : 'no-expiry') : 'null'));
+    const menu = mainMenu(msg.from, lic);
+    steps.push('menu-built');
+    const out = await tg(token, 'sendMessage', { chat_id: tid, ...menu }, env, steps);
+    steps.push('sent:' + JSON.stringify({ ok: out.ok, id: out.result?.message_id, err: out.description || null }));
     return;
   }
 
