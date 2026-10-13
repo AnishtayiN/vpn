@@ -158,7 +158,12 @@ const DL_FILES_KEY = 'dlfiles';
 const dlLabel = (n) => n.replace(/^VoidrauVPN-/, '').replace(/\.apk$|\.exe$|\.zip$/i, '');
 
 async function doDownloads(env, tid) {
-  const files = (await releaseFiles(env)) || [];
+  let files = null;
+  try { files = JSON.parse((await env.LICENSES.get('cache:relfiles')) || 'null'); } catch (_) {}
+  if (!Array.isArray(files) || !files.length) {
+    files = (await releaseFiles(env)) || [];
+    if (files.length) await env.LICENSES.put('cache:relfiles', JSON.stringify(files), { expirationTtl: 600 });
+  }
   const apk = files.filter((f) => f.name.toLowerCase().endsWith('.apk'));
   const exe = files.filter((f) => f.name.toLowerCase().endsWith('.exe'));
   const other = files.filter((f) => f.name.toLowerCase().endsWith('.zip'));
@@ -170,7 +175,7 @@ async function doDownloads(env, tid) {
   const tag = pick[0]?.tag || '';
   return {
     text: `📥 آخرین نسخه: ${tag}\nفایل مورد نظر را انتخاب کنید تا همین‌جا برایتان ارسال شود:`,
-    reply_markup: { inline_keyboard: [...rows] },
+    reply_markup: { inline_keyboard: [...rows, [{ text: '🔄 بروزرسانی لیست', callback_data: 'dlrefresh' }]] },
   };
 }
 
@@ -343,7 +348,15 @@ async function handle(upd, env, steps) {
       const np = Math.max(0, (parseInt((await env.LICENSES.get('stat:pending')) || '0')) - 1);
       await env.LICENSES.put('stat:pending', String(np));
     }
-    else if (cb.data === 'dl') out = await doDownloads(env, tid);
+    else if (cb.data.startsWith('rej:') && String(tid) === String(env.ADMIN_ID)) {
+      const ru = cb.data.slice(4);
+      await env.LICENSES.delete(`receipt:${ru}`);
+      const npR = Math.max(0, (parseInt((await env.LICENSES.get('stat:pending')) || '0')) - 1);
+      await env.LICENSES.put('stat:pending', String(npR));
+      await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: ru, text: '❌ رسید شما تایید نشد. لطفاً تصویر واضح‌تر از رسید (با مبلغ و تاریخ) بفرستید یا با پشتیبانی تماس بگیرید.' }, env, steps);
+      out = { text: `❌ رسید ${ru} رد شد و به کاربر اطلاع داده شد.` };
+    }
+    else if (cb.data === 'dl' || cb.data === 'dlrefresh') { if (cb.data === 'dlrefresh') await env.LICENSES.delete('cache:relfiles'); out = await doDownloads(env, tid); }
     else if (cb.data.startsWith('file:')) {
       const idx = parseInt(cb.data.slice(5));
       let pick = [];
@@ -367,13 +380,14 @@ async function handle(upd, env, steps) {
     else if (cb.data === 'status') out = await doStatus(env, tid);
     else if (cb.data.startsWith('ad:') && String(tid) === String(env.ADMIN_ID)) {
       const a = cb.data.slice(3);
-      if (a === 'editbuy') { await env.LICENSES.put(`admMode:${tid}`, 'buyText'); out = { text: 'متن جدید دکمه خرید را بفرست:' }; }
-      else if (a === 'editcard') { await env.LICENSES.put(`admMode:${tid}`, 'cardNumber'); out = { text: 'شماره کارت جدید را بفرست:' }; }
-      else if (a === 'editch') { await env.LICENSES.put(`admMode:${tid}`, 'forceChannel'); out = { text: 'آیدی کانال اجباری را بفرست (با @ — خالی برای غیرفعال):' }; }
-      else if (a === 'broadcast') { await env.LICENSES.put(`admMode:${tid}`, 'broadcast'); out = { text: 'متن پیام همگانی را بفرست:' }; }
-      else if (a === 'editsup') { await env.LICENSES.put(`admMode:${tid}`, 'supportId'); out = { text: 'آیدی پشتیبانی را بفرست (@...):' }; }
-      else if (a === 'edittrial') { await env.LICENSES.put(`admMode:${tid}`, 'trialDays'); out = { text: 'تعداد روز تست رایگان را بفرست:' }; }
-      else if (a === 'editplans') { await env.LICENSES.put(`admMode:${tid}`, 'plans'); out = { text: 'قیمت‌ها را بفرست، هر خط: شناسه|برچسب|روز\nمثال:\nm1|۱ ماهه — ۱۰۰ هزار تومان|30\nm3|۳ ماهه — ۲۵۰ هزار تومان|90\nm12|یک‌ساله — ۸۰۰ هزار تومان|365' }; }
+      if (a === 'cancelmode') { await env.LICENSES.delete(`admMode:${tid}`); out = await adminPanel(env, tid); }
+      else if (a === 'editbuy') { await env.LICENSES.put(`admMode:${tid}`, 'buyText'); out = { text: 'متن جدید دکمه خرید را بفرست:\n(لغو: دکمهٔ پایین)', reply_markup: { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'ad:cancelmode' }]] } }; }
+      else if (a === 'editcard') { await env.LICENSES.put(`admMode:${tid}`, 'cardNumber'); out = await askMode(env, tid, 'شماره کارت جدید را بفرست:', 'cardNumber'); }
+      else if (a === 'editch') { await env.LICENSES.put(`admMode:${tid}`, 'forceChannel'); out = await askMode(env, tid, 'آیدی کانال اجباری را بفرست (با @ — خالی برای غیرفعال):', 'forceChannel'); }
+      else if (a === 'broadcast') { await env.LICENSES.put(`admMode:${tid}`, 'broadcast'); out = await askMode(env, tid, 'متن/عکس پیام همگانی را بفرست:', 'broadcast'); }
+      else if (a === 'editsup') { await env.LICENSES.put(`admMode:${tid}`, 'supportId'); out = await askMode(env, tid, 'آیدی پشتیبانی را بفرست (@...):', 'supportId'); }
+      else if (a === 'edittrial') { await env.LICENSES.put(`admMode:${tid}`, 'trialDays'); out = await askMode(env, tid, 'تعداد روز تست رایگان را بفرست:', 'trialDays'); }
+      else if (a === 'editplans') { await env.LICENSES.put(`admMode:${tid}`, 'plans'); out = await askMode(env, tid, 'قیمت‌ها را بفرست، هر خط: شناسه|برچسب|روز\nمثال:\nm1|۱ ماهه — ۱۰۰ هزار تومان|30\nm3|۳ ماهه — ۲۵۰ هزار تومان|90\nm12|یک‌ساله — ۸۰۰ هزار تومان|365', 'plans'); }
       else if (a === 'pending') out = await pendingList(env, tid);
       else if (a === 'users') out = await recentUsers(env);
       else if (a === 'export') out = await exportBackup(env, tid);
@@ -389,6 +403,7 @@ async function handle(upd, env, steps) {
         out = { text: `📊 آمار کامل\n\n👥 کاربران: ${idx.length}\n✅ فعال: ${act}\n🎁 تستی فعال: ${trial}\n💰 خریداری فعال: ${paid}\n🧾 رسید در انتظار: ${(await env.LICENSES.get('stat:pending')) || 0}` };
       }
     }
+    else out = { text: 'این دکمه منقضی شده — از /start دوباره شروع کنید.' };
     if (out) await tg(token, 'sendMessage', { chat_id: tid, ...out }, env, steps);
     await tg(token, 'answerCallbackQuery', { callback_query_id: cb.id }, env, steps);
     return;
@@ -444,10 +459,19 @@ async function handle(upd, env, steps) {
       } else {
         let val = text.trim();
         if (mode === 'forceChannel') {
+          if (!val || val === 'خالی' || val === '-') {
+            await setSetting(env, mode, '');
+            await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '✅ جوین اجباری غیرفعال شد.' }, env, steps);
+            steps.push('admin-mode:' + mode);
+            return;
+          }
           // accept https://t.me/xyz , t.me/xyz , @xyz , xyz , or -100... id
           const mch = val.match(/(?:t\.me\/|@)([A-Za-z0-9_]+)/);
           if (mch) val = '@' + mch[1];
+          else if (/^-100\d+$/.test(val)) { /* numeric id — keep as-is */ }
+          else { await env.LICENSES.put(`admMode:${tid}`, mode); await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ فرمت کانال درست نیست. دوباره بفرست (مثال: @mychannel یا -1001234…).' }, env, steps); return; }
         }
+        if (mode === 'trialDays' && (!/^\d+$/.test(val) || parseInt(val) < 1)) { await env.LICENSES.put(`admMode:${tid}`, mode); await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ عدد نامعتبر — دوباره بفرست.' }, env, steps); return; }
         await setSetting(env, mode, val);
         await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ ذخیره شد: ${val}` }, env, steps);
       }
@@ -638,6 +662,10 @@ async function buyMenuFull(env) {
     },
   };
 }
+async function askMode(env, tid, prompt, mode) {
+  return { text: prompt, reply_markup: { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'ad:cancelmode' }]] } };
+}
+
 async function adminPanel(env, tid) {
   const card = await getSetting(env, 'cardNumber', '—');
   const buy = await getSetting(env, 'buyText', 'خرید لایسنس');
@@ -678,7 +706,7 @@ async function pendingList(env, tid) {
     if (!raw) continue;
     const planId = await getSetting(env, `lastPlan:${u}`, 'm1');
     const p = ((await plansOf(env))).find((x) => x.id === planId) || ((await plansOf(env)))[0];
-    rows.push([{ text: `🧾 کاربر ${u} — ${p.label}`, callback_data: `okr:${u}:${p.days}` }]);
+    rows.push([{ text: `🧾 کاربر ${u} — ${p.label}`, callback_data: `okr:${u}:${p.days}` }, { text: '❌', callback_data: `rej:${u}` }]);
     n++;
   }
   return { text: n ? `🧾 ${n} رسید در انتظار — برای تایید بزنید:` : '🧾 رسید در انتظاری نیست.',
@@ -718,7 +746,10 @@ async function doTrial(env, tid) {
   const used = await env.LICENSES.get(`trial:${tid}`);
   if (used) {
     const key = await userKey(env, tid);
-    return { text: `شما قبلاً تست رایگان گرفته‌اید.\nکد شما: \`${key || '—'}\``, parse_mode: 'Markdown' };
+    const lic = key ? await getLic(env, key) : null;
+    const active = lic && lic.expiresAt && lic.expiresAt * 1000 > Date.now();
+    if (active) return { text: `🎁 تست/لایسنس شما هنوز فعال است:\n\`${key}\`\n⏳ تا: ${new Date(lic.expiresAt * 1000).toLocaleDateString('fa-IR')}`, parse_mode: 'Markdown' };
+    return { text: '⏳ تست رایگان شما تمام شده.\n🛒 برای ادامه از «خرید لایسنس» استفاده کنید.', reply_markup: { inline_keyboard: [[{ text: '🛒 خرید لایسنس', callback_data: 'buy' }]] } };
   }
   const TD = await trialDaysOf(env);
   const key = await mintKey(env, tid, TD, 'trial');
