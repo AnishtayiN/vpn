@@ -140,16 +140,14 @@ async function releaseFiles(env) {
   try {
     const ghHeaders = { 'Accept': 'application/vnd.github+json', 'User-Agent': 'VoidrauLicenseBot' };
     if (env.GITHUB_TOKEN) ghHeaders.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
-    const r = await fetch('https://api.github.com/repos/AnishtayiN/vpn/releases?per_page=3', { headers: ghHeaders });
+    const r = await fetch('https://api.github.com/repos/AnishtayiN/vpn/releases/latest', { headers: ghHeaders });
     if (!r.ok) return null;
-    const rels = await r.json();
-    const out = [];
-    for (const rel of rels) {
-      for (const a of rel.assets || []) {
-        out.push({ name: a.name, size: a.size, url: a.browser_download_url, tag: rel.tag_name, date: a.updated_at });
-      }
-      if (out.length >= 12) break;
-    }
+    const rel = await r.json();
+    if (!rel || rel.message) return null;
+    const out = (rel.assets || []).map((a) => ({
+      name: a.name, size: a.size, url: a.browser_download_url,
+      tag: rel.tag_name, date: a.updated_at,
+    }));
     return out.length ? out : null;
   } catch (e) { try { console.log('releaseFiles error', e && e.message, e && e.stack && e.stack.split('\n').slice(1,4).join(' | ')); } catch (_) {} return null; }
 }
@@ -169,8 +167,9 @@ async function doDownloads(env, tid) {
   // remember the list so callback indexes resolve to the same file
   await env.LICENSES.put(`${DL_FILES_KEY}:${tid}`, JSON.stringify(pick), { expirationTtl: 3600 });
   const rows = pick.map((f, i) => [{ text: `📄 ${dlLabel(f.name)} (${humanSize(f.size)})`, callback_data: `file:${i}` }]);
+  const tag = pick[0]?.tag || '';
   return {
-    text: '📥 نسخهٔ مورد نظر را انتخاب کنید تا همین‌جا برایتان ارسال شود:',
+    text: `📥 آخرین نسخه: ${tag}\nفایل مورد نظر را انتخاب کنید تا همین‌جا برایتان ارسال شود:`,
     reply_markup: { inline_keyboard: [...rows] },
   };
 }
