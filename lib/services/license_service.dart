@@ -134,7 +134,7 @@ class LicenseService {
       }
       _key = k;
       _plan = data['plan'] as String?;
-      final exp = data['expiresAt'] as num?;
+      final exp = data['expiresAt'];
       _expiresAt = exp == null
           ? null
           : (exp is num
