@@ -24,11 +24,11 @@ class SettingsPage extends StatelessWidget {
     final locked = !LicenseService.instance.isPaid;
     final children = <Widget>[
       if (locked)
-        Padding(
-          padding: const EdgeInsets.only(bottom: 12),
+        const Padding(
+          padding: EdgeInsets.only(bottom: 12),
           child: Text(
             '🔒 تنظیمات برای لایسنس تستی/رفرال قفل است — برای تغییر، لایسنس خریداری کنید.',
-            style: const TextStyle(color: VoidrauColors.coral, fontSize: 13),
+            style: TextStyle(color: VoidrauColors.coral, fontSize: 13),
           ),
         ),
         Text(s.appearance, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
