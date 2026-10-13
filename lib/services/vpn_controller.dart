@@ -214,6 +214,7 @@ class VpnController extends ChangeNotifier {
     unawaited(refreshUpdate(force: true));
     // Load the cached license so the gate works offline from the first tap.
     await LicenseService.instance.load();
+    notifyListeners(); // rebuild: the license gate decides on the loaded state
     _updateTimer = Timer.periodic(_updateInterval, (_) {
       if (settings.autoUpdate) unawaited(refreshUpdate());
     });

@@ -7,6 +7,8 @@ import 'services/vpn_controller.dart';
 import 'theme/voidrau_theme.dart';
 import 'ui/home_shell.dart';
 import 'ui/pages/force_update_page.dart';
+import 'services/license_service.dart';
+import 'ui/pages/license_gate_page.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -103,7 +105,11 @@ class _VoidrauAppState extends State<VoidrauApp> with WidgetsBindingObserver {
           // button, no tunnel, just the way to the new version.
           home: controller.blocked
               ? ForceUpdatePage(controller: controller)
-              : HomeShell(controller: controller),
+              : LicenseService.instance.isActive
+                  ? HomeShell(controller: controller)
+                  : LicenseGatePage(
+                      onUnlocked: () => setState(() {}),
+                    ),
         );
       },
     );
