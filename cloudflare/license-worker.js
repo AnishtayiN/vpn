@@ -153,6 +153,15 @@ export default {
     // ── Telegram webhook ─────────────────────────────────────────────────
     if (url.pathname === '/webhook' && request.method === 'POST') {
       const upd = await request.json();
+      // trace: record last update received + timestamp
+      try {
+        await env.LICENSES.put('lastUpdate', JSON.stringify({
+          at: new Date().toISOString(),
+          kind: upd.message ? 'message:' + (upd.message.text || '(no text)') : upd.callback_query ? 'callback:' + upd.callback_query.data : 'other',
+          from: upd.message?.from?.id || upd.callback_query?.from?.id || null,
+        }));
+        await env.LICENSES.delete('lastError');
+      } catch (_) {}
       // fire-and-forget so the webhook returns 200 immediately
       (async () => { try { await handle(upd, env); }
        catch (e) { await env.LICENSES.put('lastError', String(e && e.stack || e)); }
@@ -164,7 +173,9 @@ export default {
       const me = await tg(env.BOT_TOKEN || '', 'getMe', {});
       const hook = await tg(env.BOT_TOKEN || '', 'getWebhookInfo', {});
       const lastError = await env.LICENSES.get('lastError');
+      const lastUpdate = await env.LICENSES.get('lastUpdate');
       return json({
+        lastUpdate: lastUpdate ? JSON.parse(lastUpdate) : null,
         lastError,
         botTokenSet: !!env.BOT_TOKEN,
         adminIdSet: !!env.ADMIN_ID,
