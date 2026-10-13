@@ -460,7 +460,6 @@ class ConfigPage extends StatelessWidget {
           },
           child: Text(s.reset),
         ),
-      ],
     ];
     return AbsorbPointer(
       absorbing: locked,
