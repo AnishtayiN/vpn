@@ -13,6 +13,8 @@
 //   • خرید لایسنس       → plans, payment placeholder → admin approves
 //   • دعوت دوستان       → personal referral link; 1 week credit per 3 joins
 //   • کد لایسنس من      → shows key + expiry
+//   • دانلود نسخه جدید  → latest GitHub release files sent in-chat
+//   • /panel            → admin panel (prices, card, channel, broadcast…)
 //   • /gen <days> <tid> → admin: mint a key
 //   • /ok <tid> <days>  → admin: approve a pending purchase
 //
@@ -36,11 +38,9 @@ const trialDaysOf = async (env) => {
   const d = parseInt((await env.LICENSES.get('setting:trialDays')) || '');
   return d && d > 0 ? d : TRIAL_DAYS;
 };
-const PLANS = null; // dynamic via plansOf(env)
 const REFERRAL_REWARD_JOINS = 3;   // every N joins
 const REFERRAL_REWARD_DAYS = 7;    // → N days credit
 
-const fa = (s) => s; // all UI strings are Persian already
 
 function keygen() {
   const seg = () => crypto.randomUUID().replace(/-/g, '').slice(0, 4).toUpperCase();
@@ -180,7 +180,7 @@ async function sendReleaseFile(env, tid, url, name) {
   const ghHeaders = {};
   if (env.GITHUB_TOKEN) ghHeaders.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
   const res = await fetch(url, { headers: ghHeaders, redirect: 'follow' });
-  if (!res.ok || !res.body) throw new Error(`github ${res.status}`);
+  if (!res.ok) throw new Error(`github ${res.status}`);
   const buf = await res.arrayBuffer();
   if (buf.byteLength > 45 * 1024 * 1024) {
     await tg(env.BOT_TOKEN, 'sendMessage', {
@@ -338,6 +338,7 @@ async function handle(upd, env, steps) {
       else { k = await mintKey(env, target, days, 'paid'); await extend(env, k, days); }
       while ((await takeCredit(env, target)) === 1) await extend(env, k, 1);
       await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: target, text: `✅ پرداخت تایید شد!\n\`${k}\`\n${days} روز اضافه شد.`, parse_mode: 'Markdown' }, env, steps);
+      await env.LICENSES.delete(`receipt:${target}`);
       out = { text: '✅ تایید و برای کاربر ارسال شد.' };
       const np = Math.max(0, (parseInt((await env.LICENSES.get('stat:pending')) || '0')) - 1);
       await env.LICENSES.put('stat:pending', String(np));
@@ -370,7 +371,6 @@ async function handle(upd, env, steps) {
       else if (a === 'editcard') { await env.LICENSES.put(`admMode:${tid}`, 'cardNumber'); out = { text: 'شماره کارت جدید را بفرست:' }; }
       else if (a === 'editch') { await env.LICENSES.put(`admMode:${tid}`, 'forceChannel'); out = { text: 'آیدی کانال اجباری را بفرست (با @ — خالی برای غیرفعال):' }; }
       else if (a === 'broadcast') { await env.LICENSES.put(`admMode:${tid}`, 'broadcast'); out = { text: 'متن پیام همگانی را بفرست:' }; }
-      else if (a === 'stats') out = { text: `👥 ${(await env.LICENSES.get('stat:users')) || 0} کاربر\n🧾 ${(await env.LICENSES.get('stat:pending')) || 0} رسید در انتظار` };
       else if (a === 'editsup') { await env.LICENSES.put(`admMode:${tid}`, 'supportId'); out = { text: 'آیدی پشتیبانی را بفرست (@...):' }; }
       else if (a === 'edittrial') { await env.LICENSES.put(`admMode:${tid}`, 'trialDays'); out = { text: 'تعداد روز تست رایگان را بفرست:' }; }
       else if (a === 'editplans') { await env.LICENSES.put(`admMode:${tid}`, 'plans'); out = { text: 'قیمت‌ها را بفرست، هر خط: شناسه|برچسب|روز\nمثال:\nm1|۱ ماهه — ۱۰۰ هزار تومان|30\nm3|۳ ماهه — ۲۵۰ هزار تومان|90\nm12|یک‌ساله — ۸۰۰ هزار تومان|365' }; }
@@ -476,7 +476,6 @@ async function handle(upd, env, steps) {
         const seen = await env.LICENSES.get(`refseen:${tid}`);
         if (!seen) {
           await env.LICENSES.put(`refseen:${tid}`, '1');
-          await addCredit(env, ref, 0); // counter via credit store: 1 join = +1 join
           await env.LICENSES.put(`refjoin:${ref}`, String(
             (parseInt((await env.LICENSES.get(`refjoin:${ref}`)) || '0')) + 1));
           const joins = parseInt((await env.LICENSES.get(`refjoin:${ref}`)) || '0');
@@ -527,6 +526,9 @@ async function handle(upd, env, steps) {
     // spend referral credit if present
     while ((await takeCredit(env, target)) === 1) await extend(env, key, 1);
     await tg(token, 'sendMessage', { chat_id: tid, text: `✅ تایید شد — ${days} روز برای \`${target}\`\n\`${key}\``, parse_mode: 'Markdown' }, env);
+    await env.LICENSES.delete(`receipt:${target}`);
+    const npOk = Math.max(0, (parseInt((await env.LICENSES.get('stat:pending')) || '0')) - 1);
+    await env.LICENSES.put('stat:pending', String(npOk));
     await tg(token, 'sendMessage', {
       chat_id: target,
       text: `✅ پرداخت شما تایید شد!\n\`${key}\`\nاین کد را در برنامه (تب لایسنس) وارد کنید.`,
@@ -537,7 +539,14 @@ async function handle(upd, env, steps) {
 
   if (text === '/id') {
     await tg(token, 'sendMessage', { chat_id: tid, text: `آیدی عددی شما: \`${tid}\``, parse_mode: 'Markdown' }, env);
+    return;
   }
+
+  // Unknown input: point back to the menu instead of staying silent.
+  await tg(token, 'sendMessage', {
+    chat_id: tid,
+    text: '🤔 متوجه نشدم. از /start استفاده کنید یا دکمه‌های منو را بزنید.',
+  }, env, steps);
 }
 
 // ── commerce: card payment + receipt approval + admin panel + forced join ──
