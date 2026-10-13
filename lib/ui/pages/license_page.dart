@@ -8,12 +8,12 @@ import '../../app_info.dart';
 
 /// License screen: shows remaining time, lets the user enter a key,
 /// request a 24h trial (via the Telegram bot) and open the buy/referral chat.
-class LicensePage extends StatefulWidget {
-  const LicensePage({super.key, required this.onChanged});
+class VoidrauLicensePage extends StatefulWidget {
+  const VoidrauLicensePage({super.key, required this.onChanged});
   final VoidCallback onChanged;
 
   @override
-  State<LicensePage> createState() => _LicensePageState();
+  State<VoidrauLicensePage> createState() => _LicensePageState();
 }
 
 class _LicensePageState extends State<LicensePage> {

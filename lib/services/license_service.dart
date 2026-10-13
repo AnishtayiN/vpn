@@ -134,11 +134,11 @@ class LicenseService {
       }
       _key = k;
       _plan = data['plan'] as String?;
-      final exp = data['expiresAt'];
+      final exp = data['expiresAt'] as num?;
       _expiresAt = exp == null
           ? null
           : (exp is num
-              ? DateTime.fromMillisecondsSinceEpoch((exp as num).toInt() * 1000, isUtc: true)
+              ? DateTime.fromMillisecondsSinceEpoch(exp.toInt() * 1000, isUtc: true)
               : DateTime.tryParse(exp.toString())?.toUtc());
       _checkedAt = DateTime.now().toUtc();
       await _save();

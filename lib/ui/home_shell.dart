@@ -232,7 +232,7 @@ class _HomeShellState extends State<HomeShell> {
               SettingsPage(controller: c),
               DiagnosticsPage(controller: c),
               AboutPage(controller: c),
-              LicensePage(onChanged: () => setState(() {})),
+              VoidrauLicensePage(onChanged: () => setState(() {})),
             ],
           ),
         );
