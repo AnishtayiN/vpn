@@ -176,13 +176,25 @@ export default {
       return new Response('ok');
     }
 
+    // Self-healing: any visit to the root re-registers the webhook with Telegram,
+    // so simply opening the worker URL (re)sets it — no manual curl needed.
+    if (url.pathname === '/' || url.pathname === '/setup') {
+      const self = `${url.protocol}//${url.host}/webhook`;
+      const set = await tg(env.BOT_TOKEN || '', 'setWebhook', { url: self, allowed_updates: ['message', 'callback_query'], drop_pending_updates: false }, env);
+      if (env.LICENSES) await env.LICENSES.put('lastSetup', JSON.stringify({ at: new Date().toISOString(), ok: set.ok, error: set.description || null }));
+      if (url.pathname === '/')
+        return new Response(`VoidrauVPN license bot — alive.\nWebhook: ${set.ok ? 'SET ✓' : 'FAILED: ' + (set.description || '?')}`);
+      return json({ setup: set });
+    }
     if (url.pathname === '/diag') {
       const me = await tg(env.BOT_TOKEN || '', 'getMe', {});
       const hook = await tg(env.BOT_TOKEN || '', 'getWebhookInfo', {});
       const lastError = await env.LICENSES.get('lastError');
       const lastUpdate = await env.LICENSES.get('lastUpdate');
       const lastSentId = await env.LICENSES.get('lastSentId');
+      const lastSetup = await env.LICENSES.get('lastSetup');
       return json({
+        lastSetup: lastSetup ? JSON.parse(lastSetup) : null,
         lastUpdate: lastUpdate ? JSON.parse(lastUpdate) : null,
         lastSentId,
         lastError,
