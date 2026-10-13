@@ -71,7 +71,9 @@ void main() {
 
   group('exit lock', () {
     test('the default rule is a deny list, enforced by the core', () {
-      final e = env(VpnSettings());
+      final e = env(
+        VpnSettings(exitFilter: ExitFilter.nonIran, exitBlocked: const ['IR']),
+      );
       expect(e['AETHER_EXIT_LOC'], '!IR');
       expect(e['AETHER_EXIT_LOC_SECS'], '${CoreLaunch.exitLocSecs}');
     });
