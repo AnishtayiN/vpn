@@ -228,11 +228,37 @@ async function handle(upd, env, steps) {
     steps.push('cb:' + cb.data);
     const tid = cb.from.id;
     let out = null;
-    if (cb.data === 'trial') out = await doTrial(env, tid);
-    else if (cb.data === 'buy') out = buyMenu();
+    if (String(tid) !== String(env.ADMIN_ID) && !(await checkJoined(env, tid))) {
+      out = joinPrompt(await getSetting(env, 'forceChannel', ''));
+    }
+    else if (cb.data === 'recheck') out = (await checkJoined(env, tid)) ? { text: '✅ خوش آمدید!' } : joinPrompt(await getSetting(env, 'forceChannel', ''));
+    else if (cb.data === 'trial') out = await doTrial(env, tid);
+    else if (cb.data === 'buy') out = await buyMenuFull(env);
     else if (cb.data === 'ref') out = await doReferral(env, tid);
     else if (cb.data === 'mykey') out = await doMyKey(env, tid);
     else if (cb.data.startsWith('plan:')) out = await doPlan(env, tid, cb.data.slice(5));
+    else if (cb.data.startsWith('okr:') && String(tid) === String(env.ADMIN_ID)) {
+      const [, tS, dS] = cb.data.split(':');
+      const target = tS, days = parseInt(dS);
+      let k = await userKey(env, target);
+      let l = k ? await getLic(env, k) : null;
+      if (l && l.expiresAt) { await extend(env, k, days); }
+      else { k = await mintKey(env, target, days, 'paid'); await extend(env, k, days); }
+      while ((await takeCredit(env, target)) === 1) await extend(env, k, 1);
+      await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: target, text: `✅ پرداخت تایید شد!\n\`${k}\`\n${days} روز اضافه شد.`, parse_mode: 'Markdown' }, env, steps);
+      out = { text: '✅ تایید و برای کاربر ارسال شد.' };
+      const np = Math.max(0, (parseInt((await env.LICENSES.get('stat:pending')) || '0')) - 1);
+      await env.LICENSES.put('stat:pending', String(np));
+    }
+    else if (cb.data.startsWith('ad:') && String(tid) === String(env.ADMIN_ID)) {
+      const a = cb.data.slice(3);
+      if (a === 'editbuy') { await env.LICENSES.put(`admMode:${tid}`, 'buyText'); out = { text: 'متن جدید دکمه خرید را بفرست:' }; }
+      else if (a === 'editcard') { await env.LICENSES.put(`admMode:${tid}`, 'cardNumber'); out = { text: 'شماره کارت جدید را بفرست:' }; }
+      else if (a === 'editch') { await env.LICENSES.put(`admMode:${tid}`, 'forceChannel'); out = { text: 'آیدی کانال اجباری را بفرست (با @ — خالی برای غیرفعال):' }; }
+      else if (a === 'broadcast') { await env.LICENSES.put(`admMode:${tid}`, 'broadcast'); out = { text: 'متن پیام همگانی را بفرست:' }; }
+      else if (a === 'stats') out = { text: `👥 ${(await env.LICENSES.get('stat:users')) || 0} کاربر\n🧾 ${(await env.LICENSES.get('stat:pending')) || 0} رسید در انتظار` };
+      else if (a === 'pending') out = { text: `🧾 رسیدها همین‌جا در چت ادمین هستند و دکمه تایید دارند.\nدر انتظار: ${(await env.LICENSES.get('stat:pending')) || 0}` };
+    }
     if (out) await tg(token, 'sendMessage', { chat_id: tid, ...out }, env, steps);
     await tg(token, 'answerCallbackQuery', { callback_query_id: cb.id }, env, steps);
     return;
@@ -242,8 +268,58 @@ async function handle(upd, env, steps) {
   const text = (msg.text || '').trim();
   steps.push('msg:' + text.slice(0, 20));
 
+  if (msg.photo && String(tid) !== String(env.ADMIN_ID)) {
+    await env.LICENSES.put(`receipt:${tid}`, JSON.stringify({ fileId: msg.photo[msg.photo.length - 1].file_id, at: Date.now() }));
+    const pend = (parseInt((await env.LICENSES.get('stat:pending')) || '0')) + 1;
+    await env.LICENSES.put('stat:pending', String(pend));
+    await tg(env.BOT_TOKEN, 'sendPhoto', {
+      chat_id: env.ADMIN_ID,
+      photo: msg.photo[msg.photo.length - 1].file_id,
+      caption: `🧾 رسید از کاربر \`${tid}\` — پلن تاییدشده را انتخاب کنید (رسید #${pend})`,
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: PLANS.map((p) => [{ text: `تایید ${p.label}`, callback_data: `okr:${tid}:${p.days}` }]) },
+    }, env, steps);
+    await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '✅ رسید شما ارسال شد — پس از تایید ادمین، کد لایسنس برایتان ارسال می‌شود.' }, env, steps);
+    steps.push('receipt-forwarded');
+    return;
+  }
+  if (String(tid) === String(env.ADMIN_ID)) {
+    const mode = await env.LICENSES.get(`admMode:${tid}`);
+    if (mode && !text.startsWith('/')) {
+      await env.LICENSES.delete(`admMode:${tid}`);
+      if (mode === 'broadcast') {
+        const list = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
+        for (const u of list.slice(0, 500)) {
+          try { await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: u, text }); } catch (_) {}
+        }
+        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `📣 ارسال به ${list.length} کاربر انجام شد.` }, env, steps);
+      } else {
+        await setSetting(env, mode, text);
+        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '✅ ذخیره شد.' }, env, steps);
+      }
+      steps.push('admin-mode:' + mode);
+      return;
+    }
+  }
+
+  if (String(tid) === String(env.ADMIN_ID) && text.trim() === '/panel') {
+    steps.push('panel');
+    await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, ...(await adminPanel(env, tid)) }, env, steps);
+    return;
+  }
   if (text.startsWith('/start')) {
     steps.push('start-branch');
+    if (!(await checkJoined(env, tid))) {
+      steps.push('join-gate');
+      await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, ...joinPrompt(await getSetting(env, 'forceChannel', '')) }, env, steps);
+      return;
+    }
+    const idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
+    if (!idx.includes(tid)) {
+      idx.push(tid);
+      await env.LICENSES.put('userIndex', JSON.stringify(idx));
+      await env.LICENSES.put('stat:users', String(idx.length));
+    }
     // referral payload: /start ref_<referrerId>
     const payload = text.split(' ')[1] || '';
     if (payload.startsWith('ref_')) {
@@ -316,6 +392,59 @@ async function handle(upd, env, steps) {
   }
 }
 
+// ── commerce: card payment + receipt approval + admin panel + forced join ──
+async function getSetting(env, k, dflt) {
+  return (await env.LICENSES.get(`set:${k}`)) ?? dflt;
+}
+async function setSetting(env, k, v) {
+  await env.LICENSES.put(`set:${k}`, v);
+}
+async function checkJoined(env, tid) {
+  const ch = await getSetting(env, 'forceChannel', '');
+  if (!ch) return true;
+  const r = await tg(env.BOT_TOKEN, 'getChatMember', { chat_id: ch, user_id: tid }, env);
+  const st = r?.result?.status || 'left';
+  return ['member', 'administrator', 'creator'].includes(st);
+}
+function joinPrompt(ch) {
+  return {
+    text: '⛔ برای استفاده از ربات اول در کانال عضو شو:',
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '📢 عضویت در کانال', url: `https://t.me/${String(ch).replace('@', '')}` }],
+        [{ text: '✅ عضو شدم', callback_data: 'recheck' }],
+      ],
+    },
+  };
+}
+async function buyMenuFull(env) {
+  const card = await getSetting(env, 'cardNumber', 'تنظیم نشده — از /panel تنظیم کنید');
+  const buyText = await getSetting(env, 'buyText', '🛒 خرید لایسنس');
+  return {
+    text: `${buyText}\n💳 کارت به کارت: ${card}\n\nپلن را انتخاب کنید؛ پس از پرداخت، اسکرین‌شات رسید را در همین چت بفرست تا ادمین تایید کند.`,
+    reply_markup: {
+      inline_keyboard: [
+        ...PLANS.map((p) => [{ text: p.label, callback_data: `plan:${p.id}` }]),
+      ],
+    },
+  };
+}
+async function adminPanel(env, tid) {
+  const card = await getSetting(env, 'cardNumber', '—');
+  const buy = await getSetting(env, 'buyText', 'خرید لایسنس');
+  const ch = await getSetting(env, 'forceChannel', '—');
+  const users = parseInt((await env.LICENSES.get('stat:users')) || '0');
+  const pending = parseInt((await env.LICENSES.get('stat:pending')) || '0');
+  return {
+    text: `🛠 پنل ادمین\n\n👥 کاربران: ${users}\n🧾 رسیدهای در انتظار: ${pending}\n💳 کارت: ${card}\n🛒 متن خرید: ${buy}\n📢 کانال اجباری: ${ch}`,
+    reply_markup: { inline_keyboard: [
+      [{ text: '✏️ متن دکمه خرید', callback_data: 'ad:editbuy' }, { text: '💳 شماره کارت', callback_data: 'ad:editcard' }],
+      [{ text: '📊 آمار', callback_data: 'ad:stats' }, { text: '🧾 رسیدهای در انتظار', callback_data: 'ad:pending' }],
+      [{ text: '📢 کانال اجباری', callback_data: 'ad:editch' }, { text: '📣 پیام همگانی', callback_data: 'ad:broadcast' }],
+    ] },
+  };
+}
+
 async function doTrial(env, tid) {
   const used = await env.LICENSES.get(`trial:${tid}`);
   if (used) {
@@ -344,11 +473,9 @@ function buyMenu() {
 async function doPlan(env, tid, planId) {
   const p = PLANS.find((x) => x.id === planId);
   if (!p) return { text: 'پلن نامعتبر.' };
-  const admin = env.ADMIN_ID;
-  await env.LICENSES.put(`pending:${tid}`, p.id);
-  const txt = `🛒 درخواست خرید: ${p.label}\nآیدی کاربر: \`${tid}\`\n\nپس از دریافت پرداخت، ادمین با دستور /ok تایید می‌کند.`;
-  await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: admin, text: txt, parse_mode: 'Markdown' });
-  return { text: 'درخواست شما ثبت شد ✅\nپشتیبانی برای پرداخت با شما در تماس است.' };
+  await setSetting(env, `lastPlan:${tid}`, p.id);
+  const card = await getSetting(env, 'cardNumber', '—');
+  return { text: `🛒 پلن: ${p.label}\n💳 مبلغ را کارت به کارت کنید به:\n${card}\n\nسپس اسکرین‌شات رسید را همین‌جا بفرست تا ادمین تایید کند.` };
 }
 
 async function doReferral(env, tid) {

@@ -92,9 +92,9 @@ enum ChainMode {
 class VpnSettings {
   VpnSettings({
     this.mode = ConnectionMode.vpn,
-    this.protocol = Protocol.smart,
-    this.scan = ScanMode.balanced,
-    this.ipVersion = IpVersion.v4,
+    this.protocol = Protocol.wg,
+    this.scan = ScanMode.turbo,
+    this.ipVersion = IpVersion.dual,
     this.transport = MasqueTransport.h3,
     this.obfuscation = 'auto',
     this.endpoint = '',
@@ -119,7 +119,7 @@ class VpnSettings {
     this.orbStyle = OrbStyle.mercury,
     // The out-of-the-box rule is "any IP but Iran" (README, exit_filter_test):
     // an unknown stored name must never silently disable the filter either.
-    this.exitFilter = ExitFilter.nonIran,
+    this.exitFilter = ExitFilter.off,
     this.exitRulePaused = false,
     this.exitPreferred = const ['DE'],
     this.exitBlocked = const ['IR'],
@@ -463,8 +463,8 @@ class VpnSettings {
     return VpnSettings(
       mode: parse(ConnectionMode.values, 'mode', ConnectionMode.vpn),
       protocol: parse(Protocol.values, 'protocol', Protocol.smart),
-      scan: parse(ScanMode.values, 'scan', ScanMode.balanced),
-      ipVersion: parse(IpVersion.values, 'ipVersion', IpVersion.v4),
+      scan: parse(ScanMode.values, 'scan', ScanMode.turbo),
+      ipVersion: parse(IpVersion.values, 'ipVersion', IpVersion.dual),
       transport:
           parse(MasqueTransport.values, 'transport', MasqueTransport.h3),
       obfuscation: json['obfuscation']?.toString() ?? 'auto',
@@ -488,7 +488,7 @@ class VpnSettings {
       notifications: json['notifications'] != false,
       watchdog: json['watchdog'] != false,
       orbStyle: parse(OrbStyle.values, 'orbStyle', OrbStyle.mercury),
-      exitFilter: parse(ExitFilter.values, 'exitFilter', ExitFilter.nonIran),
+      exitFilter: parse(ExitFilter.values, 'exitFilter', ExitFilter.off),
       exitRulePaused: json['exitRulePaused'] == true,
       exitPreferred: codes(json['exitPreferred'], const ['DE']),
       exitBlocked: codes(json['exitBlocked'], const ['IR']),

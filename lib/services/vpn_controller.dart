@@ -832,6 +832,16 @@ class VpnController extends ChangeNotifier {
     rate.reset();
     _log('exit accepted: ${snapshot.country.isEmpty ? '?' : snapshot.country} '
         '${snapshot.ip}');
+    // One-time scan-mode step-down: ship with turbo, settle on balanced after
+    // the first successful scan+connect (user request).
+    if (settings.scan == ScanMode.turbo) {
+      final prefs = await SharedPreferences.getInstance();
+      if (!(prefs.getBool('scanTurboReverted') ?? false)) {
+        settings.scan = ScanMode.balanced;
+        await persist();
+        await prefs.setBool('scanTurboReverted', true);
+      }
+    }
     _statsTimer?.cancel();
     _startStats();
     _clock?.cancel();

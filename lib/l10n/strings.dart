@@ -469,6 +469,17 @@ class S {
       : 'Split rules saved — reconnect to apply them';
 
 
+  // ── downloads ────────────────────────────────────────────────────────────
+  String get navDownloads => isFa ? 'دانلود' : 'Downloads';
+  String get downloadsError => isFa ? 'خطا در دریافت لیست نسخه‌ها' : 'Failed to load releases';
+  String downloadsAssets(int n) => isFa ? '$n فایل' : '$n files';
+  String get downloadsTrialLocked => isFa
+      ? 'دانلود نسخه‌های جدید فقط برای لایسنس خریداری‌شده فعال است'
+      : 'Downloads are available with a paid license only';
+  String get settingsLocked => isFa
+      ? 'در حالت تست رایگان تنظیمات قفل است — برای تغییر، لایسنس بخرید'
+      : 'Settings are locked during the free trial — buy a license to change them';
+
   // ── license ──────────────────────────────────────────────────────────────
   String get navLicense => isFa ? 'لایسنس' : 'License';
   String get licenseActiveTitle => isFa ? 'لایسنس فعال است' : 'License active';
