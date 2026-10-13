@@ -138,7 +138,7 @@ class LicenseService {
       _expiresAt = exp == null
           ? null
           : (exp is num
-              ? DateTime.fromMillisecondsSinceEpoch(exp * 1000, isUtc: true)
+              ? DateTime.fromMillisecondsSinceEpoch((exp as num).toInt() * 1000, isUtc: true)
               : DateTime.tryParse(exp.toString())?.toUtc());
       _checkedAt = DateTime.now().toUtc();
       await _save();
