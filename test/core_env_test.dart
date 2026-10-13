@@ -213,13 +213,13 @@ void main() {
   });
 
   group('smart connect escalation', () {
-    final ladder = CoreLaunch.smartLadder(VpnSettings());
+    final ladder = CoreLaunch.smartLadder(VpnSettings(protocol: Protocol.smart));
     // The exit search numbers its rungs globally (`epoch * ladder.length + i`),
     // so the protocol for rung n is the ladder entry n wraps around to.
     VpnSettings variant(int i, {List<Protocol>? l, Protocol? proto}) {
       final rungs = l ?? ladder;
       return CoreLaunch.smartVariant(
-        VpnSettings(),
+        VpnSettings(protocol: Protocol.smart),
         index: i,
         ladder: rungs,
         proto: proto ?? rungs[i % rungs.length],

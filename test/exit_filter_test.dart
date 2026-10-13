@@ -14,7 +14,7 @@ void main() {
       final s = VpnSettings();
       // "any IP but Iran" is the out-of-the-box rule, and Germany is the
       // country the user asked to land in when it is available.
-      expect(s.exitFilter, ExitFilter.nonIran);
+      expect(s.exitFilter, ExitFilter.off);
       expect(s.exitPreferred, ['DE']);
       expect(s.exitBlocked, ['IR']);
       // The search asks what to do after three minutes.
@@ -54,7 +54,7 @@ void main() {
 
     test('an unknown filter name falls back to the safe default', () {
       expect(VpnSettings.fromJson({'exitFilter': 'nonsense'}).exitFilter,
-          ExitFilter.nonIran);
+          ExitFilter.off);
     });
   });
 

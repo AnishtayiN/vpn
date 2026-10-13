@@ -145,7 +145,7 @@ void main() {
   });
 
   test('smart ladder walks transports', () {
-    expect(CoreLaunch.smartLadder(VpnSettings()).length, greaterThan(3));
+    expect(CoreLaunch.smartLadder(VpnSettings(protocol: Protocol.smart)).length, greaterThan(3));
   });
 
   test('a Cloudflare trace is read the way the leak check needs it', () {
