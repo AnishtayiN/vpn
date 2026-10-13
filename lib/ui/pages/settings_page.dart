@@ -215,7 +215,6 @@ class SettingsPage extends StatelessWidget {
           ),
         ),
       ],
-      ],
     ];
     return AbsorbPointer(
       absorbing: locked,
