@@ -214,8 +214,7 @@ class SettingsPage extends StatelessWidget {
             ],
           ),
         ),
-      ],
-    ];
+      ];
     return AbsorbPointer(
       absorbing: locked,
       child: ListView(
