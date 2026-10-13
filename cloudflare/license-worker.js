@@ -100,6 +100,14 @@ async function extend(env, key, days) {
   return lic;
 }
 
+async function upgradePlan(env, key, plan) {
+  const raw = await env.LICENSES.get(`lic:${key}`);
+  const lic = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  if (!lic || lic.plan === plan) return;
+  lic.plan = plan;
+  await putLic(env, key, lic);
+}
+
 async function tg(token, method, body, env, steps) {
   const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
     method: 'POST',
@@ -339,7 +347,7 @@ async function handle(upd, env, steps) {
       const target = tS, days = parseInt(dS);
       let k = await userKey(env, target);
       let l = k ? await getLic(env, k) : null;
-      if (l && l.expiresAt) { await extend(env, k, days); }
+      if (l && l.expiresAt) { await extend(env, k, days); await upgradePlan(env, k, 'paid'); }
       else { k = await mintKey(env, target, days, 'paid'); await extend(env, k, days); }
       while ((await takeCredit(env, target)) === 1) await extend(env, k, 1);
       await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: target, text: `✅ پرداخت تایید شد!\n\`${k}\`\n${days} روز اضافه شد.`, parse_mode: 'Markdown' }, env, steps);
@@ -587,6 +595,7 @@ async function handle(upd, env, steps) {
     let lic = key ? await getLic(env, key) : null;
     if (lic && lic.expiresAt) {
       await extend(env, key, days);
+      await upgradePlan(env, key, 'paid');
     } else {
       key = await mintKey(env, target, days, 'paid');
       await extend(env, key, days);

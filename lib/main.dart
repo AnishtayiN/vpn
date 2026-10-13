@@ -45,6 +45,12 @@ class _VoidrauAppState extends State<VoidrauApp> with WidgetsBindingObserver {
     controller.boot();
   }
 
+  Future<void> _refreshLicense() async {
+    final before = LicenseService.instance.plan;
+    await LicenseService.instance.check();
+    if (LicenseService.instance.plan != before) controller.notifyListeners();
+  }
+
   /// Coming back to the foreground is one of the mandatory-update checkpoints:
   /// a release published while the app was in the background locks it here.
   @override
@@ -52,6 +58,10 @@ class _VoidrauAppState extends State<VoidrauApp> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       controller.refreshUpdate();
       controller.syncNativeState();
+      // Re-validate the license on resume: an admin approval (trial → paid)
+      // upgrades the plan server-side; this refresh unlocks UI without
+      // requiring the user to re-enter the key.
+      _refreshLicense();
     }
   }
 
