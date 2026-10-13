@@ -154,6 +154,17 @@ export default {
       return new Response('ok');
     }
 
+    if (url.pathname === '/diag') {
+      const me = await tg(env.BOT_TOKEN || '', 'getMe', {});
+      const hook = await tg(env.BOT_TOKEN || '', 'getWebhookInfo', {});
+      return json({
+        botTokenSet: !!env.BOT_TOKEN,
+        adminIdSet: !!env.ADMIN_ID,
+        kvSet: !!env.LICENSES,
+        getMe: me,
+        webhook: hook,
+      });
+    }
     if (url.pathname === '/') return new Response('VoidrauVPN license bot — alive.');
     return json({ ok: false, error: 'not-found' }, 404);
   },
