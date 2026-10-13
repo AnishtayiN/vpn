@@ -123,7 +123,7 @@ class _LicensePageState extends State<VoidrauLicensePage> {
                   ),
                   if (lic.plan != null)
                     Text(
-                      '${s.licensePlan}: ${lic.plan}',
+                      '${s.licensePlan}: ${_planLabel(lic.plan!)}',
                       textAlign: TextAlign.center,
                       style: const TextStyle(color: VoidrauColors.muted),
                     ),
