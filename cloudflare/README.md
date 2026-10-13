@@ -17,13 +17,13 @@ wrangler deploy
 ## هوک تلگرام
 بعد از دیپلوی، یک بار در مرورگر:
 ```
-https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://voidrau-license.<your-subdomain>.workers.dev/webhook
+https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://voidrau.massagetoanishtayin.workers.dev/webhook
 ```
 
 ## تغییر API در اپ
 آدرس Worker در اپ با `--dart-define` می‌آید (پیش‌فرض در `license_service.dart`):
 ```
---dart-define=VOIDRAU_LICENSE_API=https://voidrau-license.<your-subdomain>.workers.dev
+--dart-define=VOIDRAU_LICENSE_API=https://voidrau.massagetoanishtayin.workers.dev
 ```
 در workflow ریلیز (release.yml) اضافه کن به extra-front-end-options.
 

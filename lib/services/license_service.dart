@@ -22,7 +22,7 @@ class LicenseService {
 
   static const apiBase = String.fromEnvironment(
     'VOIDRAU_LICENSE_API',
-    defaultValue: 'https://voidrau-license.anishtayin.workers.dev',
+    defaultValue: 'https://voidrau.massagetoanishtayin.workers.dev',
   );
 
   static const _prefKey = 'license.key';
