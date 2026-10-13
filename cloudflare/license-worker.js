@@ -45,7 +45,9 @@ function json(data, status = 200) {
 }
 
 async function getLic(env, key) {
-  return await env.LICENSES.get(`lic:${key}`, 'json');
+  const raw = await env.LICENSES.get(`lic:${key}`);
+  if (raw == null) return null;
+  return typeof raw === 'string' ? JSON.parse(raw) : raw;
 }
 async function putLic(env, key, lic) {
   await env.LICENSES.put(`lic:${key}`, JSON.stringify(lic));
@@ -77,7 +79,8 @@ async function mintKey(env, tid, days, plan = 'custom') {
 }
 
 async function extend(env, key, days) {
-  const lic = await getLic(env, key);
+  const raw = await env.LICENSES.get(`lic:${key}`);
+  const lic = typeof raw === 'string' ? JSON.parse(raw) : raw;
   if (!lic) return null;
   const now = Math.floor(Date.now() / 1000);
   const base = lic.expiresAt && lic.expiresAt > now ? lic.expiresAt : now;
@@ -234,7 +237,7 @@ async function handle(upd, env) {
             await tg(token, 'sendMessage', {
               chat_id: ref,
               text: `🎉 ${REFERRAL_REWARD_JOINS} نفر با لینک شما وارد شدند — ${REFERRAL_REWARD_DAYS} روز هدیه به حساب شما اضافه شد. با /start کدتان را بگیرید.`,
-            });
+            }, env);
           }
         }
       }
@@ -251,7 +254,7 @@ async function handle(upd, env) {
     const target = tidS ? parseInt(tidS) : tid;
     const key = await mintKey(env, target, days, 'admin');
     await extend(env, key, days);
-    await tg(token, 'sendMessage', { chat_id: tid, text: `🔑 ساخته شد:\n\`${key}\`\nبرای کاربر \`${target}\` — ${days} روز`, parse_mode: 'Markdown' });
+    await tg(token, 'sendMessage', { chat_id: tid, text: `🔑 ساخته شد:\n\`${key}\`\nبرای کاربر \`${target}\` — ${days} روز`, parse_mode: 'Markdown' }, env);
     return;
   }
 
@@ -270,12 +273,12 @@ async function handle(upd, env) {
     }
     // spend referral credit if present
     while ((await takeCredit(env, target)) === 1) await extend(env, key, 1);
-    await tg(token, 'sendMessage', { chat_id: tid, text: `✅ تایید شد — ${days} روز برای \`${target}\`\n\`${key}\``, parse_mode: 'Markdown' });
+    await tg(token, 'sendMessage', { chat_id: tid, text: `✅ تایید شد — ${days} روز برای \`${target}\`\n\`${key}\``, parse_mode: 'Markdown' }, env);
     await tg(token, 'sendMessage', {
       chat_id: target,
       text: `✅ پرداخت شما تایید شد!\n\`${key}\`\nاین کد را در برنامه (تب لایسنس) وارد کنید.`,
       parse_mode: 'Markdown',
-    });
+    }, env);
     return;
   }
 
