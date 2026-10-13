@@ -735,7 +735,7 @@ class VpnController extends ChangeNotifier {
           protocol: proto.name,
         );
         if (matchesExitFilter(cc, settings)) {
-          _finalizeConnected(proto);
+          unawaited(_finalizeConnected(proto));
           unawaited(_savePin(
             (endpoint: ep, protocol: proto.name),
             cc,
@@ -766,7 +766,7 @@ class VpnController extends ChangeNotifier {
             endpoint: ep,
             protocol: proto.name,
           );
-          _finalizeConnected(proto);
+          unawaited(_finalizeConnected(proto));
           unawaited(_savePin(
             (endpoint: ep, protocol: proto.name),
             moved.country,
