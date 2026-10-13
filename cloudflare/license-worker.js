@@ -150,14 +150,18 @@ export default {
     if (url.pathname === '/webhook' && request.method === 'POST') {
       const upd = await request.json();
       // fire-and-forget so the webhook returns 200 immediately
-      (async () => { try { await handle(upd, env); } catch (e) {} })();
+      (async () => { try { await handle(upd, env); }
+       catch (e) { await env.LICENSES.put('lastError', String(e && e.stack || e)); }
+     })();
       return new Response('ok');
     }
 
     if (url.pathname === '/diag') {
       const me = await tg(env.BOT_TOKEN || '', 'getMe', {});
       const hook = await tg(env.BOT_TOKEN || '', 'getWebhookInfo', {});
+      const lastError = await env.LICENSES.get('lastError');
       return json({
+        lastError,
         botTokenSet: !!env.BOT_TOKEN,
         adminIdSet: !!env.ADMIN_ID,
         kvSet: !!env.LICENSES,
