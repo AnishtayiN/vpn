@@ -157,12 +157,19 @@ async function releaseFiles(env) {
 const humanSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.round(n / 1024) + ' KB';
 
 async function doDownloads(env, tid) {
-  const files = await releaseFiles(env);
-  if (!files) return { text: '⚠️ فعلاً فایلی برای دانلود پیدا نشد. بعداً دوباره امتحان کنید.' };
-  const rows = files.map((f) => [{ text: `📄 ${f.name} (${humanSize(f.size)})`, url: f.url }]);
+  const files = (await releaseFiles(env)) || [];
+  const apk = files.filter((f) => f.name.toLowerCase().endsWith('.apk'));
+  const exe = files.filter((f) => f.name.toLowerCase().endsWith('.exe'));
+  const other = files.filter((f) => f.name.toLowerCase().endsWith('.zip'));
+  const pick = [...apk, ...exe, ...other].slice(0, 5);
+  if (!pick.length) return { text: '⚠️ فعلاً فایلی برای ارسال پیدا نشد. بعداً دوباره امتحان کنید.' };
+  // Send each file as a real document inside the chat (Telegram fetches it from GitHub).
+  for (const f of pick) {
+    await tg(env.BOT_TOKEN, 'sendDocument', { chat_id: tid, document: f.url });
+  }
   return {
-    text: '📥 نسخه‌های برنامه — روی فایل بزنید تا دانلود شود:\n(فایل APK را نصب کنید؛ SHA256 فایل‌ها در ریلیز بررسی می‌شود)',
-    reply_markup: { inline_keyboard: [...rows, [{ text: '🔄 بروزرسانی لیست', callback_data: 'dl' }]] },
+    text: '📥 نسخه‌های برنامه بالا فرستاده شد 👆\nروی فایل بزنید و ذخیره/نصب کنید.\n\n🤖 اندروید: فایل APK را نصب کنید\n🪟 ویندوز: Installer یا Portable',
+    reply_markup: { inline_keyboard: [[{ text: '🔄 ارسال دوباره فایل‌ها', callback_data: 'dl' }]] },
   };
 }
 
