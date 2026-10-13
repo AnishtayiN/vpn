@@ -230,7 +230,18 @@ async function doStatus(env, tid) {
 
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
+    // Top-level guard: a thrown error must never surface as CF error 1101.
+    try {
+      return await handleHttp(request, env);
+    } catch (e) {
+      try { await env.LICENSES.put('lastError', 'fetch: ' + String(e && e.stack || e).slice(0, 400)); } catch (_) {}
+      return new Response('⚠️ Worker error — see /diag.\n' + String(e && e.message || e), { status: 500 });
+    }
+  },
+};
+
+async function handleHttp(request, env) {
+  const url = new URL(request.url);
 
     // ── HTTP API ──────────────────────────────────────────────────────────
     if (url.pathname === '/api/license' || url.pathname === '/api/status') {
@@ -319,10 +330,8 @@ export default {
         webhook: hook,
       });
     }
-    if (url.pathname === '/') return new Response('VoidrauVPN license bot — alive.');
-    return json({ ok: false, error: 'not-found' }, 404);
-  },
-};
+  return json({ ok: false, error: 'not-found' }, 404);
+}
 
 async function handle(upd, env, steps) {
   const token = env.BOT_TOKEN;
@@ -453,12 +462,28 @@ async function handle(upd, env, steps) {
         }
         await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `📣 ارسال به ${list.length} کاربر انجام شد.` }, env, steps);
       } else if (mode === 'plans') {
-        const rows = text.split('\n').map((l) => l.trim()).filter(Boolean)
-          .map((l) => { const [id, label, days] = l.split('|').map((x) => x.trim()); return id && label && parseInt(days) ? { id, label, days: parseInt(days) } : null; })
-          .filter(Boolean);
-        if (!rows.length) { await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ فرمت درست نیست.' }, env, steps); return; }
+        const rows = [];
+        const bad = [];
+        for (const [n, raw] of text.split('\n').entries()) {
+          const l = raw.trim();
+          if (!l) continue;
+          const parts = l.split('|').map((x) => x.trim());
+          if (parts.length !== 3 || !parts[0] || !parts[1] || !/^\d+$/.test(parts[2]) || parseInt(parts[2]) < 1) {
+            bad.push(`خط ${n + 1}: ${l.slice(0, 40)}`);
+            continue;
+          }
+          rows.push({ id: parts[0].replace(/\s+/g, ''), label: parts[1], days: parseInt(parts[2]) });
+        }
+        const ids = rows.map((r) => r.id);
+        if (new Set(ids).size !== ids.length) { await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ شناسهٔ تکراری — هر پلن شناسهٔ یکتا داشته باشد.' }, env, steps); return; }
+        if (bad.length) {
+          await env.LICENSES.put(`admMode:${tid}`, mode);
+          await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `❌ این خط‌ها درست نیستن (فرمت: شناسه|برچسب|روز):\n${bad.join('\n')}\n\nهمهٔ خط‌ها را دوباره بفرست.`, reply_markup: { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'ad:cancelmode' }]] } }, env, steps);
+          return;
+        }
+        if (!rows.length) { await env.LICENSES.put(`admMode:${tid}`, mode); await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ هیچ پلن معتبری پیدا نشد — دوباره بفرست.', reply_markup: { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'ad:cancelmode' }]] } }, env, steps); return; }
         await env.LICENSES.put('setting:plans', JSON.stringify(rows));
-        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ ${rows.length} پلن ذخیره شد.` }, env, steps);
+        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ ${rows.length} پلن ذخیره شد:\n${rows.map((r) => `• ${r.label} (${r.days} روز)`).join('\n')}` }, env, steps);
       } else if (mode === 'trialDays') {
         const d = parseInt(text);
         if (!d || d < 1) { await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ عدد نامعتبر.' }, env, steps); return; }
