@@ -69,6 +69,24 @@ class _LicensePageState extends State<VoidrauLicensePage> {
     await Links.open('https://t.me/${AppInfo.botHandle.replaceFirst('@', '')}?start=buy');
   }
 
+  String _planLabel(String p) {
+    switch (p) {
+      case 'paid':
+      case 'admin':
+        return s.isFa ? 'خریداری‌شده ✅' : 'Paid';
+      case 'trial':
+        return s.isFa ? 'تستی' : 'Trial';
+      default:
+        return p;
+    }
+  }
+
+  Future<void> _recheck() async {
+    setState(() => _busy = true);
+    await LicenseService.instance.check();
+    if (mounted) setState(() => _busy = false);
+  }
+
   @override
   Widget build(BuildContext context) {
     final lic = LicenseService.instance;
@@ -125,6 +143,14 @@ class _LicensePageState extends State<VoidrauLicensePage> {
           onPressed: _busy ? null : _trial,
           icon: const Icon(Icons.timer_outlined),
           label: Text(s.licenseTrial),
+        ),
+        const SizedBox(height: 10),
+        // Re-check the key with the server (e.g. right after the admin
+        // approved a receipt in the bot) to unlock paid-only sections.
+        OutlinedButton.icon(
+          onPressed: _busy ? null : _recheck,
+          icon: const Icon(Icons.refresh_rounded),
+          label: Text(s.licenseRecheck),
         ),
         const SizedBox(height: 10),
         // Buy — the bot handles payment, referral credit and key delivery.

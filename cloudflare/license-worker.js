@@ -580,7 +580,7 @@ async function handle(upd, env, steps) {
     const [, daysS, tidS] = text.split(/\s+/);
     const days = parseInt(daysS || '30');
     const target = tidS ? parseInt(tidS) : tid;
-    const key = await mintKey(env, target, days, 'admin');
+    const key = await mintKey(env, target, days, 'paid');
     await extend(env, key, days);
     await tg(token, 'sendMessage', { chat_id: tid, text: `🔑 ساخته شد:\n\`${key}\`\nبرای کاربر \`${target}\` — ${days} روز`, parse_mode: 'Markdown' }, env);
     return;
@@ -611,6 +611,17 @@ async function handle(upd, env, steps) {
       text: `✅ پرداخت شما تایید شد!\n\`${key}\`\nاین کد را در برنامه (تب لایسنس) وارد کنید.`,
       parse_mode: 'Markdown',
     }, env);
+    return;
+  }
+
+  if (text.startsWith('/fix') && String(tid) === String(env.ADMIN_ID)) {
+    const target = (text.split(/\s+/)[1] || '').trim();
+    if (!target) { await tg(token, 'sendMessage', { chat_id: tid, text: 'فرمت: /fix <آیدی‌کاربر>' }, env); return; }
+    const k = await userKey(env, target);
+    if (!k) { await tg(token, 'sendMessage', { chat_id: tid, text: `کاربر ${target} لایسنس ندارد.` }, env); return; }
+    await upgradePlan(env, k, 'paid');
+    const l = await getLic(env, k);
+    await tg(token, 'sendMessage', { chat_id: tid, text: `🔧 پلن کاربر ${target} به خریداری تبدیل شد.\n\`${k}\`\n⏳ تا: ${l?.expiresAt ? new Date(l.expiresAt * 1000).toLocaleDateString('fa-IR') : '—'}`, parse_mode: 'Markdown' }, env);
     return;
   }
 

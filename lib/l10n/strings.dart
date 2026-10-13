@@ -491,6 +491,7 @@ class S {
       : 'Get a license to use the VPN — start with a free 24h trial via the Telegram bot.';
   String get licenseRemaining => isFa ? 'زمان باقی‌مانده' : 'Time remaining';
   String get licensePlan => isFa ? 'پلن' : 'Plan';
+  String get licenseRecheck => isFa ? 'بررسی دوباره لایسنس' : 'Re-check license';
   String get licenseTrial => isFa ? 'تست رایگان ۲۴ ساعته (ربات تلگرام)' : 'Free 24h trial (Telegram bot)';
   String get licenseBuy => isFa ? 'خرید لایسنس / شارژ' : 'Buy / top-up license';
   String get licenseKeyLabel => isFa ? 'کد لایسنس' : 'License key';
