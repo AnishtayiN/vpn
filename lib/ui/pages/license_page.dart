@@ -16,7 +16,7 @@ class VoidrauLicensePage extends StatefulWidget {
   State<VoidrauLicensePage> createState() => _LicensePageState();
 }
 
-class _LicensePageState extends State<LicensePage> {
+class _LicensePageState extends State<VoidrauLicensePage> {
   final _keyController = TextEditingController();
   bool _busy = false;
   String? _message;
