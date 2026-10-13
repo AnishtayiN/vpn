@@ -67,17 +67,17 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
                 const Icon(Icons.lock_outline_rounded,
                     size: 56, color: VoidrauColors.cyan),
                 const SizedBox(height: 16),
-                Text(
+                const Text(
                   '🔒 برنامه قفل است',
                   textAlign: TextAlign.center,
-                  style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
                 ),
                 const SizedBox(height: 8),
-                Text(
+                const Text(
                   'برای ورود، لایسنس خریداری‌شده را وارد کنید.\n'
                   'تست رایگان و رفرال فقط امکان اتصال موقت می‌دهد و تنظیمات قفل است.',
                   textAlign: TextAlign.center,
-                  style: const TextStyle(color: VoidrauColors.muted, height: 1.5),
+                  style: TextStyle(color: VoidrauColors.muted, height: 1.5),
                 ),
                 const SizedBox(height: 24),
                 TextField(
