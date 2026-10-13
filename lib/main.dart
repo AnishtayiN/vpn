@@ -48,7 +48,7 @@ class _VoidrauAppState extends State<VoidrauApp> with WidgetsBindingObserver {
   Future<void> _refreshLicense() async {
     final before = LicenseService.instance.plan;
     await LicenseService.instance.check();
-    if (LicenseService.instance.plan != before) controller.notifyListeners();
+    if (LicenseService.instance.plan != before) controller.notifyLicenseChanged();
   }
 
   /// Coming back to the foreground is one of the mandatory-update checkpoints:

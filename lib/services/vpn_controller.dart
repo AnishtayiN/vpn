@@ -181,6 +181,10 @@ class VpnController extends ChangeNotifier {
 
   bool get rtl => s.isFa;
 
+  /// Public hook for app-level listeners (main.dart) to rebuild the shell when
+  /// the license plan changes (e.g. trial → paid approved from the bot).
+  void notifyLicenseChanged() => notifyListeners();
+
   Future<void> boot() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString('settings');
