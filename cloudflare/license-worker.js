@@ -436,8 +436,14 @@ async function handle(upd, env, steps) {
         await env.LICENSES.put('setting:trialDays', String(d));
         await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ تست رایگان = ${d} روز.` }, env, steps);
       } else {
-        await setSetting(env, mode, text);
-        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '✅ ذخیره شد.' }, env, steps);
+        let val = text.trim();
+        if (mode === 'forceChannel') {
+          // accept https://t.me/xyz , t.me/xyz , @xyz , xyz , or -100... id
+          const mch = val.match(/(?:t\.me\/|@)([A-Za-z0-9_]+)/);
+          if (mch) val = '@' + mch[1];
+        }
+        await setSetting(env, mode, val);
+        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ ذخیره شد: ${val}` }, env, steps);
       }
       steps.push('admin-mode:' + mode);
       return;
@@ -542,10 +548,18 @@ async function setSetting(env, k, v) {
   await env.LICENSES.put(`set:${k}`, v);
 }
 async function checkJoined(env, tid) {
-  const ch = await getSetting(env, 'forceChannel', '');
+  const ch = (await getSetting(env, 'forceChannel', '')).trim();
   if (!ch) return true;
   const r = await tg(env.BOT_TOKEN, 'getChatMember', { chat_id: ch, user_id: tid }, env);
-  const st = r?.result?.status || 'left';
+  if (!r || !r.ok) {
+    // bot not in channel / wrong channel id / not admin: do not lock users out
+    // of the bot — surface it to the admin instead.
+    try { await env.LICENSES.put('lastError', `force-join: getChatMember ${ch}: ${r?.description || 'unknown'}`); } catch (_) {}
+    return true;
+  }
+  const m = r.result || {};
+  const st = m.status || 'left';
+  if (st === 'restricted') return m.is_member === true;
   return ['member', 'administrator', 'creator'].includes(st);
 }
 function joinPrompt(ch) {
