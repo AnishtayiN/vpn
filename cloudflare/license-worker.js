@@ -94,8 +94,12 @@ async function tg(token, method, body, env) {
     body: JSON.stringify(body),
   });
   const out = await r.json();
-  if (!out.ok && env && env.LICENSES) {
-    await env.LICENSES.put('lastError', `tg ${method}: ${out.error_code || ''} ${out.description || 'unknown'}`);
+  if (env && env.LICENSES) {
+    if (!out.ok) {
+      await env.LICENSES.put('lastError', `tg ${method}: ${out.error_code || ''} ${out.description || 'unknown'}`);
+    } else if (method === 'sendMessage' && out.result?.message_id) {
+      await env.LICENSES.put('lastSentId', String(out.result.message_id));
+    }
   }
   return out;
 }
@@ -174,8 +178,10 @@ export default {
       const hook = await tg(env.BOT_TOKEN || '', 'getWebhookInfo', {});
       const lastError = await env.LICENSES.get('lastError');
       const lastUpdate = await env.LICENSES.get('lastUpdate');
+      const lastSentId = await env.LICENSES.get('lastSentId');
       return json({
         lastUpdate: lastUpdate ? JSON.parse(lastUpdate) : null,
+        lastSentId,
         lastError,
         botTokenSet: !!env.BOT_TOKEN,
         adminIdSet: !!env.ADMIN_ID,
