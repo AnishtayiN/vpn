@@ -398,25 +398,31 @@ async function handle(upd, env, steps) {
   const text = (msg.text || '').trim();
   steps.push('msg:' + text.slice(0, 20));
 
-  if (msg.photo && String(tid) !== String(env.ADMIN_ID)) {
-    await env.LICENSES.put(`receipt:${tid}`, JSON.stringify({ fileId: msg.photo[msg.photo.length - 1].file_id, at: Date.now() }));
-    const pend = (parseInt((await env.LICENSES.get('stat:pending')) || '0')) + 1;
-    await env.LICENSES.put('stat:pending', String(pend));
-    await tg(env.BOT_TOKEN, 'sendPhoto', {
-      chat_id: env.ADMIN_ID,
-      photo: msg.photo[msg.photo.length - 1].file_id,
-      caption: `🧾 رسید از کاربر \`${tid}\` — پلن تاییدشده را انتخاب کنید (رسید #${pend})`,
-      parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: ((await plansOf(env))).map((p) => [{ text: `تایید ${p.label}`, callback_data: `okr:${tid}:${p.days}` }]) },
-    }, env, steps);
-    await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '✅ رسید شما ارسال شد — پس از تایید ادمین، کد لایسنس برایتان ارسال می‌شود.' }, env, steps);
-    steps.push('receipt-forwarded');
-    return;
-  }
+  // Admin pending-input mode FIRST (so admin photos/edits are consumed, not "متوجه نشدم").
+  const mediaAdmin = msg.photo ? 'photo' : (msg.document ? 'doc' : null);
   if (String(tid) === String(env.ADMIN_ID)) {
     const mode = await env.LICENSES.get(`admMode:${tid}`);
     if (mode && !text.startsWith('/')) {
       await env.LICENSES.delete(`admMode:${tid}`);
+      if (mode === 'broadcast' && mediaAdmin) {
+        const list = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
+        let n = 0;
+        for (const u of list.slice(0, 500)) {
+          try {
+            if (mediaAdmin === 'photo') await tg(env.BOT_TOKEN, 'sendPhoto', { chat_id: u, photo: msg.photo[msg.photo.length - 1].file_id, caption: msg.caption || '' }, env, steps);
+            else await tg(env.BOT_TOKEN, 'sendDocument', { chat_id: u, document: msg.document.file_id, caption: msg.caption || '' }, env, steps);
+            n++;
+          } catch (_) {}
+        }
+        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `📣 ارسال ${mediaAdmin === 'photo' ? 'عکس' : 'فایل'} به ${n} کاربر انجام شد.` }, env, steps);
+        steps.push('admin-broadcast-media');
+        return;
+      }
+      if (mediaAdmin) {
+        await env.LICENSES.put(`admMode:${tid}`, mode);
+        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: 'برای این مورد باید متن بفرستید (عکس/فایل قابل ذخیره نیست).' }, env, steps);
+        return;
+      }
       if (mode === 'broadcast') {
         const list = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
         for (const u of list.slice(0, 500)) {
@@ -448,6 +454,44 @@ async function handle(upd, env, steps) {
       steps.push('admin-mode:' + mode);
       return;
     }
+    if (mediaAdmin && !text.startsWith('/')) {
+      // admin sent a screenshot outside any edit mode: guide instead of "متوجه نشدم"
+      await tg(env.BOT_TOKEN, 'sendMessage', {
+        chat_id: tid,
+        text: '📸 عکس دریافت شد.\nاگر رسید کاربری را تایید می‌خواهی: /panel → 🧾 رسیدها\nاگر عکس همگانی می‌خواهی بفرستی: /panel → 📣 پیام همگانی، بعد عکس را بفرست.',
+      }, env, steps);
+      return;
+    }
+  }
+
+  // Receipt intake: photo or document from a normal user.
+  const media2 = msg.photo ? 'photo' : (msg.document ? 'doc' : null);
+  if (media2) {
+    const fid = media2 === 'photo' ? msg.photo[msg.photo.length - 1].file_id : msg.document.file_id;
+    await env.LICENSES.put(`receipt:${tid}`, JSON.stringify({ fileId: fid, kind: media2, at: Date.now() }));
+    const pend = (parseInt((await env.LICENSES.get('stat:pending')) || '0')) + 1;
+    await env.LICENSES.put('stat:pending', String(pend));
+    const cap = `🧾 رسید از کاربر \`${tid}\` — پلن تاییدشده را انتخاب کنید (رسید #${pend})`;
+    if (media2 === 'photo') {
+      await tg(env.BOT_TOKEN, 'sendPhoto', {
+        chat_id: env.ADMIN_ID,
+        photo: fid,
+        caption: cap,
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: ((await plansOf(env))).map((p) => [{ text: `تایید ${p.label}`, callback_data: `okr:${tid}:${p.days}` }]) },
+      }, env, steps);
+    } else {
+      await tg(env.BOT_TOKEN, 'sendDocument', {
+        chat_id: env.ADMIN_ID,
+        document: fid,
+        caption: cap,
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: ((await plansOf(env))).map((p) => [{ text: `تایید ${p.label}`, callback_data: `okr:${tid}:${p.days}` }]) },
+      }, env, steps);
+    }
+    await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '✅ رسید شما ارسال شد — پس از تایید ادمین، کد لایسنس برایتان ارسال می‌شود.' }, env, steps);
+    steps.push('receipt-forwarded');
+    return;
   }
 
   if (String(tid) === String(env.ADMIN_ID) && text.trim() === '/panel') {
