@@ -816,7 +816,7 @@ class VpnController extends ChangeNotifier {
   }
 
   /// The tunnel is up *and* its exit is acceptable: publish the connected state.
-  void _finalizeConnected(Protocol proto) {
+  Future<void> _finalizeConnected(Protocol proto) async {
     _watchdogTries = 0;
     _lastHealthy = DateTime.now();
     _promptTimer?.cancel();
