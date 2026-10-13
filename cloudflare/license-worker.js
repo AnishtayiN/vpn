@@ -87,13 +87,17 @@ async function extend(env, key, days) {
   return lic;
 }
 
-async function tg(token, method, body) {
+async function tg(token, method, body, env) {
   const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
-  return r.json();
+  const out = await r.json();
+  if (!out.ok && env && env.LICENSES) {
+    await env.LICENSES.put('lastError', `tg ${method}: ${out.error_code || ''} ${out.description || 'unknown'}`);
+  }
+  return out;
 }
 
 function mainMenu(from, lic) {
@@ -187,8 +191,8 @@ async function handle(upd, env) {
     else if (cb.data === 'ref') out = await doReferral(env, tid);
     else if (cb.data === 'mykey') out = await doMyKey(env, tid);
     else if (cb.data.startsWith('plan:')) out = await doPlan(env, tid, cb.data.slice(5));
-    if (out) await tg(token, 'sendMessage', { chat_id: tid, ...out });
-    await tg(token, 'answerCallbackQuery', { callback_query_id: cb.id });
+    if (out) await tg(token, 'sendMessage', { chat_id: tid, ...out }, env);
+    await tg(token, 'answerCallbackQuery', { callback_query_id: cb.id }, env);
     return;
   }
   if (!msg) return;
@@ -220,7 +224,7 @@ async function handle(upd, env) {
     }
     const key = await userKey(env, tid);
     const lic = key ? await getLic(env, key) : null;
-    await tg(token, 'sendMessage', { chat_id: tid, ...mainMenu(msg.from, lic) });
+    await tg(token, 'sendMessage', { chat_id: tid, ...mainMenu(msg.from, lic) }, env);
     return;
   }
 
@@ -259,7 +263,7 @@ async function handle(upd, env) {
   }
 
   if (text === '/id') {
-    await tg(token, 'sendMessage', { chat_id: tid, text: `آیدی عددی شما: \`${tid}\``, parse_mode: 'Markdown' });
+    await tg(token, 'sendMessage', { chat_id: tid, text: `آیدی عددی شما: \`${tid}\``, parse_mode: 'Markdown' }, env);
   }
 }
 
