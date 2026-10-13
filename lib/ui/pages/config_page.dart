@@ -22,13 +22,13 @@ class ConfigPage extends StatelessWidget {
     final st = c.settings;
     // Trial/referral users get a read-only settings page; only paid
     // licenses may change the config (user request).
-    final locked = !LicenseService.instance.isActive;
+    final locked = !LicenseService.instance.isPaid;
     final children = <Widget>[
       if (locked)
         Padding(
           padding: const EdgeInsets.only(bottom: 12),
           child: Text(
-            '🔒 تنظیمات برای لایسنس تستی قفل است — برای تغییر، لایسنس بخرید.',
+            '🔒 تنظیمات برای لایسنس تستی/رفرال قفل است — برای تغییر، لایسنس خریداری کنید.',
             style: Theme.of(context).textTheme.bodySmall,
           ),
         ),

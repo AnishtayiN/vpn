@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../app_info.dart';
 import '../../models/settings.dart';
+import '../../services/license_service.dart';
 import '../../services/links.dart';
 import '../../services/vpn_controller.dart';
 import '../../theme/voidrau_theme.dart';
@@ -19,9 +20,17 @@ class SettingsPage extends StatelessWidget {
     final s = c.s;
     final st = c.settings;
     final u = c.update;
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 40),
-      children: [
+    // Paid license only: trial/referral users get a read-only page.
+    final locked = !LicenseService.instance.isPaid;
+    final children = <Widget>[
+      if (locked)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: Text(
+            '🔒 تنظیمات برای لایسنس تستی/رفرال قفل است — برای تغییر، لایسنس خریداری کنید.',
+            style: const TextStyle(color: VoidrauColors.coral, fontSize: 13),
+          ),
+        ),
         Text(s.appearance, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
         const SizedBox(height: 12),
         _seg(st.theme.name, {
@@ -206,6 +215,14 @@ class SettingsPage extends StatelessWidget {
           ),
         ),
       ],
+      ],
+    ];
+    return AbsorbPointer(
+      absorbing: locked,
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 40),
+        children: children,
+      ),
     );
   }
 

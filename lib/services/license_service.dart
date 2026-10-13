@@ -40,6 +40,9 @@ class LicenseService {
 
   String? get key => _key;
   String? get plan => _plan;
+
+  /// Paid licenses unlock configuration; trials/referrals stay read-only.
+  bool get isPaid => _plan == 'paid' && isActive;
   String? get lastError => _lastError;
   DateTime? get expiresAt => _expiresAt;
 
