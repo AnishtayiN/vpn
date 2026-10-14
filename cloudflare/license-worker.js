@@ -195,6 +195,15 @@ async function sendReleaseFile(env, tid, url, name) {
   if (env.GITHUB_TOKEN) ghHeaders.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
   const res = await fetch(url, { headers: ghHeaders, redirect: 'follow' });
   if (!res.ok) throw new Error(`github ${res.status}`);
+  // size check BEFORE buffering — a huge asset must not OOM the isolate
+  const len = Number((res.headers && res.headers.get) ? (res.headers.get('content-length') || 0) : 0);
+  if (len && len > 45 * 1024 * 1024) {
+    await tg(env.BOT_TOKEN, 'sendMessage', {
+      chat_id: tid,
+      text: `⚠️ فایل ${name} حجمش بیش از حد مجاز ربات است (${humanSize(len)}).\nاز نسخهٔ مخصوص دستگاه‌تان استفاده کنید (arm64 برای اکثر گوشی‌ها).`,
+    });
+    return;
+  }
   const buf = await res.arrayBuffer();
   if (buf.byteLength > 45 * 1024 * 1024) {
     await tg(env.BOT_TOKEN, 'sendMessage', {
@@ -855,9 +864,22 @@ async function exportBackup(env, tid) {
     const l = k ? await getLic(env, k) : null;
     out.push({ id: u, key: k || null, plan: l?.plan || null, expiresAt: l?.expiresAt || null });
   }
-  const body = JSON.stringify(out, null, 1);
-  // KV values cap ~25MB — fine. Send as file via document upload requires multipart; send as text chunk instead.
-  return { text: '💾 پشتیبان:\n' + body.slice(0, 3800) };
+  const body = JSON.stringify(out);
+  // send as a real file via multipart upload (no silent truncation)
+  const fd = new FormData();
+  fd.append('chat_id', String(tid));
+  fd.append('document', new Blob([body]), `voidrau-backup-${new Date().toISOString().slice(0, 10)}.json`);
+  const up = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`, { method: 'POST', body: fd });
+  const j = await up.json().catch(() => ({}));
+  if (j.ok) return { text: `💾 پشتیبان کامل (${idx.length} کاربر) به‌صورت فایل ارسال شد 👆` };
+  // fallback: chunked text (max 5 chunks)
+  const chunks = [];
+  for (let i = 0; i < body.length; i += 3800) chunks.push(body.slice(i, i + 3800));
+  await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '💾 پشتیبان (بخش ۱/' + chunks.length + '):\n' + chunks[0] }, env);
+  for (let c = 1; c < Math.min(chunks.length, 5); c++) {
+    await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '💾 بخش ' + (c + 1) + '/' + chunks.length + ':\n' + chunks[c] }, env);
+  }
+  return { text: chunks.length > 5 ? `⚠️ پشتیبان خیلی بزرگ است (${chunks.length} بخش) — فقط ۵ بخش اول فرستاده شد.` : `💾 پشتیبان کامل در ${chunks.length} پیام ارسال شد.` };
 }
 
 async function doTrial(env, tid) {
