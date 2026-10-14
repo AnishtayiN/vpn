@@ -74,7 +74,7 @@ async function addCredit(env, tid, days) {
 }
 async function takeCredit(env, tid) {
   const cur = parseInt((await env.LICENSES.get(`credit:${tid}`)) || '0');
-  if (cur <= 0) return 0;
+  if (!Number.isFinite(cur) || cur <= 0) return 0;
   await env.LICENSES.put(`credit:${tid}`, String(cur - 1));
   return 1;
 }
@@ -136,7 +136,8 @@ function mainMenu(from, lic) {
     [{ text: '📊 وضعیت لایسنس', callback_data: 'status' }, { text: '📖 راهنما', callback_data: 'help' }],
     [{ text: '🆘 پشتیبانی', callback_data: 'support' }],
   ];
-  const hi = name ? `سلام ${name} 👋\n\n` : '👋\n\n';
+  const safe = name.replace(/([_*\[`])/g, '\\$1');
+  const hi = name ? `سلام ${safe} 👋\n\n` : '👋\n\n';
   const body = active
     ? `✅ لایسنس فعال شما:\n\`${lic.key}\`\n⏳ تا: ${new Date(lic.expiresAt * 1000).toLocaleDateString('fa-IR')}`
     : 'به ربات رسمی VoidrauVPN خوش آمدید!\n\n🔐 برای فعال‌سازی برنامه:\n• تست رایگان بگیرید یا لایسنس بخرید\n• کد را در برنامه → تب «لایسنس» وارد کنید\n• نسخه جدید برنامه را از «دانلود» بگیرید';
@@ -235,7 +236,7 @@ export default {
       return await handleHttp(request, env);
     } catch (e) {
       try { await env.LICENSES.put('lastError', 'fetch: ' + String(e && e.stack || e).slice(0, 400)); } catch (_) {}
-      return new Response('⚠️ Worker error — see /diag.\n' + String(e && e.message || e), { status: 500 });
+      return new Response('⚠️ Worker error — see /diag', { status: 500 });
     }
   },
 };
@@ -264,24 +265,44 @@ async function handleHttp(request, env) {
     if (url.pathname === '/api/trial' && request.method === 'POST') {
       const body = await request.json().catch(() => ({}));
       const tid = String(body.telegramId || '').trim();
-      if (!tid) return json({ ok: false, error: 'missing-id' }, 400);
-      const used = await env.LICENSES.get(`trial:${tid}`);
-      if (used) return json({ ok: false, error: 'trial-used' }, 200);
+      if (!/^\d{3,}$/.test(tid)) return json({ ok: false, error: 'bad-id' }, 400);
+      // rate limit per IP: 5 requests / 10 min
+      const ip = request.headers.get('cf-connecting-ip') || 'x';
+      const rlKey = `rl:${ip}`;
+      const rl = parseInt((await env.LICENSES.get(rlKey)) || '0');
+      if (rl >= 5) return json({ ok: false, error: 'rate-limited' }, 429);
+      await env.LICENSES.put(rlKey, String(rl + 1), { expirationTtl: 600 });
+      // used-flag first, then claim re-check so parallel calls can't double-issue
+      const used2 = await env.LICENSES.get(`trial:${tid}`);
+      if (used2) return json({ ok: false, error: 'trial-used' }, 200);
+      const claim = crypto.randomUUID();
+      await env.LICENSES.put(`trial:${tid}`, claim);
+      const check = await env.LICENSES.get(`trial:${tid}`);
+      if (check !== claim) return json({ ok: false, error: 'trial-used' }, 200);
+      // never clobber an existing active non-trial binding
+      const existing = await userKey(env, tid);
+      const exLic = existing ? await getLic(env, existing) : null;
+      if (exLic && exLic.expiresAt && exLic.expiresAt * 1000 > Date.now() && exLic.plan !== 'trial') {
+        return json({ ok: true, key: existing, plan: exLic.plan, expiresAt: exLic.expiresAt });
+      }
       const TD = await trialDaysOf(env);
       const key = await mintKey(env, tid, TD, 'trial');
-      await env.LICENSES.put(`trial:${tid}`, '1');
       await extend(env, key, TD);
       return json({ ok: true, key, expiresAt: Math.floor(Date.now() / 1000) + TD * 86400 });
     }
 
     // ── Telegram webhook ─────────────────────────────────────────────────
     if (url.pathname === '/webhook' && request.method === 'POST') {
+      // verify Telegram's signature (fail-open only before the first /setup arms the secret)
+      const whs = await env.LICENSES.get('set:whsecret');
+      const hdr = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
+      if (whs && hdr !== whs) return new Response('forbidden', { status: 403 });
       const upd = await request.json();
       // trace: record last update received + timestamp
       try {
         await env.LICENSES.put('lastUpdate', JSON.stringify({
           at: new Date().toISOString(),
-          kind: upd.message ? 'message:' + (upd.message.text || '(no text)') : upd.callback_query ? 'callback:' + upd.callback_query.data : 'other',
+          kind: upd.message ? 'message(' + String(upd.message.text || '').length + 'ch)' : upd.callback_query ? 'callback:' + upd.callback_query.data : 'other',
           from: upd.message?.from?.id || upd.callback_query?.from?.id || null,
         }));
         await env.LICENSES.delete('lastError');
@@ -303,13 +324,22 @@ async function handleHttp(request, env) {
     // so simply opening the worker URL (re)sets it — no manual curl needed.
     if (url.pathname === '/' || url.pathname === '/setup') {
       const self = `${url.protocol}//${url.host}/webhook`;
-      const set = await tg(env.BOT_TOKEN || '', 'setWebhook', { url: self, allowed_updates: ['message', 'callback_query'], drop_pending_updates: false }, env);
+      // get-or-create the webhook secret so Telegram signs every update
+      let whs = await env.LICENSES.get('set:whsecret');
+      if (!whs) { whs = crypto.randomUUID().replace(/-/g, ''); await env.LICENSES.put('set:whsecret', whs); }
+      const set = await tg(env.BOT_TOKEN || '', 'setWebhook', { url: self, allowed_updates: ['message', 'callback_query'], drop_pending_updates: false, secret_token: whs }, env);
+      const me0 = await tg(env.BOT_TOKEN || '', 'getMe', {}, env);
+      if (me0 && me0.ok && me0.result?.username) await env.LICENSES.put('set:botusername', me0.result.username);
       if (env.LICENSES) await env.LICENSES.put('lastSetup', JSON.stringify({ at: new Date().toISOString(), ok: set.ok, error: set.description || null }));
       if (url.pathname === '/')
         return new Response(`VoidrauVPN license bot — alive.\nWebhook: ${set.ok ? 'SET ✓' : 'FAILED: ' + (set.description || '?')}`);
       return json({ setup: set });
     }
     if (url.pathname === '/diag') {
+      // diagnostics are not public: admin must pass ?a=<ADMIN_ID>
+      if (String(url.searchParams.get('a') || '') !== String(env.ADMIN_ID || '')) {
+        return json({ ok: false, error: 'forbidden — /diag?a=<ADMIN_ID>' }, 403);
+      }
       const me = await tg(env.BOT_TOKEN || '', 'getMe', {});
       const hook = await tg(env.BOT_TOKEN || '', 'getWebhookInfo', {});
       const lastError = await env.LICENSES.get('lastError');
@@ -354,22 +384,27 @@ async function handle(upd, env, steps) {
     else if (cb.data.startsWith('okr:') && String(tid) === String(env.ADMIN_ID)) {
       const [, tS, dS] = cb.data.split(':');
       const target = tS, days = parseInt(dS);
-      let k = await userKey(env, target);
-      let l = k ? await getLic(env, k) : null;
-      if (l && l.expiresAt) { await extend(env, k, days); await upgradePlan(env, k, 'paid'); }
-      else { k = await mintKey(env, target, days, 'paid'); await extend(env, k, days); }
-      while ((await takeCredit(env, target)) === 1) await extend(env, k, 1);
-      await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: target, text: `✅ پرداخت تایید شد!\n\`${k}\`\n${days} روز اضافه شد.`, parse_mode: 'Markdown' }, env, steps);
-      await env.LICENSES.delete(`receipt:${target}`);
-      out = { text: '✅ تایید و برای کاربر ارسال شد.' };
-      const np = Math.max(0, (parseInt((await env.LICENSES.get('stat:pending')) || '0')) - 1);
-      await env.LICENSES.put('stat:pending', String(np));
+      // claim-first: only the first press grants days (double-press = no double grant)
+      const recRaw = await env.LICENSES.get(`receipt:${target}`);
+      if (!recRaw) {
+        out = { text: `ℹ️ رسید ${target} قبلاً پردازش شده (دکمهٔ تکراری).` };
+      } else if (!Number.isFinite(days) || days < 1 || days > 3650) {
+        out = { text: '❌ روز نامعتبر در دکمهٔ تایید.' };
+      } else {
+        await env.LICENSES.delete(`receipt:${target}`);
+        let k = await userKey(env, target);
+        let l = k ? await getLic(env, k) : null;
+        if (l && l.expiresAt) { await extend(env, k, days); await upgradePlan(env, k, 'paid'); }
+        else { k = await mintKey(env, target, days, 'paid'); await extend(env, k, days); }
+        while ((await takeCredit(env, target)) === 1) await extend(env, k, 1);
+        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: target, text: `✅ پرداخت تایید شد!\n\`${k}\`\n${days} روز اضافه شد.`, parse_mode: 'Markdown' }, env, steps);
+        if (cb.message?.chat) await tg(env.BOT_TOKEN, 'editMessageReplyMarkup', { chat_id: cb.message.chat.id, message_id: cb.message.message_id, reply_markup: { inline_keyboard: [] } }, env, steps);
+        out = { text: '✅ تایید و برای کاربر ارسال شد.' };
+      }
     }
     else if (cb.data.startsWith('rej:') && String(tid) === String(env.ADMIN_ID)) {
       const ru = cb.data.slice(4);
       await env.LICENSES.delete(`receipt:${ru}`);
-      const npR = Math.max(0, (parseInt((await env.LICENSES.get('stat:pending')) || '0')) - 1);
-      await env.LICENSES.put('stat:pending', String(npR));
       await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: ru, text: '❌ رسید شما تایید نشد. لطفاً تصویر واضح‌تر از رسید (با مبلغ و تاریخ) بفرستید یا با پشتیبانی تماس بگیرید.' }, env, steps);
       out = { text: `❌ رسید ${ru} رد شد و به کاربر اطلاع داده شد.` };
     }
@@ -382,7 +417,8 @@ async function handle(upd, env, steps) {
       if (!f) {
         out = await doDownloads(env, tid);
       } else {
-        await tg(token, 'answerCallbackQuery', { callback_query_id: cb.id, text: '⏳ در حال ارسال...' }, env, steps);
+        await tg(token, 'answerCallbackQuery', { callback_query_id: cb.id, text: '⏳ در حال ارسال...' });
+        cb._answered = true;
         try {
           await sendReleaseFile(env, tid, f.url, f.name);
           await tg(token, 'sendMessage', { chat_id: tid, text: '✅ فایل ارسال شد 👆\n🤖 اندروید: نصب کنید\n🪟 ویندوز: اجرا کنید' });
@@ -408,6 +444,27 @@ async function handle(upd, env, steps) {
       else if (a === 'pending') out = await pendingList(env, tid);
       else if (a === 'users') out = await recentUsers(env);
       else if (a === 'export') out = await exportBackup(env, tid);
+      else if (a === 'bcsend') {
+        let bc = null;
+        try { bc = JSON.parse((await env.LICENSES.get(`bc:${tid}`)) || 'null'); } catch (_) {}
+        await env.LICENSES.delete(`bc:${tid}`);
+        await env.LICENSES.delete(`admMode:${tid}`);
+        if (!bc || (!bc.text && !bc.fileId)) { out = { text: '⚠️ پیام همگانی یافت نشد — از نو بفرست.' }; }
+        else {
+          const list = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
+          let n = 0, fail = 0;
+          for (const u of list.slice(0, 500)) {
+            try {
+              let r;
+              if (bc.kind === 'photo') r = await tg(env.BOT_TOKEN, 'sendPhoto', { chat_id: u, photo: bc.fileId, caption: bc.caption || '' });
+              else if (bc.kind === 'doc') r = await tg(env.BOT_TOKEN, 'sendDocument', { chat_id: u, document: bc.fileId, caption: bc.caption || '' });
+              else r = await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: u, text: bc.text });
+              if (r && r.ok) n++; else fail++;
+            } catch (_) { fail++; }
+          }
+          out = { text: `📣 ارسال به ${n} کاربر انجام شد${fail ? ` — ${fail} ناموفق` : ''}.` };
+        }
+      }
       else if (a === 'stats') {
         const idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
         let act = 0, trial = 0, paid = 0;
@@ -422,7 +479,7 @@ async function handle(upd, env, steps) {
     }
     else out = { text: 'این دکمه منقضی شده — از /start دوباره شروع کنید.' };
     if (out) await tg(token, 'sendMessage', { chat_id: tid, ...out }, env, steps);
-    await tg(token, 'answerCallbackQuery', { callback_query_id: cb.id }, env, steps);
+    if (!cb._answered) await tg(token, 'answerCallbackQuery', { callback_query_id: cb.id }, env, steps);
     return;
   }
   if (!msg) { steps.push('no-msg'); return; }
@@ -434,33 +491,34 @@ async function handle(upd, env, steps) {
   const mediaAdmin = msg.photo ? 'photo' : (msg.document ? 'doc' : null);
   if (String(tid) === String(env.ADMIN_ID)) {
     const mode = await env.LICENSES.get(`admMode:${tid}`);
+    if (mode && text.trim() === '/cancel') {
+      await env.LICENSES.delete(`admMode:${tid}`);
+      await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ حالت ویرایش لغو شد.' }, env, steps);
+      return;
+    }
+    if (mode === 'broadcast' && !text.startsWith('/') && (text || mediaAdmin)) {
+      // two-step confirm so a stray message never broadcasts to everyone
+      await env.LICENSES.put(`bc:${tid}`, JSON.stringify({ text: mediaAdmin ? '' : text, fileId: mediaAdmin ? (mediaAdmin === 'photo' ? msg.photo[msg.photo.length - 1].file_id : msg.document.file_id) : null, kind: mediaAdmin, caption: msg.caption || '' }));
+      await env.LICENSES.put(`admMode:${tid}`, 'bcconfirm');
+      await tg(env.BOT_TOKEN, 'sendMessage', {
+        chat_id: tid,
+        text: '📋 پیش‌نمایش پیام همگانی آماده است. ارسال به همهٔ کاربران؟',
+        reply_markup: { inline_keyboard: [[{ text: '✅ ارسال کن', callback_data: 'ad:bcsend' }, { text: '❌ لغو', callback_data: 'ad:cancelmode' }]] },
+      }, env, steps);
+      return;
+    }
     if (mode && !text.startsWith('/')) {
       await env.LICENSES.delete(`admMode:${tid}`);
-      if (mode === 'broadcast' && mediaAdmin) {
-        const list = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
-        let n = 0;
-        for (const u of list.slice(0, 500)) {
-          try {
-            if (mediaAdmin === 'photo') await tg(env.BOT_TOKEN, 'sendPhoto', { chat_id: u, photo: msg.photo[msg.photo.length - 1].file_id, caption: msg.caption || '' }, env, steps);
-            else await tg(env.BOT_TOKEN, 'sendDocument', { chat_id: u, document: msg.document.file_id, caption: msg.caption || '' }, env, steps);
-            n++;
-          } catch (_) {}
-        }
-        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `📣 ارسال ${mediaAdmin === 'photo' ? 'عکس' : 'فایل'} به ${n} کاربر انجام شد.` }, env, steps);
-        steps.push('admin-broadcast-media');
-        return;
-      }
       if (mediaAdmin) {
         await env.LICENSES.put(`admMode:${tid}`, mode);
         await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: 'برای این مورد باید متن بفرستید (عکس/فایل قابل ذخیره نیست).' }, env, steps);
         return;
       }
       if (mode === 'broadcast') {
-        const list = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
-        for (const u of list.slice(0, 500)) {
-          try { await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: u, text }); } catch (_) {}
-        }
-        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `📣 ارسال به ${list.length} کاربر انجام شد.` }, env, steps);
+        // direct broadcast text is handled by the bcconfirm two-step flow
+        await env.LICENSES.put(`admMode:${tid}`, mode);
+        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: 'از پنل: 📣 پیام همگانی را بزنید و متن را بفرست.' }, env, steps);
+        return;
       } else if (mode === 'plans') {
         const rows = [];
         const bad = [];
@@ -468,7 +526,9 @@ async function handle(upd, env, steps) {
           const l = raw.trim();
           if (!l) continue;
           const parts = l.split('|').map((x) => x.trim());
-          if (parts.length !== 3 || !parts[0] || !parts[1] || !/^\d+$/.test(parts[2]) || parseInt(parts[2]) < 1) {
+          const idOk = parts[0] && parts[0].length <= 40 && /^[\w-]+$/.test(parts[0]);
+          const lblOk = parts[1] && parts[1].length <= 60;
+          if (parts.length !== 3 || !idOk || !lblOk || !/^\d+$/.test(parts[2]) || parseInt(parts[2]) < 1) {
             bad.push(`خط ${n + 1}: ${l.slice(0, 40)}`);
             continue;
           }
@@ -481,14 +541,10 @@ async function handle(upd, env, steps) {
           await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `❌ این خط‌ها درست نیستن (فرمت: شناسه|برچسب|روز):\n${bad.join('\n')}\n\nهمهٔ خط‌ها را دوباره بفرست.`, reply_markup: { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'ad:cancelmode' }]] } }, env, steps);
           return;
         }
+        if (rows.length > 20) { await env.LICENSES.put(`admMode:${tid}`, mode); await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ حداکثر ۲۰ پلن — کمتر بفرست.', reply_markup: { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'ad:cancelmode' }]] } }, env, steps); return; }
         if (!rows.length) { await env.LICENSES.put(`admMode:${tid}`, mode); await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ هیچ پلن معتبری پیدا نشد — دوباره بفرست.', reply_markup: { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'ad:cancelmode' }]] } }, env, steps); return; }
         await env.LICENSES.put('setting:plans', JSON.stringify(rows));
         await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ ${rows.length} پلن ذخیره شد:\n${rows.map((r) => `• ${r.label} (${r.days} روز)`).join('\n')}` }, env, steps);
-      } else if (mode === 'trialDays') {
-        const d = parseInt(text);
-        if (!d || d < 1) { await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ عدد نامعتبر.' }, env, steps); return; }
-        await env.LICENSES.put('setting:trialDays', String(d));
-        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ تست رایگان = ${d} روز.` }, env, steps);
       } else {
         let val = text.trim();
         if (mode === 'forceChannel') {
@@ -504,7 +560,17 @@ async function handle(upd, env, steps) {
           else if (/^-100\d+$/.test(val)) { /* numeric id — keep as-is */ }
           else { await env.LICENSES.put(`admMode:${tid}`, mode); await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ فرمت کانال درست نیست. دوباره بفرست (مثال: @mychannel یا -1001234…).' }, env, steps); return; }
         }
-        if (mode === 'trialDays' && (!/^\d+$/.test(val) || parseInt(val) < 1)) { await env.LICENSES.put(`admMode:${tid}`, mode); await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ عدد نامعتبر — دوباره بفرست.' }, env, steps); return; }
+        if (mode === 'trialDays') {
+          if (!/^\d+$/.test(val) || parseInt(val) < 1 || parseInt(val) > 365) {
+            await env.LICENSES.put(`admMode:${tid}`, mode);
+            await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ عدد نامعتبر (۱ تا ۳۶۵) — دوباره بفرست.', reply_markup: { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'ad:cancelmode' }]] } }, env, steps);
+            return;
+          }
+          await env.LICENSES.put('setting:trialDays', val);
+          await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ تست رایگان = ${val} روز.` }, env, steps);
+          steps.push('admin-mode:' + mode);
+          return;
+        }
         await setSetting(env, mode, val);
         await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ ذخیره شد: ${val}` }, env, steps);
       }
@@ -526,25 +592,24 @@ async function handle(upd, env, steps) {
   if (media2) {
     const fid = media2 === 'photo' ? msg.photo[msg.photo.length - 1].file_id : msg.document.file_id;
     await env.LICENSES.put(`receipt:${tid}`, JSON.stringify({ fileId: fid, kind: media2, at: Date.now() }));
-    const pend = (parseInt((await env.LICENSES.get('stat:pending')) || '0')) + 1;
-    await env.LICENSES.put('stat:pending', String(pend));
-    const cap = `🧾 رسید از کاربر \`${tid}\` — پلن تاییدشده را انتخاب کنید (رسید #${pend})`;
-    if (media2 === 'photo') {
-      await tg(env.BOT_TOKEN, 'sendPhoto', {
-        chat_id: env.ADMIN_ID,
-        photo: fid,
-        caption: cap,
-        parse_mode: 'Markdown',
-        reply_markup: { inline_keyboard: ((await plansOf(env))).map((p) => [{ text: `تایید ${p.label}`, callback_data: `okr:${tid}:${p.days}` }]) },
-      }, env, steps);
-    } else {
-      await tg(env.BOT_TOKEN, 'sendDocument', {
-        chat_id: env.ADMIN_ID,
-        document: fid,
-        caption: cap,
-        parse_mode: 'Markdown',
-        reply_markup: { inline_keyboard: ((await plansOf(env))).map((p) => [{ text: `تایید ${p.label}`, callback_data: `okr:${tid}:${p.days}` }]) },
-      }, env, steps);
+    const cap = `🧾 رسید از کاربر \`${tid}\` — پلن تاییدشده را انتخاب کنید`;
+    const fwd = media2 === 'photo' ? await tg(env.BOT_TOKEN, 'sendPhoto', {
+      chat_id: env.ADMIN_ID,
+      photo: fid,
+      caption: cap,
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: ((await plansOf(env))).map((p) => [{ text: `تایید ${p.label}`, callback_data: `okr:${tid}:${p.days}` }]) },
+    }, env, steps) : await tg(env.BOT_TOKEN, 'sendDocument', {
+      chat_id: env.ADMIN_ID,
+      document: fid,
+      caption: cap,
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: ((await plansOf(env))).map((p) => [{ text: `تایید ${p.label}`, callback_data: `okr:${tid}:${p.days}` }]) },
+    }, env, steps);
+    if (!fwd || !fwd.ok) {
+      await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '⚠️ ارسال رسید به ادمین ناموفق بود — دوباره امتحان کنید یا با پشتیبانی تماس بگیرید.' }, env, steps);
+      steps.push('receipt-forward-failed');
+      return;
     }
     await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '✅ رسید شما ارسال شد — پس از تایید ادمین، کد لایسنس برایتان ارسال می‌شود.' }, env, steps);
     steps.push('receipt-forwarded');
@@ -558,7 +623,7 @@ async function handle(upd, env, steps) {
   }
   if (text.startsWith('/start')) {
     steps.push('start-branch');
-    if (!(await checkJoined(env, tid))) {
+    if (String(tid) !== String(env.ADMIN_ID) && !(await checkJoined(env, tid))) {
       steps.push('join-gate');
       await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, ...joinPrompt(await getSetting(env, 'forceChannel', '')) }, env, steps);
       return;
@@ -573,7 +638,9 @@ async function handle(upd, env, steps) {
     const payload = text.split(' ')[1] || '';
     if (payload.startsWith('ref_')) {
       const ref = payload.slice(4);
-      if (ref !== String(tid)) {
+      // only real numeric telegram ids count as referrers
+      if (!/^\d{3,}$/.test(ref)) { steps.push('ref-bad'); }
+      else if (ref !== String(tid)) {
         const seen = await env.LICENSES.get(`refseen:${tid}`);
         if (!seen) {
           await env.LICENSES.put(`refseen:${tid}`, '1');
@@ -591,7 +658,7 @@ async function handle(upd, env, steps) {
       }
     }
     const key = await userKey(env, tid);
-    steps.push('key:' + (key || 'none'));
+    steps.push('key:' + (key ? key.slice(0, 9) + '…' : 'none'));
     const lic = key ? await getLic(env, key) : null;
     steps.push('lic:' + (lic ? (lic.expiresAt ? 'valid' : 'no-expiry') : 'null'));
     const menu = mainMenu(msg.from, lic);
@@ -605,6 +672,9 @@ async function handle(upd, env, steps) {
     const [, daysS, tidS] = text.split(/\s+/);
     const days = parseInt(daysS || '30');
     const target = tidS ? parseInt(tidS) : tid;
+    if (!Number.isFinite(days) || days < 1 || days > 3650 || !Number.isFinite(target)) {
+      await tg(token, 'sendMessage', { chat_id: tid, text: 'فرمت: /gen <روز> <آیدی> — روز عددی ۱ تا ۳۶۵۰' }, env); return;
+    }
     const key = await mintKey(env, target, days, 'paid');
     await extend(env, key, days);
     await tg(token, 'sendMessage', { chat_id: tid, text: `🔑 ساخته شد:\n\`${key}\`\nبرای کاربر \`${target}\` — ${days} روز`, parse_mode: 'Markdown' }, env);
@@ -615,6 +685,9 @@ async function handle(upd, env, steps) {
     const [, tidS, daysS] = text.split(/\s+/);
     const target = parseInt(tidS);
     const days = parseInt(daysS || '30');
+    if (!/^\d{3,}$/.test(tidS || '') || !Number.isFinite(days) || days < 1 || days > 3650) {
+      await tg(token, 'sendMessage', { chat_id: tid, text: 'فرمت: /ok <آیدی‌عددی> <روز>' }, env); return;
+    }
     // use pending key if any, else mint
     let key = await userKey(env, target);
     let lic = key ? await getLic(env, key) : null;
@@ -689,7 +762,7 @@ function joinPrompt(ch) {
     text: '⛔ برای استفاده از ربات اول در کانال عضو شو:',
     reply_markup: {
       inline_keyboard: [
-        [{ text: '📢 عضویت در کانال', url: `https://t.me/${String(ch).replace('@', '')}` }],
+        ...(/^\d+$/.test(String(ch)) ? [] : [[{ text: '📢 عضویت در کانال', url: `https://t.me/${String(ch).replace('@', '')}` }]]),
         [{ text: '✅ عضو شدم', callback_data: 'recheck' }],
       ],
     },
@@ -716,7 +789,7 @@ async function adminPanel(env, tid) {
   const buy = await getSetting(env, 'buyText', 'خرید لایسنس');
   const ch = await getSetting(env, 'forceChannel', '—');
   const sup = await getSetting(env, 'supportId', '@Voidrau');
-  const trialDays = await getSetting(env, 'trialDays', String(await trialDaysOf(env)));
+  const trialDays = String(await trialDaysOf(env));
   const users = parseInt((await env.LICENSES.get('stat:users')) || '0');
   const pending = parseInt((await env.LICENSES.get('stat:pending')) || '0');
   // count active licenses
@@ -792,6 +865,7 @@ async function doTrial(env, tid) {
   if (used) {
     const key = await userKey(env, tid);
     const lic = key ? await getLic(env, key) : null;
+    if (!lic) return { text: '🔑 لایسنس قبلی پیدا نشد — با پشتیبانی تماس بگیرید یا مجدد /start بزنید.' };
     const active = lic && lic.expiresAt && lic.expiresAt * 1000 > Date.now();
     if (active) return { text: `🎁 تست/لایسنس شما هنوز فعال است:\n\`${key}\`\n⏳ تا: ${new Date(lic.expiresAt * 1000).toLocaleDateString('fa-IR')}`, parse_mode: 'Markdown' };
     return { text: '⏳ تست رایگان شما تمام شده.\n🛒 برای ادامه از «خرید لایسنس» استفاده کنید.', reply_markup: { inline_keyboard: [[{ text: '🛒 خرید لایسنس', callback_data: 'buy' }]] } };
@@ -818,7 +892,7 @@ async function doReferral(env, tid) {
   const joins = parseInt((await env.LICENSES.get(`refjoin:${tid}`)) || '0');
   const credit = (await env.LICENSES.get(`credit:${tid}`)) || '0';
   return {
-    text: `👥 لینک دعوت اختصاصی شما:\nhttps://t.me/${env.BOT_USERNAME || 'VoidrauLicenseBot'}?start=ref_${tid}\n\n` +
+    text: `👥 لینک دعوت اختصاصی شما:\nhttps://t.me/${env.BOT_USERNAME || (await env.LICENSES.get('set:botusername')) || 'VoidrauBot'}?start=ref_${tid}\n\n` +
       `تاکنون ${joins} نفر وارد شدند — به ازای هر ${REFERRAL_REWARD_JOINS} نفر، ${REFERRAL_REWARD_DAYS} روز هدیه می‌گیرید.\n` +
       `اعتبار فعلی: ${credit} روز`,
   };
