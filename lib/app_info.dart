@@ -13,7 +13,7 @@ class AppInfo {
 
   /// Injected by the release workflow (`--dart-define=VOIDRAU_VERSION=...`).
   static const version =
-      String.fromEnvironment('VOIDRAU_VERSION', defaultValue: '1.0.0');
+      String.fromEnvironment('VOIDRAU_VERSION', defaultValue: '1.3.0');
 
   /// Version of the bundled tunnel core.
   static const core = '2.3.0';

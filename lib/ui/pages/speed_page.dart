@@ -28,6 +28,8 @@ class SpeedPage extends StatefulWidget {
 class _SpeedPageState extends State<SpeedPage> {
   final List<double> _down = [];
   final List<double> _up = [];
+  double _peakDown = 0;
+  double _peakUp = 0;
   static const int _history = 48;
 
   @override
@@ -45,6 +47,8 @@ class _SpeedPageState extends State<SpeedPage> {
   void _sample() {
     final rate = widget.controller.rate;
     if (!rate.hasSample) return;
+    if (rate.downBytesPerSec > _peakDown) _peakDown = rate.downBytesPerSec;
+    if (rate.upBytesPerSec > _peakUp) _peakUp = rate.upBytesPerSec;
     _down.add(rate.downBytesPerSec);
     _up.add(rate.upBytesPerSec);
     if (_down.length > _history) _down.removeAt(0);
@@ -69,6 +73,8 @@ class _SpeedPageState extends State<SpeedPage> {
                 style: const TextStyle(color: VoidrauColors.muted, height: 1.45)),
             const SizedBox(height: 16),
             _traffic(c, s),
+            const SizedBox(height: 14),
+            _quality(c, s),
             const SizedBox(height: 18),
             _profile(c, s, st),
             const SizedBox(height: 18),
@@ -78,6 +84,100 @@ class _SpeedPageState extends State<SpeedPage> {
           ],
         );
       },
+    );
+  }
+
+  // ── connection quality & peak ─────────────────────────────────────────────
+
+  Widget _quality(VpnController c, S s) {
+    final ping = c.snapshot.pingMs;
+    final connected = c.snapshot.phase == EnginePhase.connected;
+    if (!connected || ping == null) return const SizedBox.shrink();
+
+    final Color color;
+    final String label;
+    final IconData icon;
+
+    if (ping < 70) {
+      color = VoidrauColors.cyan;
+      label = s.qualityExcellent;
+      icon = Icons.check_circle_outline_rounded;
+    } else if (ping < 130) {
+      color = const Color(0xFF64FFDA);
+      label = s.qualityGood;
+      icon = Icons.sentiment_satisfied_alt_rounded;
+    } else if (ping < 220) {
+      color = const Color(0xFFFFD166);
+      label = s.qualityFair;
+      icon = Icons.sentiment_neutral_rounded;
+    } else {
+      color = VoidrauColors.coral;
+      label = s.qualityPoor;
+      icon = Icons.report_problem_outlined;
+    }
+
+    return _card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, color: color, size: 20),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    color: color,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+              Text(
+                '$ping ms',
+                style: const TextStyle(
+                  fontFamily: 'Consolas',
+                  fontWeight: FontWeight.w800,
+                  fontSize: 14,
+                ),
+              ),
+            ],
+          ),
+          if (_peakDown > 0 || _peakUp > 0) ...[
+            const Divider(height: 18),
+            Row(
+              children: [
+                Text(
+                  '${s.peakSpeed}:',
+                  style: const TextStyle(color: VoidrauColors.muted, fontSize: 12),
+                ),
+                const Spacer(),
+                if (_peakDown > 0)
+                  Text(
+                    '↓ ${_rate(_peakDown)}',
+                    style: const TextStyle(
+                      color: VoidrauColors.cyan,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 12,
+                    ),
+                  ),
+                if (_peakDown > 0 && _peakUp > 0)
+                  const Text('  ·  ', style: TextStyle(color: VoidrauColors.muted)),
+                if (_peakUp > 0)
+                  Text(
+                    '↑ ${_rate(_peakUp)}',
+                    style: const TextStyle(
+                      color: VoidrauColors.coral,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 12,
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ],
+      ),
     );
   }
 

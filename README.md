@@ -8,6 +8,24 @@ Telegram channel (releases, install files, notes and support): **[t.me/Voidrau](
 
 ---
 
+## What's New in v1.3.0 (تغییرات نسخه ۱.۳.۰)
+
+- **Telegram Bot & License Worker Enhancements**:
+  - Full Solar Hijri (Jalali) date support for Persian expiration dates (e.g. `۲۸ مهر ۱۴۰۵`).
+  - Added new administrative commands: `/find <id|key>`, `/revoke <id|key>`, `/adddays <id|key> <days>`, and `/stats`.
+  - Added direct receipt reject button (`❌ رد رسید`) on forwarded transaction proofs.
+  - Fixed `stat:pending` receipt counter synchronization.
+  - Safe KV subrequest handling to prevent Cloudflare Worker 1101 crashes.
+  - Batched concurrent broadcast messaging with rate-limit protection.
+- **Client & UX Improvements**:
+  - **Smart Clipboard Auto-Paste**: 1-tap extraction and validation of `VDRV-` license keys from messy text or clipboard in both Gate and License pages.
+  - **Connection Quality & Gaming Metric**: Real-time ping evaluation (Gaming / Streaming / Browsing quality ratings).
+  - **Session Peak Throughput**: Automatic tracking of maximum download and upload speeds achieved.
+  - **One-Tap Diagnostics Export**: Copy full diagnostic details (MTU, WinTUN adapter, SOCKS5, ping, IP, OS and logs) for swift Telegram support.
+  - Native Jalali calendar calculations and Persian digit formatting.
+
+---
+
 ## English
 
 ### What you get

@@ -4,13 +4,15 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../app_info.dart';
+import '../data/jalali.dart';
 
 /// Client for the VoidrauVPN license backend (Cloudflare Worker).
 ///
 /// The Worker exposes:
-///   GET  /api/license?key=XXXX          → { ok, plan, expiresAt, telegram }
-///   POST /api/trial {telegramId, key?}  → { ok, key, expiresAt } (24h trial)
+///   GET  /api/license?key=XXXX          → { ok, plan, expiresAt, serverTime, remainingSeconds, isPaid }
+///   POST /api/trial {telegramId}        → { ok, key, expiresAt, serverTime } (trial)
 ///   GET  /api/status?key=XXXX           → same shape as /license
+///   GET  /api/health                    → { ok, service, time }
 ///
 /// The Telegram bot (same Worker) hands out keys and the buy/referral flow.
 /// Everything is time-based: a license is a key + expiry timestamp. Offline
@@ -64,6 +66,55 @@ class LicenseService {
     return d.isNegative ? Duration.zero : d;
   }
 
+  /// Formatted expiry date string (Persian Jalali or Gregorian).
+  String formatExpiry({bool fa = true, bool verbose = true}) {
+    final exp = _expiresAt;
+    if (exp == null) return '—';
+    final local = exp.toLocal();
+    if (fa) {
+      final j = JalaliDate.fromDateTime(local);
+      return verbose ? j.formatReadable() : j.format();
+    }
+    return '${local.year}-${local.month.toString().padLeft(2, '0')}-${local.day.toString().padLeft(2, '0')}';
+  }
+
+  /// Formats remaining time nicely in Persian or English.
+  String formatRemaining({bool fa = true}) {
+    final d = remaining;
+    if (d <= Duration.zero) {
+      return fa ? 'منقضی شده' : 'Expired';
+    }
+    String two(int n) => n.toString().padLeft(2, '0');
+    if (fa) {
+      if (d.inDays > 0) {
+        final hours = d.inHours % 24;
+        return JalaliDate.toPersianDigits(
+            hours > 0 ? '${d.inDays} روز و $hours ساعت' : '${d.inDays} روز');
+      }
+      if (d.inHours > 0) {
+        final mins = d.inMinutes % 60;
+        return JalaliDate.toPersianDigits(
+            mins > 0 ? '${d.inHours} ساعت و $mins دقیقه' : '${d.inHours} ساعت');
+      }
+      return JalaliDate.toPersianDigits('${d.inMinutes} دقیقه');
+    } else {
+      if (d.inDays > 0) return '${d.inDays}d ${two(d.inHours % 24)}h';
+      if (d.inHours > 0) return '${d.inHours}h ${two(d.inMinutes % 60)}m';
+      return '${d.inMinutes}m';
+    }
+  }
+
+  /// Extracts a valid license key `VDRV-XXXX-XXXX-XXXX` from any raw text.
+  static String? extractKey(String? text) {
+    if (text == null || text.trim().isEmpty) return null;
+    final regex = RegExp(
+      r'VDRV-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}',
+      caseSensitive: false,
+    );
+    final match = regex.firstMatch(text);
+    return match?.group(0)?.toUpperCase();
+  }
+
   Future<void> load() async {
     if (_loaded) return;
     final prefs = await SharedPreferences.getInstance();
@@ -102,8 +153,9 @@ class LicenseService {
 
   /// Verify a key against the backend. Returns true when the license is valid.
   Future<bool> check({String? keyOverride}) async {
-    final k = (keyOverride ?? _key)?.trim();
+    final rawKey = (keyOverride ?? _key)?.trim();
     _lastError = null;
+    final k = extractKey(rawKey) ?? rawKey;
     if (k == null || k.isEmpty) {
       _lastError = 'no-key';
       return false;
@@ -141,7 +193,8 @@ class LicenseService {
       _expiresAt = exp == null
           ? null
           : (exp is num
-              ? DateTime.fromMillisecondsSinceEpoch(exp.toInt() * 1000, isUtc: true)
+              ? DateTime.fromMillisecondsSinceEpoch(exp.toInt() * 1000,
+                  isUtc: true)
               : DateTime.tryParse(exp.toString())?.toUtc());
       _checkedAt = DateTime.now().toUtc();
       await _save();

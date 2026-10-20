@@ -8,20 +8,27 @@
 //   wrangler secret put ADMIN_ID   (your numeric telegram id)
 //
 // Features:
-//   • /start            → main menu (Persian)
+//   • /start            → main menu (Persian with Jalali dates & copy-on-tap)
 //   • تست رایگان        → 24h trial key (once per telegram id)
-//   • خرید لایسنس       → plans, payment placeholder → admin approves
+//   • خرید لایسنس       → plans, payment details → admin approves or rejects
 //   • دعوت دوستان       → personal referral link; 1 week credit per 3 joins
-//   • کد لایسنس من      → shows key + expiry
-//   • دانلود نسخه جدید  → latest GitHub release files sent in-chat
-//   • /panel            → admin panel (prices, card, channel, broadcast…)
-//   • /gen <days> <tid> → admin: mint a key
+//   • کد لایسنس من      → shows key, plan, expiry and remaining time
+//   • دانلود نسخه جدید  → latest GitHub release files sent directly in-chat
+//   • /panel            → interactive admin panel (prices, card, channel, broadcast…)
+//   • /stats            → full statistics report (users, active, pending, revenue)
+//   • /find <id|key>    → search any user or license key details
+//   • /gen <days> [tid] → admin: mint a key
 //   • /ok <tid> <days>  → admin: approve a pending purchase
+//   • /adddays <id> <d> → admin: add bonus days to existing license
+//   • /revoke <id|key>  → admin: revoke an abusive or refunded license
+//   • /fix <tid>        → admin: upgrade user plan to paid
+//   • /id               → show numeric telegram ID
 //
 // HTTP API (used by the app):
-//   GET  /api/license?key=...
-//   GET  /api/status?key=...
-//   POST /api/trial {telegramId}
+//   GET  /api/license?key=...   → { ok, plan, expiresAt, serverTime, remainingSeconds, isPaid }
+//   GET  /api/status?key=...    → same shape as /license
+//   GET  /api/health            → { ok, service, time }
+//   POST /api/trial             → { ok, key, expiresAt, serverTime }
 
 const DEFAULT_PLANS = [
   { id: 'm1', label: '۱ ماهه — ۱۰۰ هزار تومان', days: 30 },
@@ -31,47 +38,83 @@ const DEFAULT_PLANS = [
 const TRIAL_DAYS = 1;
 
 const plansOf = async (env) => {
-  try { const p = JSON.parse((await env.LICENSES.get('setting:plans')) || 'null'); if (Array.isArray(p) && p.length) return p; } catch (_) {}
+  try {
+    const p = JSON.parse((await env.LICENSES.get('setting:plans')) || 'null');
+    if (Array.isArray(p) && p.length) return p;
+  } catch (_) {}
   return DEFAULT_PLANS;
 };
+
 const trialDaysOf = async (env) => {
   const d = parseInt((await env.LICENSES.get('setting:trialDays')) || '');
   return d && d > 0 ? d : TRIAL_DAYS;
 };
-const REFERRAL_REWARD_JOINS = 3;   // every N joins
-const REFERRAL_REWARD_DAYS = 7;    // → N days credit
 
+const REFERRAL_REWARD_JOINS = 3; // every N joins
+const REFERRAL_REWARD_DAYS = 7; // → N days credit
 
 function keygen() {
-  const seg = () => crypto.randomUUID().replace(/-/g, '').slice(0, 4).toUpperCase();
+  const seg = () =>
+    crypto.randomUUID().replace(/-/g, '').slice(0, 4).toUpperCase();
   return `VDRV-${seg()}-${seg()}-${seg()}`;
 }
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json; charset=utf-8' },
   });
 }
 
+function formatJalali(sec) {
+  if (!sec) return '—';
+  try {
+    return new Date(sec * 1000).toLocaleDateString('fa-IR', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      timeZone: 'Asia/Tehran',
+    });
+  } catch (_) {
+    return new Date(sec * 1000).toISOString().slice(0, 10);
+  }
+}
+
+function formatDuration(sec) {
+  if (!sec || sec <= 0) return 'منقضی شده';
+  const days = Math.floor(sec / 86400);
+  const hours = Math.floor((sec % 86400) / 3600);
+  if (days > 0) {
+    return hours > 0 ? `${days} روز و ${hours} ساعت` : `${days} روز`;
+  }
+  const mins = Math.floor((sec % 3600) / 60);
+  return `${hours} ساعت و ${mins} دقیقه`;
+}
+
 async function getLic(env, key) {
+  if (!key) return null;
   const raw = await env.LICENSES.get(`lic:${key}`);
   if (raw == null) return null;
   return typeof raw === 'string' ? JSON.parse(raw) : raw;
 }
+
 async function putLic(env, key, lic) {
   await env.LICENSES.put(`lic:${key}`, JSON.stringify(lic));
 }
+
 async function userKey(env, tid) {
   return await env.LICENSES.get(`user:${tid}`);
 }
+
 async function bindUser(env, tid, key) {
   await env.LICENSES.put(`user:${tid}`, key);
 }
+
 async function addCredit(env, tid, days) {
   const cur = (await env.LICENSES.get(`credit:${tid}`)) || '0';
   await env.LICENSES.put(`credit:${tid}`, String(parseInt(cur) + days));
 }
+
 async function takeCredit(env, tid) {
   const cur = parseInt((await env.LICENSES.get(`credit:${tid}`)) || '0');
   if (!Number.isFinite(cur) || cur <= 0) return 0;
@@ -114,8 +157,10 @@ async function tg(token, method, body, env, steps) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
-  const out = await r.json();
-  if (steps) steps.push('tg:' + method + ':' + (out.ok ? 'ok#' + out.result?.message_id : out.description));
+  const out = await r.json().catch(() => ({ ok: false, description: 'json-parse-failed' }));
+  if (steps) {
+    steps.push('tg:' + method + ':' + (out.ok ? 'ok#' + out.result?.message_id : out.description));
+  }
   if (env && env.LICENSES) {
     if (!out.ok) {
       await env.LICENSES.put('lastError', `tg ${method}: ${out.error_code || ''} ${out.description || 'unknown'}`);
@@ -128,7 +173,8 @@ async function tg(token, method, body, env, steps) {
 
 function mainMenu(from, lic) {
   const name = from && from.first_name ? from.first_name : '';
-  const active = lic && lic.expiresAt && lic.expiresAt * 1000 > Date.now();
+  const now = Math.floor(Date.now() / 1000);
+  const active = lic && lic.expiresAt && lic.expiresAt > now && lic.plan !== 'revoked';
   const rows = [
     [{ text: '🎁 تست رایگان', callback_data: 'trial' }, { text: '🛒 خرید لایسنس', callback_data: 'buy' }],
     [{ text: '📥 دانلود نسخه جدید برنامه', callback_data: 'dl' }],
@@ -137,115 +183,176 @@ function mainMenu(from, lic) {
     [{ text: '🆘 پشتیبانی', callback_data: 'support' }],
   ];
   const safe = name.replace(/([_*\[`])/g, '\\$1');
-  const hi = name ? `سلام ${safe} 👋\n\n` : '👋\n\n';
-  const body = active
-    ? `✅ لایسنس فعال شما:\n\`${lic.key}\`\n⏳ تا: ${new Date(lic.expiresAt * 1000).toLocaleDateString('fa-IR')}`
-    : 'به ربات رسمی VoidrauVPN خوش آمدید!\n\n🔐 برای فعال‌سازی برنامه:\n• تست رایگان بگیرید یا لایسنس بخرید\n• کد را در برنامه → تب «لایسنس» وارد کنید\n• نسخه جدید برنامه را از «دانلود» بگیرید';
+  const hi = name ? `سلام ${safe} 👋\n\n` : 'سلام 👋\n\n';
+  let body = '';
+  if (active) {
+    const leftSec = lic.expiresAt - now;
+    const planName = lic.plan === 'paid' ? 'خریداری‌شده ویژه ⭐️' : (lic.plan === 'trial' ? 'تست رایگان موقت 🎁' : 'اختصاصی');
+    body = `✅ لایسنس فعال شما:\n\`${lic.key}\`\n\n` +
+      `📦 نوع اشتراک: *${planName}*\n` +
+      `⏳ زمان باقی‌مانده: *${formatDuration(leftSec)}*\n` +
+      `📅 تاریخ انقضا: *${formatJalali(lic.expiresAt)}*\n\n` +
+      `💡 روی کد لایسنس بالا ضربه بزنید تا کپی شود.`;
+  } else {
+    body = 'به ربات رسمی VoidrauVPN خوش آمدید!\n\n' +
+      '🔐 برای فعال‌سازی و اتصال امن:\n' +
+      '• تست رایگان ۲۴ ساعته بگیرید یا لایسنس بخرید\n' +
+      '• کد دریافتی را در برنامه (تب لایسنس) وارد کنید\n' +
+      '• آخرین نسخه برنامه را از بخش «📥 دانلود» دریافت نمایید';
+  }
   return { text: hi + body, parse_mode: 'Markdown', reply_markup: { inline_keyboard: rows } };
 }
 
 // ── latest release files from GitHub ─────────────────────────────────
 async function releaseFiles(env) {
   try {
-    const ghHeaders = { 'Accept': 'application/vnd.github+json', 'User-Agent': 'VoidrauLicenseBot' };
+    const ghHeaders = { Accept: 'application/vnd.github+json', 'User-Agent': 'VoidrauLicenseBot' };
     if (env.GITHUB_TOKEN) ghHeaders.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
     const r = await fetch('https://api.github.com/repos/AnishtayiN/vpn/releases/latest', { headers: ghHeaders });
     if (!r.ok) return null;
     const rel = await r.json();
     if (!rel || rel.message) return null;
     const out = (rel.assets || []).map((a) => ({
-      name: a.name, size: a.size, url: a.browser_download_url,
-      tag: rel.tag_name, date: a.updated_at,
+      name: a.name,
+      size: a.size,
+      url: a.browser_download_url,
+      tag: rel.tag_name,
+      date: a.updated_at,
     }));
     return out.length ? out : null;
-  } catch (e) { try { console.log('releaseFiles error', e && e.message, e && e.stack && e.stack.split('\n').slice(1,4).join(' | ')); } catch (_) {} return null; }
+  } catch (e) {
+    try {
+      console.log('releaseFiles error', e && e.message);
+    } catch (_) {}
+    return null;
+  }
 }
 
-const humanSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.round(n / 1024) + ' KB';
+const humanSize = (n) =>
+  n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.round(n / 1024) + ' KB';
 
 const DL_FILES_KEY = 'dlfiles';
 const dlLabel = (n) => n.replace(/^VoidrauVPN-/, '').replace(/\.apk$|\.exe$|\.zip$/i, '');
 
 async function doDownloads(env, tid) {
   let files = null;
-  try { files = JSON.parse((await env.LICENSES.get('cache:relfiles')) || 'null'); } catch (_) {}
+  try {
+    files = JSON.parse((await env.LICENSES.get('cache:relfiles')) || 'null');
+  } catch (_) {}
   if (!Array.isArray(files) || !files.length) {
     files = (await releaseFiles(env)) || [];
-    if (files.length) await env.LICENSES.put('cache:relfiles', JSON.stringify(files), { expirationTtl: 600 });
+    if (files.length) {
+      await env.LICENSES.put('cache:relfiles', JSON.stringify(files), { expirationTtl: 600 });
+    }
   }
   const apk = files.filter((f) => f.name.toLowerCase().endsWith('.apk'));
   const exe = files.filter((f) => f.name.toLowerCase().endsWith('.exe'));
   const other = files.filter((f) => f.name.toLowerCase().endsWith('.zip'));
   const pick = [...apk, ...exe, ...other].slice(0, 8);
-  if (!pick.length) return { text: '⚠️ فعلاً فایلی برای ارسال پیدا نشد. بعداً دوباره امتحان کنید.' };
-  // remember the list so callback indexes resolve to the same file
+  if (!pick.length) {
+    return { text: '⚠️ فعلاً فایلی برای ارسال پیدا نشد. لطفاً چند دقیقه بعد امتحان کنید یا از کانال رسمی دانلود نمایید.' };
+  }
   await env.LICENSES.put(`${DL_FILES_KEY}:${tid}`, JSON.stringify(pick), { expirationTtl: 3600 });
-  const rows = pick.map((f, i) => [{ text: `📄 ${dlLabel(f.name)} (${humanSize(f.size)})`, callback_data: `file:${i}` }]);
+  const rows = pick.map((f, i) => [
+    { text: `📄 ${dlLabel(f.name)} (${humanSize(f.size)})`, callback_data: `file:${i}` },
+  ]);
   const tag = pick[0]?.tag || '';
   return {
-    text: `📥 آخرین نسخه: ${tag}\nفایل مورد نظر را انتخاب کنید تا همین‌جا برایتان ارسال شود:`,
-    reply_markup: { inline_keyboard: [...rows, [{ text: '🔄 بروزرسانی لیست', callback_data: 'dlrefresh' }]] },
+    text: `📥 آخرین نسخه موجود: *${tag}*\nفایل مورد نظر برای دستگاه خود را انتخاب نمایید تا مستقیماً برایتان ارسال شود:`,
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: [...rows, [{ text: '🔄 بروزرسانی لیست فایل‌ها', callback_data: 'dlrefresh' }]],
+    },
   };
 }
 
-// send one file as a real document: worker downloads from GitHub and uploads
-// to Telegram as multipart (send-by-URL fails on GitHub release redirects).
 async function sendReleaseFile(env, tid, url, name) {
   const ghHeaders = {};
   if (env.GITHUB_TOKEN) ghHeaders.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
   const res = await fetch(url, { headers: ghHeaders, redirect: 'follow' });
   if (!res.ok) throw new Error(`github ${res.status}`);
-  // size check BEFORE buffering — a huge asset must not OOM the isolate
-  const len = Number((res.headers && res.headers.get) ? (res.headers.get('content-length') || 0) : 0);
-  if (len && len > 45 * 1024 * 1024) {
+  const len = Number(res.headers ? res.headers.get('content-length') || 0 : 0);
+  if (len && len > 48 * 1024 * 1024) {
     await tg(env.BOT_TOKEN, 'sendMessage', {
       chat_id: tid,
-      text: `⚠️ فایل ${name} حجمش بیش از حد مجاز ربات است (${humanSize(len)}).\nاز نسخهٔ مخصوص دستگاه‌تان استفاده کنید (arm64 برای اکثر گوشی‌ها).`,
+      text: `⚠️ فایل ${name} حجمش بیش از حد مجاز تلگرام است (${humanSize(len)}).\nلطفاً از کانال رسمی @Voidrau دانلود فرمایید.`,
     });
     return;
   }
   const buf = await res.arrayBuffer();
-  if (buf.byteLength > 45 * 1024 * 1024) {
+  if (buf.byteLength > 48 * 1024 * 1024) {
     await tg(env.BOT_TOKEN, 'sendMessage', {
       chat_id: tid,
-      text: `⚠️ فایل ${name} حجمش بیش از حد مجاز ربات است (${humanSize(buf.byteLength)}).\nاز نسخهٔ مخصوص دستگاه‌تان استفاده کنید (arm64 برای اکثر گوشی‌ها).`,
+      text: `⚠️ فایل ${name} حجمش بیش از حد مجاز تلگرام است (${humanSize(buf.byteLength)}).\nاز کانال رسمی دانلود نمایید.`,
     });
     return;
   }
   const fd = new FormData();
   fd.append('chat_id', String(tid));
   fd.append('document', new Blob([buf]), name);
-  const out = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`, { method: 'POST', body: fd });
+  const out = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`, {
+    method: 'POST',
+    body: fd,
+  });
   const j = await out.json().catch(() => ({}));
   if (!j.ok) throw new Error(j.description || 'telegram upload failed');
 }
 
 async function doHelp() {
-  return { text: '📖 راهنما\n\n1️⃣ «تست رایگان» → کد ۲۴ ساعته بگیرید\n2️⃣ کد را در برنامه → تب «لایسنس» وارد کنید\n3️⃣ وصل شوید!\n\n🛒 خرید: پلن را انتخاب و کارت‌به‌کارت کنید؛ عکس رسید را همین‌جا بفرستید تا کد برایتان ارسال شود.\n\n👥 رفرال: لینک دعوت را برای دوستان بفرستید؛ هر ۳ نفر = ۷ روز هدیه.\n\n📥 دانلود: همیشه آخرین نسخه برنامه را از همین ربات بگیرید.' };
+  return {
+    text: '📖 *راهنمای استفاده از VoidrauVPN*\n\n' +
+      '1️⃣ *تست رایگان:* روی دکمه «🎁 تست رایگان» بزنید تا کد هدیه برایتان ساخته شود.\n' +
+      '2️⃣ *فعال‌سازی:* برنامه را باز کرده و در بخش لایسنس، کد را وارد نمایید.\n' +
+      '3️⃣ *اتصال:* دکمه مرکزی را لمس کنید تا سریع‌ترین مسیر رمزگذاری‌شده فعال شود.\n\n' +
+      '🛒 *خرید اشتراک:* پلن مورد نظر را انتخاب کرده و مبلغ را واریز نمایید. سپس عکس رسید را در همین ربات ارسال کنید تا تایید شود.\n\n' +
+      '👥 *اشتراک هدیه با رفرال:* لینک دعوت خود را برای دوستان بفرستید؛ هر ۳ نفر = ۷ روز اشتراک رایگان!\n\n' +
+      '📥 *دانلود برنامه:* همیشه فایل‌های بروزرسانی اندروید و ویندوز را از دکمه «📥 دانلود» دریافت کنید.',
+    parse_mode: 'Markdown',
+  };
 }
 
 async function doSupport(env) {
   const sup = await getSetting(env, 'supportId', '@Voidrau');
-  return { text: `🆘 پشتیبانی:\n${sup}\n\nمشکل‌تان را دقیق بنویسید (اسکرین‌شات بهتر).` };
+  return {
+    text: `🆘 *پشتیبانی VoidrauVPN*\n\nبرای ارتباط با پشتیبانی، پیگیری پرداخت و رفع هرگونه مشکل:\n👤 ${sup}\n\nلطفاً در پیام خود، آیدی عددی و عکس رسید یا اسکرین‌شات ارور را ارسال نمایید.`,
+    parse_mode: 'Markdown',
+  };
 }
 
 async function doStatus(env, tid) {
   const key = await userKey(env, tid);
-  if (!key) return { text: '📊 هیچ لایسنسی ثبت نکرده‌اید — با «تست رایگان» شروع کنید.' };
+  if (!key) return { text: '📊 هیچ لایسنسی ثبت نکرده‌اید — با «🎁 تست رایگان» شروع کنید.' };
   const lic = await getLic(env, key);
-  if (!lic || !lic.expiresAt) return { text: '📊 لایسنس نامعتبر.' };
-  const left = Math.max(0, Math.ceil((lic.expiresAt * 1000 - Date.now()) / 86400000));
-  return { text: `📊 وضعیت لایسنس\n\n🔑 کد: \`${key}\`\n📦 پلن: ${lic.plan === 'trial' ? 'تستی' : 'خریداری‌شده'}\n⏳ روز باقی‌مانده: ${left}\n📅 انقضا: ${new Date(lic.expiresAt * 1000).toLocaleDateString('fa-IR')}`, parse_mode: 'Markdown' };
+  if (!lic || !lic.expiresAt || lic.plan === 'revoked') {
+    return { text: '📊 لایسنس شما نامعتبر یا باطل شده است.' };
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const active = lic.expiresAt > now;
+  const joins = parseInt((await env.LICENSES.get(`refjoin:${tid}`)) || '0');
+  const credit = parseInt((await env.LICENSES.get(`credit:${tid}`)) || '0');
+  const planLabel = lic.plan === 'paid' ? 'خریداری‌شده ویژه ⭐️' : (lic.plan === 'trial' ? 'تست رایگان 🎁' : lic.plan);
+  return {
+    text: `📊 *گزارش وضعیت حساب کاربری*\n\n` +
+      `🔑 کد لایسنس:\n\`${key}\`\n\n` +
+      `📦 نوع اشتراک: ${planLabel}\n` +
+      `🚦 وضعیت: ${active ? 'فعال ✅' : 'منقضی شده ❌'}\n` +
+      `⏳ اعتبار زمانی: *${formatDuration(lic.expiresAt - now)}*\n` +
+      `📅 تاریخ انقضا: *${formatJalali(lic.expiresAt)}*\n` +
+      `👥 افراد دعوت‌شده: ${joins} نفر\n` +
+      `🎁 اعتبار ذخیره هدیه: ${credit} روز`,
+    parse_mode: 'Markdown',
+  };
 }
 
 export default {
   async fetch(request, env) {
-    // Top-level guard: a thrown error must never surface as CF error 1101.
     try {
       return await handleHttp(request, env);
     } catch (e) {
-      try { await env.LICENSES.put('lastError', 'fetch: ' + String(e && e.stack || e).slice(0, 400)); } catch (_) {}
-      return new Response('⚠️ Worker error — see /diag', { status: 500 });
+      try {
+        await env.LICENSES.put('lastError', 'fetch: ' + String(e && e.stack || e).slice(0, 400));
+      } catch (_) {}
+      return new Response('⚠️ Worker error — check /diag', { status: 500 });
     }
   },
 };
@@ -253,122 +360,185 @@ export default {
 async function handleHttp(request, env) {
   const url = new URL(request.url);
 
-    // ── HTTP API ──────────────────────────────────────────────────────────
-    if (url.pathname === '/api/license' || url.pathname === '/api/status') {
-      const key = url.searchParams.get('key');
-      if (!key) return json({ ok: false, error: 'missing-key' }, 400);
-      const lic = await getLic(env, key);
-      if (!lic || !lic.expiresAt)
-        return json({ ok: false, error: 'invalid' }, 200);
-      const now = Math.floor(Date.now() / 1000);
-      if (lic.expiresAt <= now)
-        return json({ ok: false, error: 'expired' }, 200);
+  // ── HTTP API ──────────────────────────────────────────────────────────
+  if (url.pathname === '/api/license' || url.pathname === '/api/status') {
+    const key = (url.searchParams.get('key') || '').trim();
+    if (!key) return json({ ok: false, error: 'missing-key' }, 400);
+    const lic = await getLic(env, key);
+    if (!lic || !lic.expiresAt || lic.plan === 'revoked') {
+      return json({ ok: false, error: lic?.plan === 'revoked' ? 'revoked' : 'invalid' }, 200);
+    }
+    const now = Math.floor(Date.now() / 1000);
+    if (lic.expiresAt <= now) {
+      return json({ ok: false, error: 'expired', expiresAt: lic.expiresAt, serverTime: now }, 200);
+    }
+    return json({
+      ok: true,
+      key: lic.key,
+      plan: lic.plan,
+      issuedAt: lic.issuedAt,
+      expiresAt: lic.expiresAt,
+      serverTime: now,
+      remainingSeconds: Math.max(0, lic.expiresAt - now),
+      daysLeft: Math.max(0, Math.ceil((lic.expiresAt - now) / 86400)),
+      isPaid: lic.plan === 'paid' || lic.plan === 'admin',
+    });
+  }
+
+  if (url.pathname === '/api/health') {
+    return json({ ok: true, service: 'VoidrauVPN License API', time: Math.floor(Date.now() / 1000) });
+  }
+
+  if (url.pathname === '/api/trial' && request.method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const tid = String(body.telegramId || '').trim();
+    if (!/^\d{3,}$/.test(tid)) return json({ ok: false, error: 'bad-id' }, 400);
+
+    const ip = request.headers.get('cf-connecting-ip') || 'x';
+    const rlKey = `rl:${ip}`;
+    const rl = parseInt((await env.LICENSES.get(rlKey)) || '0');
+    if (rl >= 5) return json({ ok: false, error: 'rate-limited' }, 429);
+    await env.LICENSES.put(rlKey, String(rl + 1), { expirationTtl: 600 });
+
+    const used2 = await env.LICENSES.get(`trial:${tid}`);
+    if (used2) return json({ ok: false, error: 'trial-used' }, 200);
+    const claim = crypto.randomUUID();
+    await env.LICENSES.put(`trial:${tid}`, claim);
+    const check = await env.LICENSES.get(`trial:${tid}`);
+    if (check !== claim) return json({ ok: false, error: 'trial-used' }, 200);
+
+    const existing = await userKey(env, tid);
+    const exLic = existing ? await getLic(env, existing) : null;
+    const now = Math.floor(Date.now() / 1000);
+    if (exLic && exLic.expiresAt && exLic.expiresAt > now && exLic.plan !== 'trial' && exLic.plan !== 'revoked') {
       return json({
         ok: true,
-        plan: lic.plan,
-        issuedAt: lic.issuedAt,
-        expiresAt: lic.expiresAt,
+        key: existing,
+        plan: exLic.plan,
+        expiresAt: exLic.expiresAt,
+        serverTime: now,
+        isPaid: true,
       });
     }
+    const TD = await trialDaysOf(env);
+    const key = await mintKey(env, tid, TD, 'trial');
+    await extend(env, key, TD);
+    return json({
+      ok: true,
+      key,
+      plan: 'trial',
+      expiresAt: now + TD * 86400,
+      serverTime: now,
+      daysLeft: TD,
+      isPaid: false,
+    });
+  }
 
-    if (url.pathname === '/api/trial' && request.method === 'POST') {
-      const body = await request.json().catch(() => ({}));
-      const tid = String(body.telegramId || '').trim();
-      if (!/^\d{3,}$/.test(tid)) return json({ ok: false, error: 'bad-id' }, 400);
-      // rate limit per IP: 5 requests / 10 min
-      const ip = request.headers.get('cf-connecting-ip') || 'x';
-      const rlKey = `rl:${ip}`;
-      const rl = parseInt((await env.LICENSES.get(rlKey)) || '0');
-      if (rl >= 5) return json({ ok: false, error: 'rate-limited' }, 429);
-      await env.LICENSES.put(rlKey, String(rl + 1), { expirationTtl: 600 });
-      // used-flag first, then claim re-check so parallel calls can't double-issue
-      const used2 = await env.LICENSES.get(`trial:${tid}`);
-      if (used2) return json({ ok: false, error: 'trial-used' }, 200);
-      const claim = crypto.randomUUID();
-      await env.LICENSES.put(`trial:${tid}`, claim);
-      const check = await env.LICENSES.get(`trial:${tid}`);
-      if (check !== claim) return json({ ok: false, error: 'trial-used' }, 200);
-      // never clobber an existing active non-trial binding
-      const existing = await userKey(env, tid);
-      const exLic = existing ? await getLic(env, existing) : null;
-      if (exLic && exLic.expiresAt && exLic.expiresAt * 1000 > Date.now() && exLic.plan !== 'trial') {
-        return json({ ok: true, key: existing, plan: exLic.plan, expiresAt: exLic.expiresAt });
-      }
-      const TD = await trialDaysOf(env);
-      const key = await mintKey(env, tid, TD, 'trial');
-      await extend(env, key, TD);
-      return json({ ok: true, key, expiresAt: Math.floor(Date.now() / 1000) + TD * 86400 });
-    }
+  // ── Telegram webhook ─────────────────────────────────────────────────
+  if (url.pathname === '/webhook' && request.method === 'POST') {
+    const whs = await env.LICENSES.get('set:whsecret');
+    const hdr = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
+    if (whs && hdr !== whs) return new Response('forbidden', { status: 403 });
+    const upd = await request.json();
 
-    // ── Telegram webhook ─────────────────────────────────────────────────
-    if (url.pathname === '/webhook' && request.method === 'POST') {
-      // verify Telegram's signature (fail-open only before the first /setup arms the secret)
-      const whs = await env.LICENSES.get('set:whsecret');
-      const hdr = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
-      if (whs && hdr !== whs) return new Response('forbidden', { status: 403 });
-      const upd = await request.json();
-      // trace: record last update received + timestamp
-      try {
-        await env.LICENSES.put('lastUpdate', JSON.stringify({
+    try {
+      await env.LICENSES.put(
+        'lastUpdate',
+        JSON.stringify({
           at: new Date().toISOString(),
-          kind: upd.message ? 'message(' + String(upd.message.text || '').length + 'ch)' : upd.callback_query ? 'callback:' + upd.callback_query.data : 'other',
+          kind: upd.message
+            ? 'message(' + String(upd.message.text || '').length + 'ch)'
+            : upd.callback_query
+            ? 'callback:' + upd.callback_query.data
+            : 'other',
           from: upd.message?.from?.id || upd.callback_query?.from?.id || null,
-        }));
-        await env.LICENSES.delete('lastError');
-      } catch (_) {}
-      // synchronous + traced: every step recorded so /diag shows exactly where it stops
-      const steps = ['recv'];
-      try {
-        await handle(upd, env, steps);
-        steps.push('done');
-      } catch (e) {
-        steps.push('ERROR: ' + String(e && e.stack || e).slice(0, 300));
-        try { await env.LICENSES.put('lastError', steps.join(' > ')); } catch (_) {}
-      }
-      try { await env.LICENSES.put('lastSteps', steps.join(' > ')); } catch (_) {}
-      return new Response('ok');
-    }
+        })
+      );
+      await env.LICENSES.delete('lastError');
+    } catch (_) {}
 
-    // Self-healing: any visit to the root re-registers the webhook with Telegram,
-    // so simply opening the worker URL (re)sets it — no manual curl needed.
-    if (url.pathname === '/' || url.pathname === '/setup') {
-      const self = `${url.protocol}//${url.host}/webhook`;
-      // get-or-create the webhook secret so Telegram signs every update
-      let whs = await env.LICENSES.get('set:whsecret');
-      if (!whs) { whs = crypto.randomUUID().replace(/-/g, ''); await env.LICENSES.put('set:whsecret', whs); }
-      const set = await tg(env.BOT_TOKEN || '', 'setWebhook', { url: self, allowed_updates: ['message', 'callback_query'], drop_pending_updates: false, secret_token: whs }, env);
-      const me0 = await tg(env.BOT_TOKEN || '', 'getMe', {}, env);
-      if (me0 && me0.ok && me0.result?.username) await env.LICENSES.put('set:botusername', me0.result.username);
-      if (env.LICENSES) await env.LICENSES.put('lastSetup', JSON.stringify({ at: new Date().toISOString(), ok: set.ok, error: set.description || null }));
-      if (url.pathname === '/')
-        return new Response(`VoidrauVPN license bot — alive.\nWebhook: ${set.ok ? 'SET ✓' : 'FAILED: ' + (set.description || '?')}`);
-      return json({ setup: set });
+    const steps = ['recv'];
+    try {
+      await handle(upd, env, steps);
+      steps.push('done');
+    } catch (e) {
+      steps.push('ERROR: ' + String(e && e.stack || e).slice(0, 300));
+      try {
+        await env.LICENSES.put('lastError', steps.join(' > '));
+      } catch (_) {}
     }
-    if (url.pathname === '/diag') {
-      // diagnostics are not public: admin must pass ?a=<ADMIN_ID>
-      if (String(url.searchParams.get('a') || '') !== String(env.ADMIN_ID || '')) {
-        return json({ ok: false, error: 'forbidden — /diag?a=<ADMIN_ID>' }, 403);
-      }
-      const me = await tg(env.BOT_TOKEN || '', 'getMe', {});
-      const hook = await tg(env.BOT_TOKEN || '', 'getWebhookInfo', {});
-      const lastError = await env.LICENSES.get('lastError');
-      const lastUpdate = await env.LICENSES.get('lastUpdate');
-      const lastSentId = await env.LICENSES.get('lastSentId');
-      const lastSetup = await env.LICENSES.get('lastSetup');
-      const lastSteps = await env.LICENSES.get('lastSteps');
-      return json({
-        lastSteps,
-        lastSetup: lastSetup ? JSON.parse(lastSetup) : null,
-        lastUpdate: lastUpdate ? JSON.parse(lastUpdate) : null,
-        lastSentId,
-        lastError,
-        botTokenSet: !!env.BOT_TOKEN,
-        adminIdSet: !!env.ADMIN_ID,
-        kvSet: !!env.LICENSES,
-        getMe: me,
-        webhook: hook,
-      });
+    try {
+      await env.LICENSES.put('lastSteps', steps.join(' > '));
+    } catch (_) {}
+    return new Response('ok');
+  }
+
+  if (url.pathname === '/' || url.pathname === '/setup') {
+    const self = `${url.protocol}//${url.host}/webhook`;
+    let whs = await env.LICENSES.get('set:whsecret');
+    if (!whs) {
+      whs = crypto.randomUUID().replace(/-/g, '');
+      await env.LICENSES.put('set:whsecret', whs);
     }
+    const set = await tg(
+      env.BOT_TOKEN || '',
+      'setWebhook',
+      {
+        url: self,
+        allowed_updates: ['message', 'callback_query'],
+        drop_pending_updates: false,
+        secret_token: whs,
+      },
+      env
+    );
+    const me0 = await tg(env.BOT_TOKEN || '', 'getMe', {}, env);
+    if (me0 && me0.ok && me0.result?.username) {
+      await env.LICENSES.put('set:botusername', me0.result.username);
+    }
+    if (env.LICENSES) {
+      await env.LICENSES.put(
+        'lastSetup',
+        JSON.stringify({ at: new Date().toISOString(), ok: set.ok, error: set.description || null })
+      );
+    }
+    if (url.pathname === '/') {
+      return new Response(
+        `VoidrauVPN license bot — alive & operational.\nWebhook: ${
+          set.ok ? 'SET ✓' : 'FAILED: ' + (set.description || '?')
+        }`
+      );
+    }
+    return json({ setup: set });
+  }
+
+  if (url.pathname === '/diag') {
+    if (String(url.searchParams.get('a') || '') !== String(env.ADMIN_ID || '')) {
+      return json({ ok: false, error: 'forbidden — /diag?a=<ADMIN_ID>' }, 403);
+    }
+    const me = await tg(env.BOT_TOKEN || '', 'getMe', {});
+    const hook = await tg(env.BOT_TOKEN || '', 'getWebhookInfo', {});
+    const lastError = await env.LICENSES.get('lastError');
+    const lastUpdate = await env.LICENSES.get('lastUpdate');
+    const lastSentId = await env.LICENSES.get('lastSentId');
+    const lastSetup = await env.LICENSES.get('lastSetup');
+    const lastSteps = await env.LICENSES.get('lastSteps');
+    const users = await env.LICENSES.get('stat:users');
+    const pending = await env.LICENSES.get('stat:pending');
+    return json({
+      lastSteps,
+      lastSetup: lastSetup ? JSON.parse(lastSetup) : null,
+      lastUpdate: lastUpdate ? JSON.parse(lastUpdate) : null,
+      lastSentId,
+      lastError,
+      stats: { users, pending },
+      botTokenSet: !!env.BOT_TOKEN,
+      adminIdSet: !!env.ADMIN_ID,
+      kvSet: !!env.LICENSES,
+      getMe: me,
+      webhook: hook,
+    });
+  }
+
   return json({ ok: false, error: 'not-found' }, 404);
 }
 
@@ -381,154 +551,311 @@ async function handle(upd, env, steps) {
     steps.push('cb:' + cb.data);
     const tid = cb.from.id;
     let out = null;
+
     if (String(tid) !== String(env.ADMIN_ID) && !(await checkJoined(env, tid))) {
       out = joinPrompt(await getSetting(env, 'forceChannel', ''));
-    }
-    else if (cb.data === 'recheck') out = (await checkJoined(env, tid)) ? { text: '✅ خوش آمدید!' } : joinPrompt(await getSetting(env, 'forceChannel', ''));
-    else if (cb.data === 'trial') out = await doTrial(env, tid);
-    else if (cb.data === 'buy') out = await buyMenuFull(env);
-    else if (cb.data === 'ref') out = await doReferral(env, tid);
-    else if (cb.data === 'mykey') out = await doMyKey(env, tid);
-    else if (cb.data.startsWith('plan:')) out = await doPlan(env, tid, cb.data.slice(5));
-    else if (cb.data.startsWith('okr:') && String(tid) === String(env.ADMIN_ID)) {
+    } else if (cb.data === 'recheck') {
+      out = (await checkJoined(env, tid))
+        ? { text: '✅ عضویت شما تایید شد. خوش آمدید!' }
+        : joinPrompt(await getSetting(env, 'forceChannel', ''));
+    } else if (cb.data === 'trial') {
+      out = await doTrial(env, tid);
+    } else if (cb.data === 'buy') {
+      out = await buyMenuFull(env);
+    } else if (cb.data === 'ref') {
+      out = await doReferral(env, tid);
+    } else if (cb.data === 'mykey') {
+      out = await doMyKey(env, tid);
+    } else if (cb.data.startsWith('plan:')) {
+      out = await doPlan(env, tid, cb.data.slice(5));
+    } else if (cb.data.startsWith('okr:') && String(tid) === String(env.ADMIN_ID)) {
       const [, tS, dS] = cb.data.split(':');
-      const target = tS, days = parseInt(dS);
-      // claim-first: only the first press grants days (double-press = no double grant)
+      const target = tS;
+      const days = parseInt(dS);
       const recRaw = await env.LICENSES.get(`receipt:${target}`);
       if (!recRaw) {
-        out = { text: `ℹ️ رسید ${target} قبلاً پردازش شده (دکمهٔ تکراری).` };
+        out = { text: `ℹ️ رسید کاربر ${target} قبلاً پردازش شده است.` };
       } else if (!Number.isFinite(days) || days < 1 || days > 3650) {
-        out = { text: '❌ روز نامعتبر در دکمهٔ تایید.' };
+        out = { text: '❌ تعداد روز نامعتبر در دکمهٔ تایید.' };
       } else {
         await env.LICENSES.delete(`receipt:${target}`);
+        const curPending = Math.max(0, parseInt((await env.LICENSES.get('stat:pending')) || '1') - 1);
+        await env.LICENSES.put('stat:pending', String(curPending));
+
         let k = await userKey(env, target);
         let l = k ? await getLic(env, k) : null;
-        if (l && l.expiresAt) { await extend(env, k, days); await upgradePlan(env, k, 'paid'); }
-        else { k = await mintKey(env, target, days, 'paid'); await extend(env, k, days); }
-        while ((await takeCredit(env, target)) === 1) await extend(env, k, 1);
-        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: target, text: `✅ پرداخت تایید شد!\n\`${k}\`\n${days} روز اضافه شد.`, parse_mode: 'Markdown' }, env, steps);
-        if (cb.message?.chat) await tg(env.BOT_TOKEN, 'editMessageReplyMarkup', { chat_id: cb.message.chat.id, message_id: cb.message.message_id, reply_markup: { inline_keyboard: [] } }, env, steps);
-        out = { text: '✅ تایید و برای کاربر ارسال شد.' };
+        if (l && l.expiresAt) {
+          await extend(env, k, days);
+          await upgradePlan(env, k, 'paid');
+        } else {
+          k = await mintKey(env, target, days, 'paid');
+          await extend(env, k, days);
+        }
+        while ((await takeCredit(env, target)) === 1) {
+          await extend(env, k, 1);
+        }
+        const updatedLic = await getLic(env, k);
+        await tg(
+          env.BOT_TOKEN,
+          'sendMessage',
+          {
+            chat_id: target,
+            text:
+              `✅ *پرداخت شما تایید شد!*\n\n` +
+              `🔑 کد لایسنس شما:\n\`${k}\`\n\n` +
+              `⏳ به مدت *${days} روز* فعال شد.\n` +
+              `📅 تاریخ انقضا: *${formatJalali(updatedLic?.expiresAt)}*\n\n` +
+              `کد را کپی کرده و در برنامه وارد نمایید. متشکریم!`,
+            parse_mode: 'Markdown',
+          },
+          env,
+          steps
+        );
+        if (cb.message?.chat) {
+          await tg(
+            env.BOT_TOKEN,
+            'editMessageReplyMarkup',
+            {
+              chat_id: cb.message.chat.id,
+              message_id: cb.message.message_id,
+              reply_markup: { inline_keyboard: [] },
+            },
+            env,
+            steps
+          );
+        }
+        out = { text: `✅ رسید تایید و کد به کاربر ${target} ارسال شد.` };
       }
-    }
-    else if (cb.data.startsWith('rej:') && String(tid) === String(env.ADMIN_ID)) {
+    } else if (cb.data.startsWith('rej:') && String(tid) === String(env.ADMIN_ID)) {
       const ru = cb.data.slice(4);
       await env.LICENSES.delete(`receipt:${ru}`);
-      await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: ru, text: '❌ رسید شما تایید نشد. لطفاً تصویر واضح‌تر از رسید (با مبلغ و تاریخ) بفرستید یا با پشتیبانی تماس بگیرید.' }, env, steps);
-      out = { text: `❌ رسید ${ru} رد شد و به کاربر اطلاع داده شد.` };
-    }
-    else if (cb.data === 'dl' || cb.data === 'dlrefresh') { if (cb.data === 'dlrefresh') await env.LICENSES.delete('cache:relfiles'); out = await doDownloads(env, tid); }
-    else if (cb.data.startsWith('file:')) {
+      const curPending = Math.max(0, parseInt((await env.LICENSES.get('stat:pending')) || '1') - 1);
+      await env.LICENSES.put('stat:pending', String(curPending));
+
+      await tg(
+        env.BOT_TOKEN,
+        'sendMessage',
+        {
+          chat_id: ru,
+          text:
+            '❌ رسید ارسالی شما تایید نشد.\n\n' +
+            'دلایل معمول: ناخوانا بودن تصویر، عدم واریز، یا عدم تطابق مبلغ.\n' +
+            'لطفاً تصویر واضح‌تری بفرستید یا با پشتیبانی تماس بگیرید.',
+        },
+        env,
+        steps
+      );
+      if (cb.message?.chat) {
+        await tg(
+          env.BOT_TOKEN,
+          'editMessageReplyMarkup',
+          {
+            chat_id: cb.message.chat.id,
+            message_id: cb.message.message_id,
+            reply_markup: { inline_keyboard: [] },
+          },
+          env,
+          steps
+        );
+      }
+      out = { text: `❌ رسید کاربر ${ru} رد شد و به او اطلاع داده شد.` };
+    } else if (cb.data === 'dl' || cb.data === 'dlrefresh') {
+      if (cb.data === 'dlrefresh') await env.LICENSES.delete('cache:relfiles');
+      out = await doDownloads(env, tid);
+    } else if (cb.data.startsWith('file:')) {
       const idx = parseInt(cb.data.slice(5));
       let pick = [];
-      try { pick = JSON.parse((await env.LICENSES.get(`${DL_FILES_KEY}:${tid}`)) || '[]'); } catch (_) {}
+      try {
+        pick = JSON.parse((await env.LICENSES.get(`${DL_FILES_KEY}:${tid}`)) || '[]');
+      } catch (_) {}
       const f = pick[idx];
       if (!f) {
         out = await doDownloads(env, tid);
       } else {
-        await tg(token, 'answerCallbackQuery', { callback_query_id: cb.id, text: '⏳ در حال ارسال...' });
+        await tg(token, 'answerCallbackQuery', { callback_query_id: cb.id, text: '⏳ در حال ارسال فایل...' });
         cb._answered = true;
         try {
           await sendReleaseFile(env, tid, f.url, f.name);
-          await tg(token, 'sendMessage', { chat_id: tid, text: '✅ فایل ارسال شد 👆\n🤖 اندروید: نصب کنید\n🪟 ویندوز: اجرا کنید' });
+          await tg(token, 'sendMessage', {
+            chat_id: tid,
+            text: '✅ فایل برنامه با موفقیت ارسال شد 👆\n🤖 اندروید: فایل را باز کرده و نصب کنید.\n🪟 ویندوز: فایل نصبی را اجرا فرمایید.',
+          });
         } catch (e) {
-          await tg(token, 'sendMessage', { chat_id: tid, text: `❌ ارسال فایل ناموفق بود: ${e.message}\nیک‌بار دیگر امتحان کنید.`, reply_markup: { inline_keyboard: [[{ text: '🔄 دوباره', callback_data: `file:${idx}` }], [{ text: '📜 لیست فایل‌ها', callback_data: 'dl' }]] } });
+          await tg(token, 'sendMessage', {
+            chat_id: tid,
+            text: `❌ ارسال فایل ناموفق بود: ${e.message}\nلطفاً دوباره امتحان کنید.`,
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '🔄 تلاش دوباره', callback_data: `file:${idx}` }],
+                [{ text: '📜 لیست فایل‌ها', callback_data: 'dl' }],
+              ],
+            },
+          });
         }
         out = null;
       }
-    }
-    else if (cb.data === 'help') out = await doHelp();
-    else if (cb.data === 'support') out = await doSupport(env);
-    else if (cb.data === 'status') out = await doStatus(env, tid);
-    else if (cb.data.startsWith('ad:') && String(tid) === String(env.ADMIN_ID)) {
+    } else if (cb.data === 'help') {
+      out = await doHelp();
+    } else if (cb.data === 'support') {
+      out = await doSupport(env);
+    } else if (cb.data === 'status') {
+      out = await doStatus(env, tid);
+    } else if (cb.data.startsWith('ad:') && String(tid) === String(env.ADMIN_ID)) {
       const a = cb.data.slice(3);
-      if (a === 'cancelmode') { await env.LICENSES.delete(`admMode:${tid}`); out = await adminPanel(env, tid); }
-      else if (a === 'editbuy') { await env.LICENSES.put(`admMode:${tid}`, 'buyText'); out = { text: 'متن جدید دکمه خرید را بفرست:\n(لغو: دکمهٔ پایین)', reply_markup: { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'ad:cancelmode' }]] } }; }
-      else if (a === 'editcard') { await env.LICENSES.put(`admMode:${tid}`, 'cardNumber'); out = await askMode(env, tid, 'شماره کارت جدید را بفرست:', 'cardNumber'); }
-      else if (a === 'editch') { await env.LICENSES.put(`admMode:${tid}`, 'forceChannel'); out = await askMode(env, tid, 'آیدی کانال اجباری را بفرست (با @ — خالی برای غیرفعال):', 'forceChannel'); }
-      else if (a === 'broadcast') { await env.LICENSES.put(`admMode:${tid}`, 'broadcast'); out = await askMode(env, tid, 'متن/عکس پیام همگانی را بفرست:', 'broadcast'); }
-      else if (a === 'editsup') { await env.LICENSES.put(`admMode:${tid}`, 'supportId'); out = await askMode(env, tid, 'آیدی پشتیبانی را بفرست (@...):', 'supportId'); }
-      else if (a === 'edittrial') { await env.LICENSES.put(`admMode:${tid}`, 'trialDays'); out = await askMode(env, tid, 'تعداد روز تست رایگان را بفرست:', 'trialDays'); }
-      else if (a === 'editplans') { await env.LICENSES.put(`admMode:${tid}`, 'plans'); out = await askMode(env, tid, 'قیمت‌ها را بفرست، هر خط: شناسه|برچسب|روز\nمثال:\nm1|۱ ماهه — ۱۰۰ هزار تومان|30\nm3|۳ ماهه — ۲۵۰ هزار تومان|90\nm12|یک‌ساله — ۸۰۰ هزار تومان|365', 'plans'); }
-      else if (a === 'pending') out = await pendingList(env, tid);
-      else if (a === 'users') out = await recentUsers(env);
-      else if (a === 'export') out = await exportBackup(env, tid);
-      else if (a === 'bcsend') {
+      if (a === 'cancelmode') {
+        await env.LICENSES.delete(`admMode:${tid}`);
+        out = await adminPanel(env, tid);
+      } else if (a === 'editbuy') {
+        await env.LICENSES.put(`admMode:${tid}`, 'buyText');
+        out = {
+          text: 'متن جدید توضیحات خرید را ارسال کنید:\n(جهت انصراف دکمه لغو را بزنید)',
+          reply_markup: { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'ad:cancelmode' }]] },
+        };
+      } else if (a === 'editcard') {
+        await env.LICENSES.put(`admMode:${tid}`, 'cardNumber');
+        out = await askMode(env, tid, 'شماره کارت جدید جهت واریز را بفرستید:', 'cardNumber');
+      } else if (a === 'editch') {
+        await env.LICENSES.put(`admMode:${tid}`, 'forceChannel');
+        out = await askMode(env, tid, 'آیدی کانال جوین اجباری را بفرستید (با @ یا آیدی عددی — خالی برای غیرفعال):', 'forceChannel');
+      } else if (a === 'broadcast') {
+        await env.LICENSES.put(`admMode:${tid}`, 'broadcast');
+        out = await askMode(env, tid, 'متن یا عکس پیام همگانی را بفرستید:', 'broadcast');
+      } else if (a === 'editsup') {
+        await env.LICENSES.put(`admMode:${tid}`, 'supportId');
+        out = await askMode(env, tid, 'آیدی یا یوزرنیم پشتیبانی را بفرستید (@...):', 'supportId');
+      } else if (a === 'edittrial') {
+        await env.LICENSES.put(`admMode:${tid}`, 'trialDays');
+        out = await askMode(env, tid, 'تعداد روز تست رایگان را بفرستید (مثال: 1):', 'trialDays');
+      } else if (a === 'editplans') {
+        await env.LICENSES.put(`admMode:${tid}`, 'plans');
+        out = await askMode(
+          env,
+          tid,
+          'لیست پلن‌ها را بفرستید، هر خط: شناسه|برچسب|تعداد روز\nمثال:\nm1|۱ ماهه — ۱۰۰ هزار تومان|30\nm3|۳ ماهه — ۲۵۰ هزار تومان|90\nm12|یک‌ساله — ۸۰۰ هزار تومان|365',
+          'plans'
+        );
+      } else if (a === 'pending') {
+        out = await pendingList(env, tid);
+      } else if (a === 'users') {
+        out = await recentUsers(env);
+      } else if (a === 'export') {
+        out = await exportBackup(env, tid);
+      } else if (a === 'bcsend') {
         let bc = null;
-        try { bc = JSON.parse((await env.LICENSES.get(`bc:${tid}`)) || 'null'); } catch (_) {}
+        try {
+          bc = JSON.parse((await env.LICENSES.get(`bc:${tid}`)) || 'null');
+        } catch (_) {}
         await env.LICENSES.delete(`bc:${tid}`);
         await env.LICENSES.delete(`admMode:${tid}`);
-        if (!bc || (!bc.text && !bc.fileId)) { out = { text: '⚠️ پیام همگانی یافت نشد — از نو بفرست.' }; }
-        else {
+        if (!bc || (!bc.text && !bc.fileId)) {
+          out = { text: '⚠️ پیام همگانی یافت نشد — لطفاً از نو ارسال کنید.' };
+        } else {
           const list = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
-          let n = 0, fail = 0;
-          for (const u of list.slice(0, 500)) {
-            try {
-              let r;
-              if (bc.kind === 'photo') r = await tg(env.BOT_TOKEN, 'sendPhoto', { chat_id: u, photo: bc.fileId, caption: bc.caption || '' });
-              else if (bc.kind === 'doc') r = await tg(env.BOT_TOKEN, 'sendDocument', { chat_id: u, document: bc.fileId, caption: bc.caption || '' });
-              else r = await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: u, text: bc.text });
-              if (r && r.ok) n++; else fail++;
-            } catch (_) { fail++; }
+          let n = 0;
+          let fail = 0;
+          const targetUsers = list.slice(0, 300);
+          const batchSize = 15;
+          for (let i = 0; i < targetUsers.length; i += batchSize) {
+            const batch = targetUsers.slice(i, i + batchSize);
+            await Promise.all(
+              batch.map(async (u) => {
+                try {
+                  let r;
+                  if (bc.kind === 'photo') {
+                    r = await tg(env.BOT_TOKEN, 'sendPhoto', {
+                      chat_id: u,
+                      photo: bc.fileId,
+                      caption: bc.caption || '',
+                    });
+                  } else if (bc.kind === 'doc') {
+                    r = await tg(env.BOT_TOKEN, 'sendDocument', {
+                      chat_id: u,
+                      document: bc.fileId,
+                      caption: bc.caption || '',
+                    });
+                  } else {
+                    r = await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: u, text: bc.text });
+                  }
+                  if (r && r.ok) n++;
+                  else fail++;
+                } catch (_) {
+                  fail++;
+                }
+              })
+            );
+            await new Promise((resolve) => setTimeout(resolve, 200));
           }
-          out = { text: `📣 ارسال به ${n} کاربر انجام شد${fail ? ` — ${fail} ناموفق` : ''}.` };
+          out = { text: `📣 ارسال به ${n} کاربر انجام شد${fail ? ` (${fail} پیام ناموفق)` : ''}.` };
         }
+      } else if (a === 'stats') {
+        out = await buildStatsMessage(env);
       }
-      else if (a === 'stats') {
-        const idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
-        let act = 0, trial = 0, paid = 0;
-        for (const u of idx) {
-          const k = await env.LICENSES.get(`user:${u}`);
-          if (!k) continue;
-          const l = await getLic(env, k);
-          if (l && l.expiresAt && l.expiresAt * 1000 > Date.now()) { act++; if (l.plan === 'trial') trial++; else paid++; }
-        }
-        out = { text: `📊 آمار کامل\n\n👥 کاربران: ${idx.length}\n✅ فعال: ${act}\n🎁 تستی فعال: ${trial}\n💰 خریداری فعال: ${paid}\n🧾 رسید در انتظار: ${(await env.LICENSES.get('stat:pending')) || 0}` };
-      }
+    } else {
+      out = { text: 'این دکمه منقضی شده است — لطفاً با /start از نو آغاز کنید.' };
     }
-    else out = { text: 'این دکمه منقضی شده — از /start دوباره شروع کنید.' };
+
     if (out) await tg(token, 'sendMessage', { chat_id: tid, ...out }, env, steps);
     if (!cb._answered) await tg(token, 'answerCallbackQuery', { callback_query_id: cb.id }, env, steps);
     return;
   }
-  if (!msg) { steps.push('no-msg'); return; }
+
+  if (!msg) {
+    steps.push('no-msg');
+    return;
+  }
   const tid = msg.from.id;
   const text = (msg.text || '').trim();
   steps.push('msg:' + text.slice(0, 20));
 
-  // Admin pending-input mode FIRST (so admin photos/edits are consumed, not "متوجه نشدم").
-  const mediaAdmin = msg.photo ? 'photo' : (msg.document ? 'doc' : null);
+  const mediaAdmin = msg.photo ? 'photo' : msg.document ? 'doc' : null;
   if (String(tid) === String(env.ADMIN_ID)) {
     const mode = await env.LICENSES.get(`admMode:${tid}`);
     if (mode && text.trim() === '/cancel') {
       await env.LICENSES.delete(`admMode:${tid}`);
-      await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ حالت ویرایش لغو شد.' }, env, steps);
+      await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ عملیات لغو شد.' }, env, steps);
       return;
     }
     if (mode === 'broadcast' && !text.startsWith('/') && (text || mediaAdmin)) {
-      // two-step confirm so a stray message never broadcasts to everyone
-      await env.LICENSES.put(`bc:${tid}`, JSON.stringify({ text: mediaAdmin ? '' : text, fileId: mediaAdmin ? (mediaAdmin === 'photo' ? msg.photo[msg.photo.length - 1].file_id : msg.document.file_id) : null, kind: mediaAdmin, caption: msg.caption || '' }));
+      await env.LICENSES.put(
+        `bc:${tid}`,
+        JSON.stringify({
+          text: mediaAdmin ? '' : text,
+          fileId: mediaAdmin
+            ? mediaAdmin === 'photo'
+              ? msg.photo[msg.photo.length - 1].file_id
+              : msg.document.file_id
+            : null,
+          kind: mediaAdmin,
+          caption: msg.caption || '',
+        })
+      );
       await env.LICENSES.put(`admMode:${tid}`, 'bcconfirm');
-      await tg(env.BOT_TOKEN, 'sendMessage', {
-        chat_id: tid,
-        text: '📋 پیش‌نمایش پیام همگانی آماده است. ارسال به همهٔ کاربران؟',
-        reply_markup: { inline_keyboard: [[{ text: '✅ ارسال کن', callback_data: 'ad:bcsend' }, { text: '❌ لغو', callback_data: 'ad:cancelmode' }]] },
-      }, env, steps);
+      await tg(
+        env.BOT_TOKEN,
+        'sendMessage',
+        {
+          chat_id: tid,
+          text: '📋 پیش‌نمایش پیام همگانی آماده شد. آیا مایلید به همهٔ کاربران ارسال شود؟',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '✅ بله، ارسال کن', callback_data: 'ad:bcsend' }],
+              [{ text: '❌ لغو', callback_data: 'ad:cancelmode' }],
+            ],
+          },
+        },
+        env,
+        steps
+      );
       return;
     }
     if (mode && !text.startsWith('/')) {
       await env.LICENSES.delete(`admMode:${tid}`);
       if (mediaAdmin) {
         await env.LICENSES.put(`admMode:${tid}`, mode);
-        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: 'برای این مورد باید متن بفرستید (عکس/فایل قابل ذخیره نیست).' }, env, steps);
+        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: 'برای این بخش باید متن ارسال کنید.' }, env, steps);
         return;
       }
-      if (mode === 'broadcast') {
-        // direct broadcast text is handled by the bcconfirm two-step flow
-        await env.LICENSES.put(`admMode:${tid}`, mode);
-        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: 'از پنل: 📣 پیام همگانی را بزنید و متن را بفرست.' }, env, steps);
-        return;
-      } else if (mode === 'plans') {
+      if (mode === 'plans') {
         const rows = [];
         const bad = [];
         for (const [n, raw] of text.split('\n').entries()) {
@@ -544,92 +871,400 @@ async function handle(upd, env, steps) {
           rows.push({ id: parts[0].replace(/\s+/g, ''), label: parts[1], days: parseInt(parts[2]) });
         }
         const ids = rows.map((r) => r.id);
-        if (new Set(ids).size !== ids.length) { await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ شناسهٔ تکراری — هر پلن شناسهٔ یکتا داشته باشد.' }, env, steps); return; }
-        if (bad.length) {
-          await env.LICENSES.put(`admMode:${tid}`, mode);
-          await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `❌ این خط‌ها درست نیستن (فرمت: شناسه|برچسب|روز):\n${bad.join('\n')}\n\nهمهٔ خط‌ها را دوباره بفرست.`, reply_markup: { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'ad:cancelmode' }]] } }, env, steps);
+        if (new Set(ids).size !== ids.length) {
+          await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ شناسهٔ تکراری در پلن‌ها وجود دارد.' }, env, steps);
           return;
         }
-        if (rows.length > 20) { await env.LICENSES.put(`admMode:${tid}`, mode); await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ حداکثر ۲۰ پلن — کمتر بفرست.', reply_markup: { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'ad:cancelmode' }]] } }, env, steps); return; }
-        if (!rows.length) { await env.LICENSES.put(`admMode:${tid}`, mode); await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ هیچ پلن معتبری پیدا نشد — دوباره بفرست.', reply_markup: { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'ad:cancelmode' }]] } }, env, steps); return; }
+        if (bad.length) {
+          await env.LICENSES.put(`admMode:${tid}`, mode);
+          await tg(
+            env.BOT_TOKEN,
+            'sendMessage',
+            {
+              chat_id: tid,
+              text: `❌ خطاهای یافت‌شده در پلن‌ها:\n${bad.join('\n')}\n\nلطفاً لیست کامل را اصلاح و مجدداً ارسال کنید.`,
+              reply_markup: { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'ad:cancelmode' }]] },
+            },
+            env,
+            steps
+          );
+          return;
+        }
+        if (!rows.length) {
+          await env.LICENSES.put(`admMode:${tid}`, mode);
+          await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ هیچ پلن معتبری دریافت نشد.' }, env, steps);
+          return;
+        }
         await env.LICENSES.put('setting:plans', JSON.stringify(rows));
-        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ ${rows.length} پلن ذخیره شد:\n${rows.map((r) => `• ${r.label} (${r.days} روز)`).join('\n')}` }, env, steps);
+        await tg(
+          env.BOT_TOKEN,
+          'sendMessage',
+          {
+            chat_id: tid,
+            text: `✅ تعداد ${rows.length} پلن با موفقیت ثبت شد:\n${rows
+              .map((r) => `• ${r.label} (${r.days} روز)`)
+              .join('\n')}`,
+          },
+          env,
+          steps
+        );
       } else {
         let val = text.trim();
         if (mode === 'forceChannel') {
           if (!val || val === 'خالی' || val === '-') {
             await setSetting(env, mode, '');
             await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '✅ جوین اجباری غیرفعال شد.' }, env, steps);
-            steps.push('admin-mode:' + mode);
             return;
           }
-          // accept https://t.me/xyz , t.me/xyz , @xyz , xyz , or -100... id
           const mch = val.match(/(?:t\.me\/|@)([A-Za-z0-9_]+)/);
           if (mch) val = '@' + mch[1];
-          else if (/^-100\d+$/.test(val)) { /* numeric id — keep as-is */ }
-          else { await env.LICENSES.put(`admMode:${tid}`, mode); await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ فرمت کانال درست نیست. دوباره بفرست (مثال: @mychannel یا -1001234…).' }, env, steps); return; }
+          else if (/^-100\d+$/.test(val)) {
+            // numeric id ok
+          } else {
+            await env.LICENSES.put(`admMode:${tid}`, mode);
+            await tg(
+              env.BOT_TOKEN,
+              'sendMessage',
+              { chat_id: tid, text: '❌ آیدی کانال نامعتبر است (مثال: @mychannel یا -100123456).' },
+              env,
+              steps
+            );
+            return;
+          }
         }
         if (mode === 'trialDays') {
           if (!/^\d+$/.test(val) || parseInt(val) < 1 || parseInt(val) > 365) {
             await env.LICENSES.put(`admMode:${tid}`, mode);
-            await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ عدد نامعتبر (۱ تا ۳۶۵) — دوباره بفرست.', reply_markup: { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'ad:cancelmode' }]] } }, env, steps);
+            await tg(
+              env.BOT_TOKEN,
+              'sendMessage',
+              { chat_id: tid, text: '❌ عدد نامعتبر است (۱ تا ۳۶۵).' },
+              env,
+              steps
+            );
             return;
           }
           await env.LICENSES.put('setting:trialDays', val);
-          await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ تست رایگان = ${val} روز.` }, env, steps);
-          steps.push('admin-mode:' + mode);
+          await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ مدت تست رایگان = ${val} روز تنظیم شد.` }, env, steps);
           return;
         }
         await setSetting(env, mode, val);
-        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ ذخیره شد: ${val}` }, env, steps);
+        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ تنظیم شد: ${val}` }, env, steps);
       }
-      steps.push('admin-mode:' + mode);
-      return;
-    }
-    if (mediaAdmin && !text.startsWith('/')) {
-      // admin sent a screenshot outside any edit mode: guide instead of "متوجه نشدم"
-      await tg(env.BOT_TOKEN, 'sendMessage', {
-        chat_id: tid,
-        text: '📸 عکس دریافت شد.\nاگر رسید کاربری را تایید می‌خواهی: /panel → 🧾 رسیدها\nاگر عکس همگانی می‌خواهی بفرستی: /panel → 📣 پیام همگانی، بعد عکس را بفرست.',
-      }, env, steps);
       return;
     }
   }
 
-  // Receipt intake: photo or document from a normal user.
-  const media2 = msg.photo ? 'photo' : (msg.document ? 'doc' : null);
+  // ── Receipt intake ──────────────────────────────────────────────────
+  const media2 = msg.photo ? 'photo' : msg.document ? 'doc' : null;
   if (media2) {
     const fid = media2 === 'photo' ? msg.photo[msg.photo.length - 1].file_id : msg.document.file_id;
-    await env.LICENSES.put(`receipt:${tid}`, JSON.stringify({ fileId: fid, kind: media2, at: Date.now() }));
-    const cap = `🧾 رسید از کاربر \`${tid}\` — پلن تاییدشده را انتخاب کنید`;
-    const fwd = media2 === 'photo' ? await tg(env.BOT_TOKEN, 'sendPhoto', {
-      chat_id: env.ADMIN_ID,
-      photo: fid,
-      caption: cap,
-      parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: ((await plansOf(env))).map((p) => [{ text: `تایید ${p.label}`, callback_data: `okr:${tid}:${p.days}` }]) },
-    }, env, steps) : await tg(env.BOT_TOKEN, 'sendDocument', {
-      chat_id: env.ADMIN_ID,
-      document: fid,
-      caption: cap,
-      parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: ((await plansOf(env))).map((p) => [{ text: `تایید ${p.label}`, callback_data: `okr:${tid}:${p.days}` }]) },
-    }, env, steps);
+    const selectedPlanId = await getSetting(env, `lastPlan:${tid}`, 'm1');
+    const plans = await plansOf(env);
+    const chosen = plans.find((p) => p.id === selectedPlanId) || plans[0];
+
+    await env.LICENSES.put(
+      `receipt:${tid}`,
+      JSON.stringify({ fileId: fid, kind: media2, planId: selectedPlanId, at: Date.now() })
+    );
+
+    const curP = parseInt((await env.LICENSES.get('stat:pending')) || '0');
+    await env.LICENSES.put('stat:pending', String(curP + 1));
+
+    const cap = `🧾 رسید جدید از کاربر \`${tid}\`\n📦 پلن انتخابی: *${chosen.label}* (${chosen.days} روز)\n\nپلن مورد نظر را برای تایید انتخاب کنید:`;
+    const approveRows = plans.map((p) => [
+      { text: (p.id === chosen.id ? '⭐️ ' : '') + `تایید ${p.label}`, callback_data: `okr:${tid}:${p.days}` },
+    ]);
+    approveRows.push([{ text: '❌ رد رسید', callback_data: `rej:${tid}` }]);
+
+    const fwd =
+      media2 === 'photo'
+        ? await tg(
+            env.BOT_TOKEN,
+            'sendPhoto',
+            {
+              chat_id: env.ADMIN_ID,
+              photo: fid,
+              caption: cap,
+              parse_mode: 'Markdown',
+              reply_markup: { inline_keyboard: approveRows },
+            },
+            env,
+            steps
+          )
+        : await tg(
+            env.BOT_TOKEN,
+            'sendDocument',
+            {
+              chat_id: env.ADMIN_ID,
+              document: fid,
+              caption: cap,
+              parse_mode: 'Markdown',
+              reply_markup: { inline_keyboard: approveRows },
+            },
+            env,
+            steps
+          );
+
     if (!fwd || !fwd.ok) {
-      await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '⚠️ ارسال رسید به ادمین ناموفق بود — دوباره امتحان کنید یا با پشتیبانی تماس بگیرید.' }, env, steps);
-      steps.push('receipt-forward-failed');
+      await tg(
+        env.BOT_TOKEN,
+        'sendMessage',
+        {
+          chat_id: tid,
+          text: '⚠️ ارسال رسید به ادمین با خطا مواجه شد. لطفاً دوباره تلاش نمایید یا با پشتیبانی تماس بگیرید.',
+        },
+        env,
+        steps
+      );
       return;
     }
-    await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '✅ رسید شما ارسال شد — پس از تایید ادمین، کد لایسنس برایتان ارسال می‌شود.' }, env, steps);
-    steps.push('receipt-forwarded');
+    await tg(
+      env.BOT_TOKEN,
+      'sendMessage',
+      {
+        chat_id: tid,
+        text: '✅ رسید پرداخت شما دریافت شد و به مدیریت ارسال گردید.\nبه محض تایید، کد لایسنس اختصاصی همین‌جا برایتان ارسال خواهد شد.',
+      },
+      env,
+      steps
+    );
     return;
   }
 
-  if (String(tid) === String(env.ADMIN_ID) && text.trim() === '/panel') {
-    steps.push('panel');
-    await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, ...(await adminPanel(env, tid)) }, env, steps);
-    return;
+  // ── Admin Commands ──────────────────────────────────────────────────
+  if (String(tid) === String(env.ADMIN_ID)) {
+    if (text === '/panel') {
+      await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, ...(await adminPanel(env, tid)) }, env, steps);
+      return;
+    }
+    if (text === '/stats') {
+      await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, ...(await buildStatsMessage(env)) }, env, steps);
+      return;
+    }
+    if (text.startsWith('/find')) {
+      const q = (text.split(/\s+/)[1] || '').trim();
+      if (!q) {
+        await tg(token, 'sendMessage', { chat_id: tid, text: 'فرمت: /find <آیدی عددی یا کد لایسنس>' }, env);
+        return;
+      }
+      let targetTid = q;
+      let key = q;
+      let lic = null;
+      if (q.toUpperCase().startsWith('VDRV-')) {
+        key = q.toUpperCase();
+        lic = await getLic(env, key);
+        targetTid = lic?.telegramId;
+      } else {
+        key = await userKey(env, targetTid);
+        lic = key ? await getLic(env, key) : null;
+      }
+      if (!lic && !key) {
+        await tg(token, 'sendMessage', { chat_id: tid, text: `❌ موردی برای «${q}» یافت نشد.` }, env);
+        return;
+      }
+      const now = Math.floor(Date.now() / 1000);
+      const active = lic && lic.expiresAt && lic.expiresAt > now && lic.plan !== 'revoked';
+      const joins = targetTid ? parseInt((await env.LICENSES.get(`refjoin:${targetTid}`)) || '0') : 0;
+      const credit = targetTid ? parseInt((await env.LICENSES.get(`credit:${targetTid}`)) || '0') : 0;
+      const info =
+        `🔍 *اطلاعات کاربر و لایسنس*\n\n` +
+        `👤 آیدی عددی: \`${targetTid || 'نامشخص'}\`\n` +
+        `🔑 کد لایسنس: \`${key || 'ندارد'}\`\n` +
+        `📦 پلن: *${lic?.plan || 'نامشخص'}*\n` +
+        `🚦 وضعیت: *${active ? 'فعال ✅' : 'غیرفعال / منقضی ❌'}*\n` +
+        `⏳ باقی‌مانده: *${lic?.expiresAt ? formatDuration(lic.expiresAt - now) : '—'}*\n` +
+        `📅 تاریخ انقضا: *${lic?.expiresAt ? formatJalali(lic.expiresAt) : '—'}*\n` +
+        `👥 تعداد دعوت‌ها: ${joins} نفر\n` +
+        `🎁 اعتبار هدیه ذخیره: ${credit} روز`;
+      await tg(token, 'sendMessage', { chat_id: tid, text: info, parse_mode: 'Markdown' }, env);
+      return;
+    }
+    if (text.startsWith('/revoke')) {
+      const q = (text.split(/\s+/)[1] || '').trim();
+      if (!q) {
+        await tg(token, 'sendMessage', { chat_id: tid, text: 'فرمت: /revoke <آیدی عددی یا کد لایسنس>' }, env);
+        return;
+      }
+      let targetTid = q;
+      let key = q;
+      let lic = null;
+      if (q.toUpperCase().startsWith('VDRV-')) {
+        key = q.toUpperCase();
+        lic = await getLic(env, key);
+        targetTid = lic?.telegramId;
+      } else {
+        key = await userKey(env, targetTid);
+        lic = key ? await getLic(env, key) : null;
+      }
+      if (!lic || !key) {
+        await tg(token, 'sendMessage', { chat_id: tid, text: `❌ لایسنسی برای «${q}» یافت نشد.` }, env);
+        return;
+      }
+      lic.expiresAt = 0;
+      lic.plan = 'revoked';
+      await putLic(env, key, lic);
+      if (targetTid) {
+        await tg(token, 'sendMessage', { chat_id: targetTid, text: '⚠️ لایسنس شما توسط مدیریت باطل شد.' }, env);
+      }
+      await tg(
+        token,
+        'sendMessage',
+        { chat_id: tid, text: `🚫 لایسنس \`${key}\` باطل گردید.`, parse_mode: 'Markdown' },
+        env
+      );
+      return;
+    }
+    if (text.startsWith('/adddays')) {
+      const [, targetS, daysS] = text.split(/\s+/);
+      const days = parseInt(daysS || '0');
+      if (!targetS || !Number.isFinite(days) || days < 1) {
+        await tg(token, 'sendMessage', { chat_id: tid, text: 'فرمت: /adddays <آیدی یا کد> <تعداد روز>' }, env);
+        return;
+      }
+      let targetTid = targetS;
+      let key = targetS;
+      let lic = null;
+      if (targetS.toUpperCase().startsWith('VDRV-')) {
+        key = targetS.toUpperCase();
+        lic = await getLic(env, key);
+        targetTid = lic?.telegramId;
+      } else {
+        key = await userKey(env, targetTid);
+        lic = key ? await getLic(env, key) : null;
+      }
+      if (!lic || !key) {
+        await tg(token, 'sendMessage', { chat_id: tid, text: `❌ لایسنسی برای «${targetS}» یافت نشد.` }, env);
+        return;
+      }
+      await extend(env, key, days);
+      const updated = await getLic(env, key);
+      await tg(
+        token,
+        'sendMessage',
+        {
+          chat_id: tid,
+          text: `✅ تعداد ${days} روز به لایسنس \`${key}\` اضافه شد.\n📅 تاریخ انقضای جدید: *${formatJalali(updated?.expiresAt)}*`,
+          parse_mode: 'Markdown',
+        },
+        env
+      );
+      if (targetTid) {
+        await tg(
+          token,
+          'sendMessage',
+          {
+            chat_id: targetTid,
+            text: `🎉 تعداد ${days} روز اعتبار هدیه به لایسنس شما اضافه گردید!\n📅 انقضای جدید: *${formatJalali(updated?.expiresAt)}*`,
+            parse_mode: 'Markdown',
+          },
+          env
+        );
+      }
+      return;
+    }
+    if (text.startsWith('/gen')) {
+      const [, daysS, tidS] = text.split(/\s+/);
+      const days = parseInt(daysS || '30');
+      const target = tidS ? parseInt(tidS) : tid;
+      if (!Number.isFinite(days) || days < 1 || days > 3650 || !Number.isFinite(target)) {
+        await tg(token, 'sendMessage', { chat_id: tid, text: 'فرمت: /gen <روز> [آیدی عددی]' }, env);
+        return;
+      }
+      const key = await mintKey(env, target, days, 'paid');
+      await extend(env, key, days);
+      const lic = await getLic(env, key);
+      await tg(
+        token,
+        'sendMessage',
+        {
+          chat_id: tid,
+          text: `🔑 لایسنس با موفقیت ساخته شد:\n\`${key}\`\n\nبرای کاربر: \`${target}\`\nمدت: ${days} روز\nانقضا: ${formatJalali(lic?.expiresAt)}`,
+          parse_mode: 'Markdown',
+        },
+        env
+      );
+      return;
+    }
+    if (text.startsWith('/ok')) {
+      const [, tidS, daysS] = text.split(/\s+/);
+      const target = parseInt(tidS);
+      const days = parseInt(daysS || '30');
+      if (!/^\d{3,}$/.test(tidS || '') || !Number.isFinite(days) || days < 1 || days > 3650) {
+        await tg(token, 'sendMessage', { chat_id: tid, text: 'فرمت: /ok <آیدی عددی> <روز>' }, env);
+        return;
+      }
+      let key = await userKey(env, target);
+      let lic = key ? await getLic(env, key) : null;
+      if (lic && lic.expiresAt) {
+        await extend(env, key, days);
+        await upgradePlan(env, key, 'paid');
+      } else {
+        key = await mintKey(env, target, days, 'paid');
+        await extend(env, key, days);
+      }
+      while ((await takeCredit(env, target)) === 1) {
+        await extend(env, key, 1);
+      }
+      await env.LICENSES.delete(`receipt:${target}`);
+      const curP = Math.max(0, parseInt((await env.LICENSES.get('stat:pending')) || '1') - 1);
+      await env.LICENSES.put('stat:pending', String(curP));
+
+      const updated = await getLic(env, key);
+      await tg(
+        token,
+        'sendMessage',
+        {
+          chat_id: tid,
+          text: `✅ پرداخت تایید شد — ${days} روز برای \`${target}\`\n\`${key}\``,
+          parse_mode: 'Markdown',
+        },
+        env
+      );
+      await tg(
+        token,
+        'sendMessage',
+        {
+          chat_id: target,
+          text:
+            `✅ پرداخت شما با موفقیت تایید شد!\n\n` +
+            `🔑 کد لایسنس شما:\n\`${key}\`\n\n` +
+            `📅 تاریخ انقضا: *${formatJalali(updated?.expiresAt)}*\n\n` +
+            `این کد را در برنامه (تب لایسنس) وارد فرمایید.`,
+          parse_mode: 'Markdown',
+        },
+        env
+      );
+      return;
+    }
+    if (text.startsWith('/fix')) {
+      const target = (text.split(/\s+/)[1] || '').trim();
+      if (!target) {
+        await tg(token, 'sendMessage', { chat_id: tid, text: 'فرمت: /fix <آیدی کاربر>' }, env);
+        return;
+      }
+      const k = await userKey(env, target);
+      if (!k) {
+        await tg(token, 'sendMessage', { chat_id: tid, text: `کاربر ${target} لایسنسی ندارد.` }, env);
+        return;
+      }
+      await upgradePlan(env, k, 'paid');
+      const l = await getLic(env, k);
+      await tg(
+        token,
+        'sendMessage',
+        {
+          chat_id: tid,
+          text: `🔧 پلن کاربر ${target} به پولی تغییر یافت.\n\`${k}\`\nانقضا: ${formatJalali(l?.expiresAt)}`,
+          parse_mode: 'Markdown',
+        },
+        env
+      );
+      return;
+    }
   }
+
+  // ── General Commands ────────────────────────────────────────────────
   if (text.startsWith('/start')) {
     steps.push('start-branch');
     if (String(tid) !== String(env.ADMIN_ID) && !(await checkJoined(env, tid))) {
@@ -637,128 +1272,102 @@ async function handle(upd, env, steps) {
       await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, ...joinPrompt(await getSetting(env, 'forceChannel', '')) }, env, steps);
       return;
     }
+
     const idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
     if (!idx.includes(tid)) {
       idx.push(tid);
       await env.LICENSES.put('userIndex', JSON.stringify(idx));
       await env.LICENSES.put('stat:users', String(idx.length));
     }
-    // referral payload: /start ref_<referrerId>
+
     const payload = text.split(' ')[1] || '';
     if (payload.startsWith('ref_')) {
       const ref = payload.slice(4);
-      // only real numeric telegram ids count as referrers
-      if (!/^\d{3,}$/.test(ref)) { steps.push('ref-bad'); }
-      else if (ref !== String(tid)) {
+      if (/^\d{3,}$/.test(ref) && ref !== String(tid)) {
         const seen = await env.LICENSES.get(`refseen:${tid}`);
         if (!seen) {
           await env.LICENSES.put(`refseen:${tid}`, '1');
-          await env.LICENSES.put(`refjoin:${ref}`, String(
-            (parseInt((await env.LICENSES.get(`refjoin:${ref}`)) || '0')) + 1));
-          const joins = parseInt((await env.LICENSES.get(`refjoin:${ref}`)) || '0');
+          const prev = parseInt((await env.LICENSES.get(`refjoin:${ref}`)) || '0');
+          await env.LICENSES.put(`refjoin:${ref}`, String(prev + 1));
+          const joins = prev + 1;
           if (joins % REFERRAL_REWARD_JOINS === 0) {
             await addCredit(env, ref, REFERRAL_REWARD_DAYS);
-            await tg(token, 'sendMessage', {
-              chat_id: ref,
-              text: `🎉 ${REFERRAL_REWARD_JOINS} نفر با لینک شما وارد شدند — ${REFERRAL_REWARD_DAYS} روز هدیه به حساب شما اضافه شد. با /start کدتان را بگیرید.`,
-            }, env);
+            await tg(
+              token,
+              'sendMessage',
+              {
+                chat_id: ref,
+                text: `🎉 *تبریک!* ${REFERRAL_REWARD_JOINS} کاربر با لینک شما عضو شدند.\n*${REFERRAL_REWARD_DAYS} روز لایسنس هدیه* به حساب شما افزوده شد!`,
+                parse_mode: 'Markdown',
+              },
+              env
+            );
           }
         }
       }
     }
+
     const key = await userKey(env, tid);
-    steps.push('key:' + (key ? key.slice(0, 9) + '…' : 'none'));
     const lic = key ? await getLic(env, key) : null;
-    steps.push('lic:' + (lic ? (lic.expiresAt ? 'valid' : 'no-expiry') : 'null'));
     const menu = mainMenu(msg.from, lic);
-    steps.push('menu-built');
-    const out = await tg(token, 'sendMessage', { chat_id: tid, ...menu }, env, steps);
-    steps.push('sent:' + JSON.stringify({ ok: out.ok, id: out.result?.message_id, err: out.description || null }));
-    return;
-  }
-
-  if (text.startsWith('/gen') && String(tid) === String(env.ADMIN_ID)) {
-    const [, daysS, tidS] = text.split(/\s+/);
-    const days = parseInt(daysS || '30');
-    const target = tidS ? parseInt(tidS) : tid;
-    if (!Number.isFinite(days) || days < 1 || days > 3650 || !Number.isFinite(target)) {
-      await tg(token, 'sendMessage', { chat_id: tid, text: 'فرمت: /gen <روز> <آیدی> — روز عددی ۱ تا ۳۶۵۰' }, env); return;
-    }
-    const key = await mintKey(env, target, days, 'paid');
-    await extend(env, key, days);
-    await tg(token, 'sendMessage', { chat_id: tid, text: `🔑 ساخته شد:\n\`${key}\`\nبرای کاربر \`${target}\` — ${days} روز`, parse_mode: 'Markdown' }, env);
-    return;
-  }
-
-  if (text.startsWith('/ok') && String(tid) === String(env.ADMIN_ID)) {
-    const [, tidS, daysS] = text.split(/\s+/);
-    const target = parseInt(tidS);
-    const days = parseInt(daysS || '30');
-    if (!/^\d{3,}$/.test(tidS || '') || !Number.isFinite(days) || days < 1 || days > 3650) {
-      await tg(token, 'sendMessage', { chat_id: tid, text: 'فرمت: /ok <آیدی‌عددی> <روز>' }, env); return;
-    }
-    // use pending key if any, else mint
-    let key = await userKey(env, target);
-    let lic = key ? await getLic(env, key) : null;
-    if (lic && lic.expiresAt) {
-      await extend(env, key, days);
-      await upgradePlan(env, key, 'paid');
-    } else {
-      key = await mintKey(env, target, days, 'paid');
-      await extend(env, key, days);
-    }
-    // spend referral credit if present
-    while ((await takeCredit(env, target)) === 1) await extend(env, key, 1);
-    await tg(token, 'sendMessage', { chat_id: tid, text: `✅ تایید شد — ${days} روز برای \`${target}\`\n\`${key}\``, parse_mode: 'Markdown' }, env);
-    await env.LICENSES.delete(`receipt:${target}`);
-    const npOk = Math.max(0, (parseInt((await env.LICENSES.get('stat:pending')) || '0')) - 1);
-    await env.LICENSES.put('stat:pending', String(npOk));
-    await tg(token, 'sendMessage', {
-      chat_id: target,
-      text: `✅ پرداخت شما تایید شد!\n\`${key}\`\nاین کد را در برنامه (تب لایسنس) وارد کنید.`,
-      parse_mode: 'Markdown',
-    }, env);
-    return;
-  }
-
-  if (text.startsWith('/fix') && String(tid) === String(env.ADMIN_ID)) {
-    const target = (text.split(/\s+/)[1] || '').trim();
-    if (!target) { await tg(token, 'sendMessage', { chat_id: tid, text: 'فرمت: /fix <آیدی‌کاربر>' }, env); return; }
-    const k = await userKey(env, target);
-    if (!k) { await tg(token, 'sendMessage', { chat_id: tid, text: `کاربر ${target} لایسنس ندارد.` }, env); return; }
-    await upgradePlan(env, k, 'paid');
-    const l = await getLic(env, k);
-    await tg(token, 'sendMessage', { chat_id: tid, text: `🔧 پلن کاربر ${target} به خریداری تبدیل شد.\n\`${k}\`\n⏳ تا: ${l?.expiresAt ? new Date(l.expiresAt * 1000).toLocaleDateString('fa-IR') : '—'}`, parse_mode: 'Markdown' }, env);
+    await tg(token, 'sendMessage', { chat_id: tid, ...menu }, env, steps);
     return;
   }
 
   if (text === '/id') {
-    await tg(token, 'sendMessage', { chat_id: tid, text: `آیدی عددی شما: \`${tid}\``, parse_mode: 'Markdown' }, env);
+    await tg(token, 'sendMessage', { chat_id: tid, text: `آیدی عددی شما:\n\`${tid}\``, parse_mode: 'Markdown' }, env);
     return;
   }
 
-  // Unknown input: point back to the menu instead of staying silent.
-  await tg(token, 'sendMessage', {
-    chat_id: tid,
-    text: '🤔 متوجه نشدم. از /start استفاده کنید یا دکمه‌های منو را بزنید.',
-  }, env, steps);
+  if (text === '/help' || text === '/commands') {
+    if (String(tid) === String(env.ADMIN_ID)) {
+      const adminHelp =
+        `🛠 *دستورات مدیریت ربات:*\n\n` +
+        `• \`/panel\` — باز کردن پنل تنظیمات ربات\n` +
+        `• \`/stats\` — گزارش آمار سیستم\n` +
+        `• \`/find <آیدی یا کد>\` — جستجو و جزئیات کاربر یا لایسنس\n` +
+        `• \`/gen <روز> [آیدی]\` — تولید لایسنس مستقیم\n` +
+        `• \`/ok <آیدی> <روز>\` — تایید پرداخت کاربر\n` +
+        `• \`/adddays <آیدی یا کد> <روز>\` — افزودن روز به لایسنس موجود\n` +
+        `• \`/revoke <آیدی یا کد>\` — لغو و باطل کردن لایسنس\n` +
+        `• \`/fix <آیدی>\` — ارتقای پلن کاربر به پولی\n` +
+        `• \`/id\` — نمایش آیدی عددی`;
+      await tg(token, 'sendMessage', { chat_id: tid, text: adminHelp, parse_mode: 'Markdown' }, env);
+      return;
+    }
+    await tg(token, 'sendMessage', { chat_id: tid, ...(await doHelp()) }, env);
+    return;
+  }
+
+  await tg(
+    token,
+    'sendMessage',
+    {
+      chat_id: tid,
+      text: '🤔 متوجه دستور نشدم. لطفاً از دکمه‌های منو یا دستور /start استفاده فرمایید.',
+    },
+    env,
+    steps
+  );
 }
 
-// ── commerce: card payment + receipt approval + admin panel + forced join ──
+// ── Commerce & Admin Panel Helpers ────────────────────────────────────
 async function getSetting(env, k, dflt) {
   return (await env.LICENSES.get(`set:${k}`)) ?? dflt;
 }
+
 async function setSetting(env, k, v) {
   await env.LICENSES.put(`set:${k}`, v);
 }
+
 async function checkJoined(env, tid) {
   const ch = (await getSetting(env, 'forceChannel', '')).trim();
   if (!ch) return true;
   const r = await tg(env.BOT_TOKEN, 'getChatMember', { chat_id: ch, user_id: tid }, env);
   if (!r || !r.ok) {
-    // bot not in channel / wrong channel id / not admin: do not lock users out
-    // of the bot — surface it to the admin instead.
-    try { await env.LICENSES.put('lastError', `force-join: getChatMember ${ch}: ${r?.description || 'unknown'}`); } catch (_) {}
+    try {
+      await env.LICENSES.put('lastError', `force-join: getChatMember ${ch}: ${r?.description || 'unknown'}`);
+    } catch (_) {}
     return true;
   }
   const m = r.result || {};
@@ -766,31 +1375,67 @@ async function checkJoined(env, tid) {
   if (st === 'restricted') return m.is_member === true;
   return ['member', 'administrator', 'creator'].includes(st);
 }
+
 function joinPrompt(ch) {
   return {
-    text: '⛔ برای استفاده از ربات اول در کانال عضو شو:',
+    text: '⛔ برای استفاده از ربات لطفاً ابتدا در کانال رسمی عضو شوید:',
     reply_markup: {
       inline_keyboard: [
-        ...(/^\d+$/.test(String(ch)) ? [] : [[{ text: '📢 عضویت در کانال', url: `https://t.me/${String(ch).replace('@', '')}` }]]),
-        [{ text: '✅ عضو شدم', callback_data: 'recheck' }],
+        ...(/^\d+$/.test(String(ch))
+          ? []
+          : [[{ text: '📢 عضویت در کانال رسمی', url: `https://t.me/${String(ch).replace('@', '')}` }]]),
+        [{ text: '✅ عضو شدم (بررسی مجدد)', callback_data: 'recheck' }],
       ],
     },
   };
 }
+
 async function buyMenuFull(env) {
   const card = await getSetting(env, 'cardNumber', 'تنظیم نشده — از /panel تنظیم کنید');
-  const buyText = await getSetting(env, 'buyText', '🛒 خرید لایسنس');
+  const buyText = await getSetting(env, 'buyText', '🛒 *خرید لایسنس VoidrauVPN*');
   return {
-    text: `${buyText}\n💳 کارت به کارت: ${card}\n\nپلن را انتخاب کنید؛ پس از پرداخت، اسکرین‌شات رسید را در همین چت بفرست تا ادمین تایید کند.`,
+    text: `${buyText}\n\n💳 شماره کارت جهت واریز:\n\`${card}\`\n\nلطفاً پلن مورد نظر را انتخاب و پس از واریز، عکس رسید را در همین چت ارسال نمایید:`,
+    parse_mode: 'Markdown',
     reply_markup: {
-      inline_keyboard: [
-        ...((await plansOf(env))).map((p) => [{ text: p.label, callback_data: `plan:${p.id}` }]),
-      ],
+      inline_keyboard: (await plansOf(env)).map((p) => [{ text: p.label, callback_data: `plan:${p.id}` }]),
     },
   };
 }
+
 async function askMode(env, tid, prompt, mode) {
   return { text: prompt, reply_markup: { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'ad:cancelmode' }]] } };
+}
+
+async function buildStatsMessage(env) {
+  const users = parseInt((await env.LICENSES.get('stat:users')) || '0');
+  const pending = parseInt((await env.LICENSES.get('stat:pending')) || '0');
+  const idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
+  const now = Math.floor(Date.now() / 1000);
+  let active = 0;
+  let trial = 0;
+  let paid = 0;
+
+  for (const u of idx.slice(-60)) {
+    const k = await env.LICENSES.get(`user:${u}`);
+    if (!k) continue;
+    const l = await getLic(env, k);
+    if (l && l.expiresAt && l.expiresAt > now && l.plan !== 'revoked') {
+      active++;
+      if (l.plan === 'trial') trial++;
+      else paid++;
+    }
+  }
+
+  return {
+    text:
+      `📊 *آمار کلی سیستم VoidrauVPN*\n\n` +
+      `👥 کل کاربران ثبت‌شده: *${users}*\n` +
+      `🧾 رسیدهای در انتظار تایید: *${pending}*\n` +
+      `✅ لایسنس‌های فعال (نمونه ۶۰ کاربر اخیر): *${active}*\n` +
+      `🎁 لایسنس‌های تستی: *${trial}*\n` +
+      `💰 لایسنس‌های پولی: *${paid}*`,
+    parse_mode: 'Markdown',
+  };
 }
 
 async function adminPanel(env, tid) {
@@ -801,29 +1446,31 @@ async function adminPanel(env, tid) {
   const trialDays = String(await trialDaysOf(env));
   const users = parseInt((await env.LICENSES.get('stat:users')) || '0');
   const pending = parseInt((await env.LICENSES.get('stat:pending')) || '0');
-  // count active licenses
-  let active = 0;
-  const idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
-  for (const u of idx) {
-    const k = await env.LICENSES.get(`user:${u}`);
-    if (!k) continue;
-    const l = await getLic(env, k);
-    if (l && l.expiresAt && l.expiresAt * 1000 > Date.now()) active++;
-  }
+
   return {
-    text: `🛠 پنل ادمین\n\n👥 کاربران: ${users}\n✅ لایسنس فعال: ${active}\n🧾 رسید در انتظار: ${pending}\n💳 کارت: ${card}\n🛒 متن خرید: ${buy}\n📢 کانال اجباری: ${ch}\n🎁 روز تست: ${trialDays}\n🆘 پشتیبانی: ${sup}`,
-    reply_markup: { inline_keyboard: [
-      [{ text: '✏️ متن خرید', callback_data: 'ad:editbuy' }, { text: '💳 شماره کارت', callback_data: 'ad:editcard' }],
-      [{ text: '💰 قیمت‌ها', callback_data: 'ad:editplans' }, { text: '📢 کانال اجباری', callback_data: 'ad:editch' }],
-      [{ text: '🆘 پشتیبانی', callback_data: 'ad:editsup' }, { text: '🎁 روز تست', callback_data: 'ad:edittrial' }],
-      [{ text: '📊 آمار کامل', callback_data: 'ad:stats' }, { text: '🧾 رسیدها', callback_data: 'ad:pending' }],
-      [{ text: '👥 کاربران اخیر', callback_data: 'ad:users' }, { text: '📣 پیام همگانی', callback_data: 'ad:broadcast' }],
-      [{ text: '💾 خروجی پشتیبان', callback_data: 'ad:export' }],
-    ] },
+    text:
+      `🛠 *پنل مدیریت ربات VoidrauVPN*\n\n` +
+      `👥 کاربران: *${users}*\n` +
+      `🧾 رسید در انتظار: *${pending}*\n` +
+      `💳 کارت: \`${card}\`\n` +
+      `🛒 متن خرید: ${buy}\n` +
+      `📢 کانال اجباری: ${ch}\n` +
+      `🎁 روز تست: ${trialDays} روز\n` +
+      `🆘 پشتیبانی: ${sup}`,
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '✏️ متن خرید', callback_data: 'ad:editbuy' }, { text: '💳 شماره کارت', callback_data: 'ad:editcard' }],
+        [{ text: '💰 قیمت‌ها', callback_data: 'ad:editplans' }, { text: '📢 کانال اجباری', callback_data: 'ad:editch' }],
+        [{ text: '🆘 پشتیبانی', callback_data: 'ad:editsup' }, { text: '🎁 روز تست', callback_data: 'ad:edittrial' }],
+        [{ text: '📊 آمار کامل', callback_data: 'ad:stats' }, { text: `🧾 رسیدها (${pending})`, callback_data: 'ad:pending' }],
+        [{ text: '👥 کاربران اخیر', callback_data: 'ad:users' }, { text: '📣 پیام همگانی', callback_data: 'ad:broadcast' }],
+        [{ text: '💾 خروجی پشتیبان', callback_data: 'ad:export' }],
+      ],
+    },
   };
 }
 
-// pending receipts list with per-receipt approve buttons
 async function pendingList(env, tid) {
   const idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
   const rows = [];
@@ -832,54 +1479,63 @@ async function pendingList(env, tid) {
     const raw = await env.LICENSES.get(`receipt:${u}`);
     if (!raw) continue;
     const planId = await getSetting(env, `lastPlan:${u}`, 'm1');
-    const p = ((await plansOf(env))).find((x) => x.id === planId) || ((await plansOf(env)))[0];
-    rows.push([{ text: `🧾 کاربر ${u} — ${p.label}`, callback_data: `okr:${u}:${p.days}` }, { text: '❌', callback_data: `rej:${u}` }]);
+    const p = (await plansOf(env)).find((x) => x.id === planId) || (await plansOf(env))[0];
+    rows.push([
+      { text: `🧾 کاربر ${u} — ${p.label}`, callback_data: `okr:${u}:${p.days}` },
+      { text: '❌', callback_data: `rej:${u}` },
+    ]);
     n++;
   }
-  return { text: n ? `🧾 ${n} رسید در انتظار — برای تایید بزنید:` : '🧾 رسید در انتظاری نیست.',
-    reply_markup: rows.length ? { inline_keyboard: rows } : undefined };
+  return {
+    text: n ? `🧾 تعداد ${n} رسید در انتظار تایید وجود دارد:` : '🧾 هیچ رسیدی در انتظار تایید نیست.',
+    reply_markup: rows.length ? { inline_keyboard: rows } : undefined,
+  };
 }
 
 async function recentUsers(env) {
   const idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
-  const last = idx.slice(-10).reverse();
-  let t = `👥 آخرین کاربران (${idx.length} کل):\n\n`;
+  const last = idx.slice(-15).reverse();
+  let t = `👥 *آخرین کاربران (${idx.length} کل):*\n\n`;
+  const now = Math.floor(Date.now() / 1000);
   for (const u of last) {
     const k = await env.LICENSES.get(`user:${u}`);
     let s = 'بدون لایسنس';
     if (k) {
       const l = await getLic(env, k);
-      if (l && l.expiresAt) s = l.expiresAt * 1000 > Date.now() ? `فعال تا ${new Date(l.expiresAt * 1000).toLocaleDateString('fa-IR')}` : 'منقضی';
+      if (l && l.expiresAt) {
+        s = l.expiresAt > now && l.plan !== 'revoked'
+          ? `فعال تا ${formatJalali(l.expiresAt)} (${l.plan})`
+          : 'منقضی/باطل';
+      }
     }
-    t += `• ${u} — ${s}\n`;
+    t += `• \`${u}\` — ${s}\n`;
   }
-  return { text: t };
+  return { text: t, parse_mode: 'Markdown' };
 }
 
 async function exportBackup(env, tid) {
   const idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
   const out = [];
-  for (const u of idx) {
+  for (const u of idx.slice(0, 250)) {
     const k = await env.LICENSES.get(`user:${u}`);
     const l = k ? await getLic(env, k) : null;
     out.push({ id: u, key: k || null, plan: l?.plan || null, expiresAt: l?.expiresAt || null });
   }
-  const body = JSON.stringify(out);
-  // send as a real file via multipart upload (no silent truncation)
+  const body = JSON.stringify(out, null, 2);
   const fd = new FormData();
   fd.append('chat_id', String(tid));
-  fd.append('document', new Blob([body]), `voidrau-backup-${new Date().toISOString().slice(0, 10)}.json`);
-  const up = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`, { method: 'POST', body: fd });
+  fd.append(
+    'document',
+    new Blob([body], { type: 'application/json' }),
+    `voidrau-backup-${new Date().toISOString().slice(0, 10)}.json`
+  );
+  const up = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`, {
+    method: 'POST',
+    body: fd,
+  });
   const j = await up.json().catch(() => ({}));
-  if (j.ok) return { text: `💾 پشتیبان کامل (${idx.length} کاربر) به‌صورت فایل ارسال شد 👆` };
-  // fallback: chunked text (max 5 chunks)
-  const chunks = [];
-  for (let i = 0; i < body.length; i += 3800) chunks.push(body.slice(i, i + 3800));
-  await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '💾 پشتیبان (بخش ۱/' + chunks.length + '):\n' + chunks[0] }, env);
-  for (let c = 1; c < Math.min(chunks.length, 5); c++) {
-    await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '💾 بخش ' + (c + 1) + '/' + chunks.length + ':\n' + chunks[c] }, env);
-  }
-  return { text: chunks.length > 5 ? `⚠️ پشتیبان خیلی بزرگ است (${chunks.length} بخش) — فقط ۵ بخش اول فرستاده شد.` : `💾 پشتیبان کامل در ${chunks.length} پیام ارسال شد.` };
+  if (j.ok) return { text: `💾 پشتیبان کامل (${out.length} کاربر) به‌صورت فایل ارسال شد 👆` };
+  return { text: `💾 خروجی پشتیبان:\n\`\`\`json\n${body.slice(0, 3000)}\n\`\`\``, parse_mode: 'Markdown' };
 }
 
 async function doTrial(env, tid) {
@@ -887,46 +1543,95 @@ async function doTrial(env, tid) {
   if (used) {
     const key = await userKey(env, tid);
     const lic = key ? await getLic(env, key) : null;
-    if (!lic) return { text: '🔑 لایسنس قبلی پیدا نشد — با پشتیبانی تماس بگیرید یا مجدد /start بزنید.' };
-    const active = lic && lic.expiresAt && lic.expiresAt * 1000 > Date.now();
-    if (active) return { text: `🎁 تست/لایسنس شما هنوز فعال است:\n\`${key}\`\n⏳ تا: ${new Date(lic.expiresAt * 1000).toLocaleDateString('fa-IR')}`, parse_mode: 'Markdown' };
-    return { text: '⏳ تست رایگان شما تمام شده.\n🛒 برای ادامه از «خرید لایسنس» استفاده کنید.', reply_markup: { inline_keyboard: [[{ text: '🛒 خرید لایسنس', callback_data: 'buy' }]] } };
+    if (!lic) return { text: '🔑 لایسنس قبلی یافت نشد — لطفاً با پشتیبانی تماس بگیرید.' };
+    const now = Math.floor(Date.now() / 1000);
+    const active = lic.expiresAt && lic.expiresAt > now && lic.plan !== 'revoked';
+    if (active) {
+      return {
+        text:
+          `🎁 لایسنس شما هم‌اکنون فعال است:\n\`${key}\`\n\n` +
+          `⏳ زمان باقی‌مانده: *${formatDuration(lic.expiresAt - now)}*\n` +
+          `📅 تاریخ انقضا: *${formatJalali(lic.expiresAt)}*\n\n` +
+          `کد را در برنامه (تب لایسنس) وارد کنید.`,
+        parse_mode: 'Markdown',
+      };
+    }
+    return {
+      text: '⏳ دورهٔ تست رایگان شما به پایان رسیده است.\nبرای ادامه اتصال امن، لطفاً اشتراک تهیه نمایید:',
+      reply_markup: { inline_keyboard: [[{ text: '🛒 خرید لایسنس', callback_data: 'buy' }]] },
+    };
   }
   const TD = await trialDaysOf(env);
   const key = await mintKey(env, tid, TD, 'trial');
   await extend(env, key, TD);
   await env.LICENSES.put(`trial:${tid}`, '1');
-  // spend any referral credit on top
-  while ((await takeCredit(env, tid)) === 1) await extend(env, key, 1);
-  return { text: `🎁 تست ${TD} روزه فعال شد!\n\`${key}\`\nدر برنامه → تب «لایسنس» → کد را وارد کنید.`, parse_mode: 'Markdown' };
+  while ((await takeCredit(env, tid)) === 1) {
+    await extend(env, key, 1);
+  }
+  const lic = await getLic(env, key);
+  return {
+    text:
+      `🎁 *تست ${TD} روزه رایگان شما با موفقیت فعال شد!*\n\n` +
+      `🔑 کد لایسنس اختصاصی شما:\n\`${key}\`\n\n` +
+      `📅 انقضا: *${formatJalali(lic?.expiresAt)}*\n\n` +
+      `📱 *نحوه استفاده:*\n` +
+      `۱. روی کد لایسنس بالا ضربه بزنید تا کپی شود.\n` +
+      `۲. برنامه VoidrauVPN را باز کنید و در تب «لایسنس»، کد را پیست نمایید.\n` +
+      `۳. دکمه اتصال را بزنید و لذت ببرید!`,
+    parse_mode: 'Markdown',
+  };
 }
 
-
 async function doPlan(env, tid, planId) {
-  const p = ((await plansOf(env))).find((x) => x.id === planId);
+  const p = (await plansOf(env)).find((x) => x.id === planId);
   if (!p) return { text: 'پلن نامعتبر.' };
   await setSetting(env, `lastPlan:${tid}`, p.id);
-  const card = await getSetting(env, 'cardNumber', '—');
-  return { text: `🛒 پلن: ${p.label}\n💳 مبلغ را کارت به کارت کنید به:\n${card}\n\nسپس اسکرین‌شات رسید را همین‌جا بفرست تا ادمین تایید کند.` };
+  const card = await getSetting(env, 'cardNumber', 'تنظیم نشده');
+  return {
+    text:
+      `🛒 *پلن انتخابی:* ${p.label}\n\n` +
+      `💳 لطفاً مبلغ را به شماره کارت زیر واریز کنید:\n\`${card}\`\n\n` +
+      `سپس تصویر فیش یا اسکرین‌شات رسید را همین‌جا ارسال کنید تا تایید شود.`,
+    parse_mode: 'Markdown',
+  };
 }
 
 async function doReferral(env, tid) {
+  const botUser = env.BOT_USERNAME || (await env.LICENSES.get('set:botusername')) || 'VoidRauBot';
   const joins = parseInt((await env.LICENSES.get(`refjoin:${tid}`)) || '0');
   const credit = (await env.LICENSES.get(`credit:${tid}`)) || '0';
+  const needed = REFERRAL_REWARD_JOINS - (joins % REFERRAL_REWARD_JOINS);
   return {
-    text: `👥 لینک دعوت اختصاصی شما:\nhttps://t.me/${env.BOT_USERNAME || (await env.LICENSES.get('set:botusername')) || 'VoidrauBot'}?start=ref_${tid}\n\n` +
-      `تاکنون ${joins} نفر وارد شدند — به ازای هر ${REFERRAL_REWARD_JOINS} نفر، ${REFERRAL_REWARD_DAYS} روز هدیه می‌گیرید.\n` +
-      `اعتبار فعلی: ${credit} روز`,
+    text:
+      `👥 *سیستم دعوت دوستان (کسب اشتراک رایگان)*\n\n` +
+      `با ارسال لینک اختصاصی به دوستانتان، به ازای هر *${REFERRAL_REWARD_JOINS} نفر*، *${REFERRAL_REWARD_DAYS} روز لایسنس رایگان* دریافت می‌کنید!\n\n` +
+      `🔗 *لینک دعوت شما:*\nhttps://t.me/${botUser}?start=ref_${tid}\n\n` +
+      `📊 *گزارش دعوت‌ها:*\n` +
+      `• تعداد افراد عضو شده: *${joins} نفر*\n` +
+      `• ${needed === REFERRAL_REWARD_JOINS ? 'دعوت بعدی شروع دور جدید پاداش' : `${needed} نفر مانده تا پاداش بعدی`}\n` +
+      `• اعتبار ذخیره هدیه: *${credit} روز*`,
+    parse_mode: 'Markdown',
   };
 }
 
 async function doMyKey(env, tid) {
   const key = await userKey(env, tid);
-  if (!key) return { text: 'هنوز لایسنسی ندارید — از «تست رایگان» شروع کنید.' };
+  if (!key) return { text: 'هنوز لایسنسی ندارید — از «🎁 تست رایگان» شروع فرمایید.' };
   const lic = await getLic(env, key);
-  if (!lic || !lic.expiresAt) return { text: 'لایسنس شما نامعتبر است.' };
+  if (!lic || !lic.expiresAt || lic.plan === 'revoked') {
+    return { text: 'لایسنس شما نامعتبر یا باطل شده است.' };
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const active = lic.expiresAt > now;
+  const planLabel = lic.plan === 'paid' ? 'خریداری‌شده ویژه ⭐️' : (lic.plan === 'trial' ? 'تست رایگان موقت 🎁' : 'اختصاصی');
   return {
-    text: `🔑 کد شما: \`${key}\`\nانقضا: ${new Date(lic.expiresAt * 1000).toLocaleDateString('fa-IR')}`,
+    text:
+      `🔑 *کد لایسنس شما:*\n\`${key}\`\n\n` +
+      `📦 نوع پلن: ${planLabel}\n` +
+      `🚦 وضعیت: ${active ? 'فعال ✅' : 'منقضی شده ❌'}\n` +
+      `⏳ زمان باقی‌مانده: *${formatDuration(lic.expiresAt - now)}*\n` +
+      `📅 تاریخ انقضا: *${formatJalali(lic.expiresAt)}*\n\n` +
+      `💡 برای کپی کردن، کافیست روی کد بالا ضربه بزنید.`,
     parse_mode: 'Markdown',
   };
 }

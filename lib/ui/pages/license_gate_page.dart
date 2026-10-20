@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import '../../app_info.dart';
 import '../../l10n/strings.dart';
 import '../../services/license_service.dart';
 import '../../services/links.dart';
@@ -29,8 +31,9 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
 
   S get s => S(Localizations.localeOf(context).languageCode);
 
-  Future<void> _activate() async {
-    final key = _keyController.text.trim();
+  Future<void> _activate({String? explicitKey}) async {
+    final rawKey = explicitKey ?? _keyController.text.trim();
+    final key = LicenseService.extractKey(rawKey) ?? rawKey;
     if (key.isEmpty) return;
     setState(() {
       _busy = true;
@@ -43,6 +46,42 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
       _message = ok ? null : s.licenseBadKey;
     });
     if (ok) widget.onUnlocked();
+  }
+
+  Future<void> _pasteFromClipboard() async {
+    try {
+      final data = await Clipboard.getData('text/plain');
+      final text = data?.text?.trim() ?? '';
+      final extracted = LicenseService.extractKey(text);
+      if (extracted != null && extracted.isNotEmpty) {
+        _keyController.text = extracted;
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                s.isFa
+                    ? 'کد لایسنس پیدا و جای‌گذاری شد: $extracted'
+                    : 'License key detected: $extracted',
+              ),
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        }
+        await _activate(explicitKey: extracted);
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                s.isFa
+                    ? 'کد لایسنس معتبری در کلیپ‌بورد یافت نشد (فرمت: VDRV-XXXX-XXXX-XXXX)'
+                    : 'No valid key found in clipboard (format: VDRV-XXXX-XXXX-XXXX)',
+              ),
+            ),
+          );
+        }
+      }
+    } catch (_) {}
   }
 
   Future<void> _refresh() async {
@@ -59,58 +98,147 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Icon(Icons.lock_outline_rounded,
-                    size: 56, color: VoidrauColors.cyan),
-                const SizedBox(height: 16),
-                const Text(
-                  '🔒 برنامه قفل است',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+                Center(
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(20),
+                    child: Image.asset(
+                      'assets/branding/icon.png',
+                      width: 80,
+                      height: 80,
+                    ),
+                  ),
                 ),
-                const SizedBox(height: 8),
-                const Text(
-                  'برای ورود، لایسنس خریداری‌شده را وارد کنید.\n'
-                  'تست رایگان و رفرال فقط امکان اتصال موقت می‌دهد و تنظیمات قفل است.',
+                const SizedBox(height: 18),
+                Text(
+                  s.isFa ? '🔐 فعال‌سازی لایسنس VoidrauVPN' : '🔐 Activate VoidrauVPN',
                   textAlign: TextAlign.center,
-                  style: TextStyle(color: VoidrauColors.muted, height: 1.5),
+                  style: const TextStyle(fontSize: 21, fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  s.isFa
+                      ? 'برای استفاده از شبکه و اتصال، کد لایسنس خود را وارد نمایید.\n'
+                          'تست رایگان ۲۴ ساعته و خرید لایسنس از طریق ربات تلگرام انجام می‌شود.'
+                      : 'Enter your license key to connect.\n'
+                          'Free 24h trial and licenses are available via the Telegram bot.',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: VoidrauColors.muted,
+                    fontSize: 13.5,
+                    height: 1.55,
+                  ),
                 ),
                 const SizedBox(height: 24),
                 TextField(
                   controller: _keyController,
                   textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontFamily: 'Consolas',
+                    letterSpacing: 1.2,
+                    fontWeight: FontWeight.w600,
+                  ),
                   decoration: InputDecoration(
                     hintText: 'VDRV-XXXX-XXXX-XXXX',
                     filled: true,
                     fillColor: VoidrauColors.surface,
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                    prefixIcon: const Icon(Icons.vpn_key_rounded, size: 20),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
                   ),
                   onSubmitted: (_) => _activate(),
                 ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: _busy ? null : _pasteFromClipboard,
+                        icon: const Icon(Icons.content_paste_rounded, size: 18),
+                        label: Text(
+                          s.isFa ? 'چسباندن از حافظه' : 'Paste from clipboard',
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
                 if (_message != null) ...[
-                  const SizedBox(height: 8),
-                  Text(_message!,
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: VoidrauColors.coral.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: VoidrauColors.coral.withValues(alpha: 0.4),
+                      ),
+                    ),
+                    child: Text(
+                      _message!,
                       textAlign: TextAlign.center,
-                      style: const TextStyle(color: VoidrauColors.coral)),
+                      style: const TextStyle(
+                        color: VoidrauColors.coral,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ),
                 ],
                 const SizedBox(height: 16),
-                FilledButton(
-                  onPressed: _busy ? null : _activate,
-                  child: Text(_busy ? '...' : 'ورود به برنامه'),
-                ),
-                TextButton(
-                  onPressed: _busy ? null : _refresh,
-                  child: const Text('بررسی دوباره لایسنس'),
+                FilledButton.icon(
+                  onPressed: _busy ? null : () => _activate(),
+                  icon: _busy
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Icon(Icons.arrow_forward_rounded, size: 18),
+                  label: Text(
+                    _busy
+                        ? (s.isFa ? 'در حال بررسی…' : 'Checking…')
+                        : (s.isFa ? 'ورود به برنامه' : 'Enter application'),
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
                 ),
                 const SizedBox(height: 8),
+                TextButton.icon(
+                  onPressed: _busy ? null : _refresh,
+                  icon: const Icon(Icons.refresh_rounded, size: 18),
+                  label: Text(
+                    s.isFa ? 'بررسی دوباره آخرین لایسنس' : 'Re-check stored license',
+                  ),
+                ),
+                const SizedBox(height: 14),
+                const Divider(),
+                const SizedBox(height: 14),
                 FilledButton.tonalIcon(
                   onPressed: () => Links.openBot(),
-                  icon: const Icon(Icons.smart_button_rounded, size: 18),
-                  label: const Text('خرید / تست رایگان از ربات'),
+                  icon: const Icon(Icons.smart_button_rounded, size: 20),
+                  label: Text(
+                    s.isFa
+                        ? 'دریافت تست رایگان یا خرید از ربات'
+                        : 'Get Free Trial / Buy in Bot',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextButton.icon(
+                  onPressed: () => Links.openTelegram(),
+                  icon: const Icon(Icons.telegram, size: 20),
+                  label: Text(
+                    '${s.telegram} (${AppInfo.telegramHandle})',
+                    style: const TextStyle(color: VoidrauColors.muted),
+                  ),
                 ),
               ],
             ),

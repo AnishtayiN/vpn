@@ -513,4 +513,18 @@ class S {
   String get exitLockHelp => isFa
       ? 'هسته پیش از باز شدن پروکسی، کشور خروجی را بررسی می‌کند تا اسکن دوباره لازم نشود'
       : 'The core checks the exit country before opening the proxy, so fewer re-dials';
+
+  // ── speed & quality metrics ──────────────────────────────────────────────
+  String get qualityExcellent => isFa ? 'کیفیت عالی (مناسب گیم و استریم)' : 'Excellent quality (Gaming & 4K)';
+  String get qualityGood => isFa ? 'کیفیت خوب (وبگردی سریع و تماس)' : 'Good quality (Fast browsing & Calls)';
+  String get qualityFair => isFa ? 'کیفیت معمولی (پینگ متوسط)' : 'Fair quality (Moderate ping)';
+  String get qualityPoor => isFa ? 'تاخیر بالا (پینگ ضعیف)' : 'High latency (Poor ping)';
+  String get peakSpeed => isFa ? 'رکورد سرعت جلسه' : 'Session Peak Speed';
+  String get recheckPing => isFa ? 'تست مجدد پینگ' : 'Re-check ping';
+
+  // ── diagnostics report ───────────────────────────────────────────────────
+  String get copyDiagReport => isFa ? 'کپی گزارش کامل سیستم' : 'Copy Full Diagnostics Report';
+  String get diagReportCopied => isFa ? 'گزارش عیب‌یابی کپی شد' : 'Diagnostics report copied to clipboard';
+  String get dnsLeakTest => isFa ? 'بررسی نشت DNS و IP' : 'DNS & IP Leak Check';
 }
+

@@ -17,6 +17,42 @@ class DiagnosticsPage extends StatelessWidget {
   const DiagnosticsPage({super.key, required this.controller});
   final VpnController controller;
 
+  void _copyReport(BuildContext context, VpnController c, S s) {
+    final snap = c.snapshot;
+    final tun = c.tunInfo;
+    final buffer = StringBuffer();
+    buffer.writeln('=== VoidrauVPN Diagnostic Report ===');
+    buffer.writeln('App Version: ${AppInfo.version}');
+    buffer.writeln('Tunnel Core: ${AppInfo.core}');
+    buffer.writeln(
+        'Platform: ${Platform.operatingSystem} ${Platform.operatingSystemVersion}');
+    buffer.writeln('Status: ${snap.phase.name}');
+    buffer.writeln('Protocol: ${snap.protocol}');
+    buffer.writeln('Exit IP: ${snap.ip} (${snap.country})');
+    buffer.writeln('Location: ${snap.location}');
+    buffer.writeln('Ping: ${snap.pingMs ?? "—"} ms');
+    buffer.writeln(
+        'Device MTU: ${c.settings.deviceMtu} | Core MTU: ${c.settings.coreMtuOverride}');
+    buffer.writeln('Perf Profile: ${c.settings.perf.name}');
+    buffer.writeln('SOCKS5: ${c.settings.socksBind}');
+    if (Platform.isWindows) {
+      buffer.writeln('WinTUN Adapter: ${tun["adapter"] ?? "—"}');
+      buffer.writeln('WinTUN Backend: ${tun["backend"] ?? "—"}');
+      buffer.writeln('Elevated: ${tun["elevated"] ?? "—"}');
+    }
+    buffer.writeln(
+        'Download: ${snap.downloadBytes} B | Upload: ${snap.uploadBytes} B');
+    buffer.writeln('\n--- Recent Logs (${c.logs.length}) ---');
+    final recent =
+        c.logs.length > 30 ? c.logs.sublist(c.logs.length - 30) : c.logs;
+    for (final l in recent) {
+      buffer.writeln('[${l.at.toIso8601String()}] ${l.text}');
+    }
+    Clipboard.setData(ClipboardData(text: buffer.toString()));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(s.diagReportCopied)));
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = controller;
@@ -57,6 +93,11 @@ class DiagnosticsPage extends StatelessWidget {
               child: Text(s.testConnection),
             ),
             OutlinedButton(onPressed: c.recover, child: Text(s.recover)),
+            FilledButton.tonalIcon(
+              onPressed: () => _copyReport(context, c, s),
+              icon: const Icon(Icons.assignment_outlined, size: 18),
+              label: Text(s.copyDiagReport),
+            ),
             if (c.needsElevation)
               FilledButton.icon(
                 onPressed: c.restartAsAdmin,
@@ -64,14 +105,18 @@ class DiagnosticsPage extends StatelessWidget {
                 label: Text(s.restartAsAdmin),
               ),
             IconButton(
+              tooltip: s.copyLogs,
               onPressed: () {
                 Clipboard.setData(
                   ClipboardData(text: c.logs.map((e) => e.text).join('\n')),
                 );
+                ScaffoldMessenger.of(context)
+                    .showSnackBar(SnackBar(content: Text(s.copied)));
               },
               icon: const Icon(Icons.copy),
             ),
             IconButton(
+              tooltip: s.clearLogs,
               onPressed: c.clearLogs,
               icon: const Icon(Icons.delete_outline),
             ),
@@ -93,14 +138,9 @@ class DiagnosticsPage extends StatelessWidget {
           _cell(
             Platform.isWindows ? s.tunAdapter : s.tun,
             snap.phase == EnginePhase.connected
-                // Windows: the adapter name and index we really got ("Voidrau 2"
-                // happens), or '—' when only SOCKS5 is up. Android: VpnService.
-                ? (Platform.isWindows
-                    ? (tun['adapter'] ?? '—')
-                    : s.appName)
+                ? (Platform.isWindows ? (tun['adapter'] ?? '—') : s.appName)
                 : '—',
           ),
-          // Windows-only facts: on Android the VpnService owns the device.
           if (Platform.isWindows) ...[
             _cell(s.tunBackend, tun['backend'] ?? '—'),
             _cell(s.elevated, tun['elevated'] == 'true' ? s.yes : s.no),
@@ -122,7 +162,6 @@ class DiagnosticsPage extends StatelessWidget {
                     fa: s.isFa, android: Platform.isAndroid),
           ),
           _cell(s.secondHop, c.settings.chain.name),
-          // What the tunnel is moving right now, next to the totals below.
           _cell(
             s.liveSpeed,
             '${s.download} ${_rate(c.rate.downBytesPerSec)}  ·  '
@@ -135,16 +174,13 @@ class DiagnosticsPage extends StatelessWidget {
                 ? '—'
                 : '${countryLabel(snap.country, fa: s.isFa)} (${snap.country.toUpperCase()})',
           ),
-          // The rule the controller is enforcing, plus how far the current
-          // search has got — so a long "scanning" phase explains itself.
           _cell(
             s.exitFilter,
             c.exitRulePaused
                 ? '${c.exitFilterLabel} · ${s.exitPausedTitle}'
                 : c.exitFilterLabel,
           ),
-          if (c.exitFilterActive)
-            _cell(s.scanning, c.exitSearchStatus),
+          if (c.exitFilterActive) _cell(s.scanning, c.exitSearchStatus),
           _cell(s.ping, snap.pingMs == null ? '—' : '${snap.pingMs} ms'),
           _cell(s.location, snap.location.isEmpty ? '—' : snap.location),
           _cell(s.coreVersion, AppInfo.core),
@@ -224,17 +260,23 @@ class DiagnosticsPage extends StatelessWidget {
     );
   }
 
-  /// The one test that answers "is the tunnel really carrying my traffic?" —
-  /// the raw line's public address next to the tunnel's.
   Widget _leakCard(VpnController c, S s) {
     final connected = c.snapshot.phase == EnginePhase.connected;
     final verdict = c.leakBypassed
-        ? (Icons.report_gmailerrorred_outlined, s.leakBypassed, VoidrauColors.coral)
+        ? (
+            Icons.report_gmailerrorred_outlined,
+            s.leakBypassed,
+            VoidrauColors.coral
+          )
         : c.leakTunnelIp.isNotEmpty
             ? (Icons.verified_outlined, s.leakOk, VoidrauColors.cyan)
             : (!connected
                 ? (Icons.info_outline, s.leakNoTunnel, VoidrauColors.muted)
-                : (Icons.hourglass_empty, s.leakCheckHelp, VoidrauColors.muted));
+                : (
+                    Icons.hourglass_empty,
+                    s.leakCheckHelp,
+                    VoidrauColors.muted
+                  ));
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(14),
@@ -299,7 +341,6 @@ class DiagnosticsPage extends StatelessWidget {
     );
   }
 
-  /// `12.4 MB/s`, `640 KB/s` or `0 B/s`.
   static String _rate(double bytesPerSec) {
     if (bytesPerSec < 1024) return '${bytesPerSec.round()} B/s';
     if (bytesPerSec < 1024 * 1024) {
@@ -320,7 +361,8 @@ class DiagnosticsPage extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Text(k, style: const TextStyle(color: VoidrauColors.muted, fontSize: 11)),
+          Text(k,
+              style: const TextStyle(color: VoidrauColors.muted, fontSize: 11)),
           const SizedBox(height: 4),
           Text(v,
               maxLines: 1,
