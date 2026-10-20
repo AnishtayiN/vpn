@@ -1,12 +1,11 @@
-name = "voidrau-license"
+name = "voidrau"
 main = "license-worker.js"
-compatibility_date = "2024-09-01"
+compatibility_date = "2026-10-13"
 
-# Create with: wrangler kv namespace create LICENSES  → paste the id below
 [[kv_namespaces]]
 binding = "LICENSES"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id = "c2af2f0d59cd4547b6d91ae106d52952"
 
-# Secrets (set with `wrangler secret put`): BOT_TOKEN, ADMIN_ID, BOT_USERNAME is optional var:
 [vars]
-# BOT_USERNAME = "VoidrauLicenseBot"
+ADMIN_ID = "6508600903"
+BOT_USERNAME = "VoidRauBot"

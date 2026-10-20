@@ -33,3 +33,5 @@ key.properties
 *.p8
 *.mobileprovision
 native/ios-core/target/
+.wrangler/
+
