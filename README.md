@@ -8,6 +8,12 @@ Telegram channel (releases, install files, notes and support): **[t.me/Voidrau](
 
 ---
 
+## What's New in v1.3.1 (تغییرات نسخه ۱.۳.۱)
+
+- **License and referral links now target the active bot, `@VoidRauBot`.** The License screen's Invite Friends button opens the personal referral flow; trial and purchase links now execute their intended bot actions.
+- **Referral deep links survive the required-channel join gate**, and first-time referral attribution is counted once per invited Telegram user.
+- Added automated tests for the app's bot deep links and referral flow.
+
 ## What's New in v1.3.0 (تغییرات نسخه ۱.۳.۰)
 
 - **Telegram Bot & License Worker Enhancements**:

@@ -13,7 +13,7 @@ class AppInfo {
 
   /// Injected by the release workflow (`--dart-define=VOIDRAU_VERSION=...`).
   static const version =
-      String.fromEnvironment('VOIDRAU_VERSION', defaultValue: '1.3.0');
+      String.fromEnvironment('VOIDRAU_VERSION', defaultValue: '1.3.1');
 
   /// Version of the bundled tunnel core.
   static const core = '2.3.0';
@@ -34,6 +34,7 @@ class AppInfo {
   static const botUsername = 'VoidRauBot';
   static const botUrl = 'https://t.me/$botUsername';
 
-  /// License bot — trials, purchases, referrals and keys.
-  static const botHandle = '@VoidrauLicenseBot';
+  /// Build a validated Telegram deep link for the bot's `/start` payload.
+  static String botStartUrl(String payload) =>
+      '$botUrl?start=${Uri.encodeComponent(payload)}';
 }

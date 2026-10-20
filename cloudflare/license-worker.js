@@ -555,9 +555,13 @@ async function handle(upd, env, steps) {
     if (String(tid) !== String(env.ADMIN_ID) && !(await checkJoined(env, tid))) {
       out = joinPrompt(await getSetting(env, 'forceChannel', ''));
     } else if (cb.data === 'recheck') {
-      out = (await checkJoined(env, tid))
-        ? { text: '✅ عضویت شما تایید شد. خوش آمدید!' }
-        : joinPrompt(await getSetting(env, 'forceChannel', ''));
+      if (!(await checkJoined(env, tid))) {
+        out = joinPrompt(await getSetting(env, 'forceChannel', ''));
+      } else {
+        const pendingStart = await env.LICENSES.get(`startpending:${tid}`);
+        if (pendingStart) await env.LICENSES.delete(`startpending:${tid}`);
+        out = await startPayloadAction(env, cb.from, pendingStart || '', steps);
+      }
     } else if (cb.data === 'trial') {
       out = await doTrial(env, tid);
     } else if (cb.data === 'buy') {
@@ -1267,50 +1271,20 @@ async function handle(upd, env, steps) {
   // ── General Commands ────────────────────────────────────────────────
   if (text.startsWith('/start')) {
     steps.push('start-branch');
+    const payload = text.split(/\s+/)[1] || '';
     if (String(tid) !== String(env.ADMIN_ID) && !(await checkJoined(env, tid))) {
       steps.push('join-gate');
+      // Preserve supported deep links through the channel-join gate. Otherwise
+      // Telegram's one-shot /start payload is lost when users tap "recheck".
+      if (/^(trial|buy|ref|ref_\d{3,})$/.test(payload) && payload !== `ref_${tid}`) {
+        await env.LICENSES.put(`startpending:${tid}`, payload, { expirationTtl: 86400 });
+      }
       await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, ...joinPrompt(await getSetting(env, 'forceChannel', '')) }, env, steps);
       return;
     }
 
-    const idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
-    if (!idx.includes(tid)) {
-      idx.push(tid);
-      await env.LICENSES.put('userIndex', JSON.stringify(idx));
-      await env.LICENSES.put('stat:users', String(idx.length));
-    }
-
-    const payload = text.split(' ')[1] || '';
-    if (payload.startsWith('ref_')) {
-      const ref = payload.slice(4);
-      if (/^\d{3,}$/.test(ref) && ref !== String(tid)) {
-        const seen = await env.LICENSES.get(`refseen:${tid}`);
-        if (!seen) {
-          await env.LICENSES.put(`refseen:${tid}`, '1');
-          const prev = parseInt((await env.LICENSES.get(`refjoin:${ref}`)) || '0');
-          await env.LICENSES.put(`refjoin:${ref}`, String(prev + 1));
-          const joins = prev + 1;
-          if (joins % REFERRAL_REWARD_JOINS === 0) {
-            await addCredit(env, ref, REFERRAL_REWARD_DAYS);
-            await tg(
-              token,
-              'sendMessage',
-              {
-                chat_id: ref,
-                text: `🎉 *تبریک!* ${REFERRAL_REWARD_JOINS} کاربر با لینک شما عضو شدند.\n*${REFERRAL_REWARD_DAYS} روز لایسنس هدیه* به حساب شما افزوده شد!`,
-                parse_mode: 'Markdown',
-              },
-              env
-            );
-          }
-        }
-      }
-    }
-
-    const key = await userKey(env, tid);
-    const lic = key ? await getLic(env, key) : null;
-    const menu = mainMenu(msg.from, lic);
-    await tg(token, 'sendMessage', { chat_id: tid, ...menu }, env, steps);
+    const response = await startPayloadAction(env, msg.from, payload, steps);
+    await tg(token, 'sendMessage', { chat_id: tid, ...response }, env, steps);
     return;
   }
 
@@ -1594,6 +1568,60 @@ async function doPlan(env, tid, planId) {
       `سپس تصویر فیش یا اسکرین‌شات رسید را همین‌جا ارسال کنید تا تایید شود.`,
     parse_mode: 'Markdown',
   };
+}
+
+async function startPayloadAction(env, user, payload, steps) {
+  const tid = user.id;
+  let idx = [];
+  try {
+    idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
+    if (!Array.isArray(idx)) idx = [];
+  } catch (_) {
+    idx = [];
+  }
+  if (!idx.some((id) => String(id) === String(tid))) {
+    idx.push(tid);
+    await env.LICENSES.put('userIndex', JSON.stringify(idx));
+    await env.LICENSES.put('stat:users', String(idx.length));
+  }
+
+  if (payload.startsWith('ref_')) {
+    await recordReferralJoin(env, tid, payload.slice(4), steps);
+  }
+  if (payload === 'ref') return doReferral(env, tid);
+  if (payload === 'trial') return doTrial(env, tid);
+  if (payload === 'buy') return buyMenuFull(env);
+
+  const key = await userKey(env, tid);
+  const lic = key ? await getLic(env, key) : null;
+  return mainMenu(user, lic);
+}
+
+async function recordReferralJoin(env, inviteeId, referrerId, steps) {
+  const invitee = String(inviteeId);
+  const referrer = String(referrerId);
+  if (!/^\d{3,}$/.test(referrer) || referrer === invitee) return false;
+  if (await env.LICENSES.get(`refseen:${invitee}`)) return false;
+
+  await env.LICENSES.put(`refseen:${invitee}`, '1');
+  const previous = parseInt((await env.LICENSES.get(`refjoin:${referrer}`)) || '0', 10);
+  const joins = (Number.isFinite(previous) ? previous : 0) + 1;
+  await env.LICENSES.put(`refjoin:${referrer}`, String(joins));
+  if (joins % REFERRAL_REWARD_JOINS === 0) {
+    await addCredit(env, referrer, REFERRAL_REWARD_DAYS);
+    await tg(
+      env.BOT_TOKEN,
+      'sendMessage',
+      {
+        chat_id: referrer,
+        text: `🎉 *تبریک!* ${REFERRAL_REWARD_JOINS} کاربر با لینک شما عضو شدند.\n*${REFERRAL_REWARD_DAYS} روز لایسنس هدیه* به حساب شما افزوده شد!`,
+        parse_mode: 'Markdown',
+      },
+      env,
+      steps
+    );
+  }
+  return true;
 }
 
 async function doReferral(env, tid) {

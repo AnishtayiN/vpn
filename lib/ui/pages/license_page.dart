@@ -91,14 +91,16 @@ class _LicensePageState extends State<VoidrauLicensePage> {
       _busy = true;
       _message = null;
     });
-    await Links.open(
-        'https://t.me/${AppInfo.botHandle.replaceFirst('@', '')}?start=trial');
+    await Links.open(AppInfo.botStartUrl('trial'));
     if (mounted) setState(() => _busy = false);
   }
 
   Future<void> _buy() async {
-    await Links.open(
-        'https://t.me/${AppInfo.botHandle.replaceFirst('@', '')}?start=buy');
+    await Links.open(AppInfo.botStartUrl('buy'));
+  }
+
+  Future<void> _referral() async {
+    await Links.open(AppInfo.botStartUrl('ref'));
   }
 
   String _planLabel(String p) {
@@ -362,7 +364,7 @@ class _LicensePageState extends State<VoidrauLicensePage> {
         const SizedBox(height: 20),
         // Referral link
         OutlinedButton.icon(
-          onPressed: _buy,
+          onPressed: _referral,
           icon: const Icon(Icons.group_add_rounded, size: 18),
           label: Text(s.licenseReferral),
         ),
