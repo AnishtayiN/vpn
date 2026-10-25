@@ -4,7 +4,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="${1:-${TARGET:-all}}"
 TARGET="$(echo "$TARGET" | tr '[:upper:]' '[:lower:]')"
-AETHER_TAG="${AETHER_TAG:-v2.3.0}"
+AETHER_TAG="${AETHER_TAG:-v2.4.0}"
+# Aether 2.4.0 needs Android 10 (API 29)+. Builds for Android 7-9 set
+# AETHER_TAG to the legacy tag below, and then verify against the
+# aether_legacy_* digests in pins.json instead of the current ones.
+AETHER_LEGACY_TAG="${AETHER_LEGACY_TAG:-v2.3.0}"
+AETHER_PIN_PREFIX="aether"
+if [[ "$AETHER_TAG" == "$AETHER_LEGACY_TAG" ]]; then
+  AETHER_PIN_PREFIX="aether_legacy"
+fi
 HEV_TAG="${HEV_TAG:-2.17.1}"
 TUN2SOCKS_TAG="${TUN2SOCKS_TAG:-v2.6.0}"
 # v2.5.1 is the last tun2socks release built with Go 1.20 — the last Go that
@@ -65,7 +73,7 @@ stage_aether_android() {
   local tmp="$ROOT/third_party/aether-$abi"
   mkdir -p "$tmp" "$ROOT/android/app/src/main/jniLibs/$jni"
   local pinned
-  pinned="$(pin_sha256 "aether_android_${abi}")"
+  pinned="$(pin_sha256 "${AETHER_PIN_PREFIX}_android_${abi}")"
   download "https://github.com/CluvexStudio/Aether/releases/download/${AETHER_TAG}/${asset}" "$tmp/$asset" "$pinned"
   download_raw "https://github.com/CluvexStudio/Aether/releases/download/${AETHER_TAG}/${asset}.sha256" "$tmp/$asset.sha256"
   # A failed or skipped checksum used to pass silently and shipped a corrupt
@@ -93,7 +101,7 @@ stage_aether_android() {
 stage_aether_windows() {
   local tmp="$ROOT/third_party/aether-win"
   mkdir -p "$tmp"
-  download "https://github.com/CluvexStudio/Aether/releases/download/${AETHER_TAG}/aether-windows-x86_64.zip" "$tmp/aether-windows-x86_64.zip" "$(pin_sha256 aether_windows_x86_64)"
+  download "https://github.com/CluvexStudio/Aether/releases/download/${AETHER_TAG}/aether-windows-x86_64.zip" "$tmp/aether-windows-x86_64.zip" "$(pin_sha256 "${AETHER_PIN_PREFIX}_windows_x86_64")"
   download_raw "https://github.com/CluvexStudio/Aether/releases/download/${AETHER_TAG}/aether-windows-x86_64.zip.sha256" "$tmp/aether-windows-x86_64.zip.sha256"
   (cd "$tmp" && sha256sum -c aether-windows-x86_64.zip.sha256)
   "$PYTHON" - "$tmp" <<'AETHER_PY'
