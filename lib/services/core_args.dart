@@ -9,11 +9,18 @@ import 'split.dart';
 /// CLI flags; that is its documented configuration contract, and env-only
 /// keeps the Android and Windows launchers behaviourally identical.
 ///
-/// The list below tracks Aether 2.3.0 (`aether --help`, `Docs/DOCS.en.md`):
+/// The list below tracks Aether 2.3.0 (legacy Android build) and 2.4.0
+/// (Android 10+ / Windows builds) (`aether --help`, `Docs/DOCS.en.md`):
+/// none of the environment names used here were renamed in 2.4.0 —
+/// AETHER_PSIPHON_BIND is already the 2.4.0 form, and no ENROLL_ADDRESS
+/// or API-fragment variable is used anywhere in this file.
 /// transports, the QUIC v2 opener, ECH, the exit lock, traffic counters, the
 /// performance profile, the Psiphon/Tor chains and the routing rules.
 class CoreLaunch {
-  static const coreVersion = '2.3.0';
+  /// Injected by the release workflow (`--dart-define=VOIDRAU_AETHER_VERSION=...`):
+  /// v2.3.0 for the legacy Android build, v2.4.0 otherwise.
+  static const coreVersion =
+      String.fromEnvironment('VOIDRAU_AETHER_VERSION', defaultValue: '2.4.0');
 
   /// Obfuscation profile given to the core. The core accepts
   /// off|light|balanced|aggressive (plus aliases like gfw/firewall); anything
