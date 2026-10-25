@@ -2,6 +2,7 @@
 """Copy VoidrauVPN platform overlays onto a flutter create scaffold and patch SDK floors."""
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from pathlib import Path
@@ -78,9 +79,15 @@ def patch_android_gradle() -> None:
         return
     text = path.read_text(encoding="utf-8")
 
-    # Patch min/target SDK
-    text = re.sub(r"minSdk\s*=\s*.+", "minSdk = 24", text)
-    text = re.sub(r"minSdkVersion\s+.+", "minSdkVersion 24", text)
+    # Patch min/target SDK. The release workflow sets VOIDRAU_MIN_SDK:
+    # 24 for the legacy Android build (Aether 2.3.0, Android 7-9) and 29
+    # for the modern build (Aether 2.4.0, Android 10+). Anything else
+    # falls back to 24 so an old device is never locked out by mistake.
+    min_sdk = os.environ.get("VOIDRAU_MIN_SDK", "24").strip()
+    if not min_sdk.isdigit():
+        min_sdk = "24"
+    text = re.sub(r"minSdk\s*=\s*.+", f"minSdk = {min_sdk}", text)
+    text = re.sub(r"minSdkVersion\s+.+", f"minSdkVersion {min_sdk}", text)
     text = re.sub(r"targetSdk\s*=\s*.+", "targetSdk = 35", text)
     text = re.sub(r"targetSdkVersion\s+.+", "targetSdkVersion 35", text)
 
