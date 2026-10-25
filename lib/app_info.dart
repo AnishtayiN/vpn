@@ -15,8 +15,11 @@ class AppInfo {
   static const version =
       String.fromEnvironment('VOIDRAU_VERSION', defaultValue: '1.3.1');
 
-  /// Version of the bundled tunnel core.
-  static const core = '2.3.0';
+  /// Version of the bundled tunnel core, injected by the release workflow
+  /// (`--dart-define=VOIDRAU_AETHER_VERSION=...`): v2.3.0 for the legacy
+  /// Android build (Android 7-9), v2.4.0 for Android 10+ and Windows.
+  static const core =
+      String.fromEnvironment('VOIDRAU_AETHER_VERSION', defaultValue: '2.4.0');
 
   static const socksHost = '127.0.0.1';
   static const socksPort = 1819;
