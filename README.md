@@ -8,6 +8,11 @@ Telegram channel (releases, install files, notes and support): **[t.me/Voidrau](
 
 ---
 
+## What's New in v1.4.0 (تغییرات نسخه ۱.۴.۰)
+
+- **Aether core updated to v2.4.0** for Android 10+ and Windows, with SHA-256-pinned downloads in `scripts/pins.json`.
+- **Android 7, 8 and 9 keep working:** those phones get a separate `-Legacy` APK that still bundles Aether 2.3.0, the last core that runs on Android 7-9. On Android 7-9, download ONLY the `-Legacy` files from the release; the plain APKs need Android 10+ and will not install there.
+
 ## What's New in v1.3.1 (تغییرات نسخه ۱.۳.۱)
 
 - **License and referral links now target the active bot, `@VoidRauBot`.** The License screen's Invite Friends button opens the personal referral flow; trial and purchase links now execute their intended bot actions.
@@ -46,7 +51,7 @@ Telegram channel (releases, install files, notes and support): **[t.me/Voidrau](
 | Language | Persian & English (RTL aware) | Persian & English |
 | Exit info | Country flag + exit IP card after connecting | Country flag + exit IP card after connecting |
 | Exit country | Choose it: any IP but Iran, or a preferred country (Germany by default) | same |
-| Minimum OS | Android 7.0 (API 24) | Windows 8.1 (6.3), x64 |
+| Minimum OS | Android 7.0 (API 24) with the `-Legacy` APK; Android 10+ (API 29) with the plain APK | Windows 8.1 (6.3), x64 |
 
 ### Exit country: pick where you land
 
@@ -153,10 +158,13 @@ wire, and its own default is protocol aware: 1280 on QUIC, 1500 on the TCP
 carrier. Overriding it is rarely needed, which is why the default is “let the
 core decide”.
 
-### Tunnel core 2.1.0
+### Tunnel core 2.4.0 (2.3.0 on Android 7-9)
 
-`scripts/pins.json` pins Aether **v2.3.0** (and the iOS source revision built
-from it). What the app uses from it:
+`scripts/pins.json` pins Aether **v2.4.0** — and, under `aether_legacy_*`,
+**v2.3.0** for the legacy Android build (and the iOS source revision built
+from it). The release workflow builds both Android variants: the modern
+build (minSdk 29) with 2.4.0 and the legacy build (minSdk 24) with 2.3.0.
+What the app uses from it:
 
 - **exit lock** — `AETHER_EXIT_LOC` / `AETHER_EXIT_LOC_SECS` (see above);
 - **second hop** — Psiphon or Tor inside the core
@@ -372,9 +380,11 @@ If no bridge can create the adapter, the app reports each bridge's exit status a
 (`AETHER_MASQUE_MTU`، صفر = خودکار) اندازهٔ روی سیم است و پیش‌فرض خود هسته هوشمند است: ۱۲۸۰ روی
 QUIC و ۱۵۰۰ روی TCP.
 
-### هستهٔ تونل 2.1.0
+### هستهٔ تونل 2.4.0 (2.3.0 در اندروید ۷ تا ۹)
 
-`scripts/pins.json` نسخهٔ Aether را روی **v2.3.0** ثابت می‌کند (و revision مبدأ برای iOS). آنچه
+`scripts/pins.json` نسخهٔ Aether را روی **v2.4.0** ثابت می‌کند — و با کلیدهای
+`aether_legacy_*`، نسخهٔ **v2.3.0** را برای بیلد قدیمی اندروید نگه می‌دارد
+(و revision مبدأ برای iOS). آنچه
 برنامه از آن استفاده می‌کند: **قفل کشور خروجی** داخل هسته، **پرش دوم** با Psiphon/Tor
 (`chain`/`reverse`/`only`) با منطقه، حالت CDN و پورت‌های اختصاصی، **شمارنده‌های ترافیک**
 (`AETHER_STATS`) که تنها منبع آمار در ویندوز و خوراک نمای زنده است، **پروفایل سرعت** و
