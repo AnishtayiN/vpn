@@ -14,6 +14,17 @@ import 'split.dart';
 /// none of the environment names used here were renamed in 2.4.0 —
 /// AETHER_PSIPHON_BIND is already the 2.4.0 form, and no ENROLL_ADDRESS
 /// or API-fragment variable is used anywhere in this file.
+///
+/// That is a statement about the *names*, not about what the 2.4.0 binary
+/// bundles: the only version-scoped evidence in this repository that Psiphon
+/// and Tor ship inside the core is for 2.3.0 (`ChainMode` in settings.dart).
+/// No `aether --help` output, 2.4.0 changelog or on-device run in this repo
+/// confirms them in 2.4.0, so the standalone Psiphon-only / Tor-only modes
+/// are treated as verified on 2.3.0 only ([standaloneHopVerified]) and the UI
+/// must warn on 2.4.0 instead of claiming they work there. The env vars are
+/// still sent unchanged — that is the only way to test 2.4.0 for real, and a
+/// core that does not know them fails the connect honestly instead of
+/// silently pretending to be Psiphon/Tor.
 /// transports, the QUIC v2 opener, ECH, the exit lock, traffic counters, the
 /// performance profile, the Psiphon/Tor chains and the routing rules.
 class CoreLaunch {
@@ -90,6 +101,19 @@ class CoreLaunch {
       c == ChainMode.psiphon ||
       c == ChainMode.psiphonReverse ||
       c == ChainMode.psiphonOnly;
+
+  /// True for the standalone top-level modes: plain Psiphon or plain Tor on
+  /// the proxy port, with no WARP underneath.
+  static bool isStandalone(ChainMode c) =>
+      c == ChainMode.psiphonOnly || c == ChainMode.torOnly;
+
+  /// Whether the standalone Psiphon-only / Tor-only modes are verified to
+  /// exist in the bundled core. The only version-scoped evidence in this
+  /// repository is for Aether 2.3.0 (see the ChainMode docs in settings.dart),
+  /// so this is true on the legacy build only. On 2.4.0 the modes stay
+  /// selectable — that is how they get tested on a real device — but the UI
+  /// must show the unverified note and never claim they work there.
+  static bool get standaloneHopVerified => coreVersion.startsWith('2.3.');
 
   static String? _chainToken(ChainMode c) {
     switch (c) {
@@ -283,6 +307,11 @@ class CoreLaunch {
   /// also races h3→h2 on its own inside the first attempt; running the h2
   /// attempt again later is harmless.
   static List<Protocol> smartLadder(VpnSettings settings) {
+    // A standalone Psiphon-only / Tor-only connection has no WARP underneath
+    // to escalate through: walking the five-rung ladder would just re-dial
+    // the same only-mode core five times. One rung, the effective protocol
+    // (Smart still resolves to MASQUE — the env still needs AETHER_PROTOCOL).
+    if (isStandalone(settings.chain)) return [_effective(settings, null)];
     if (settings.protocol != Protocol.smart) {
       return [settings.protocol];
     }

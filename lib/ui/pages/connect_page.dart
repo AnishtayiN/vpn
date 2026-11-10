@@ -114,6 +114,99 @@ class ConnectPage extends StatelessWidget {
             padding: const EdgeInsets.only(top: 8),
             child: ExitFilterBadge(controller: c),
           ),
+        // Standalone Psiphon-only / Tor-only mode, when selected: shown on
+        // the connect screen itself so the user sees which tunnel is about
+        // to run (or is running) without opening Configurations. Tor is
+        // labelled the heaviest mode, and on a core where Psiphon/Tor are
+        // unverified (2.4.0) the warning is shown, not a promise.
+        if (c.standaloneHopActive)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Column(
+              children: [
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: VoidrauColors.surface,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: VoidrauColors.line),
+                  ),
+                  child: Text(
+                    '${s.standaloneMode}: ${c.settings.chain == ChainMode.psiphonOnly ? s.hopPsiphonOnly : s.hopTorOnly}',
+                    style: const TextStyle(
+                        color: VoidrauColors.cyan,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 12),
+                  ),
+                ),
+                if (c.settings.chain == ChainMode.torOnly)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(
+                      s.standaloneTorHeavy,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                          color: VoidrauColors.muted, fontSize: 12),
+                    ),
+                  ),
+                if (c.standaloneHopUnverified)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(
+                      s.standaloneUnverified,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                          color: VoidrauColors.coral, fontSize: 12),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        // Xray engine (Android only): which engine the orb dials. Aether is
+        // the default; the mode itself is picked in Settings → Xray modes.
+        if (Platform.isAndroid && !connected)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Wrap(
+              spacing: 8,
+              alignment: WrapAlignment.center,
+              children: [
+                ChoiceChip(
+                  label: Text(s.xrayOff),
+                  selected: c.settings.xrayMode == XrayMode.off,
+                  onSelected: (_) {
+                    c.settings.xrayMode = XrayMode.off;
+                    c.persist();
+                  },
+                ),
+                ChoiceChip(
+                  label: Text(s.xrayWorker),
+                  selected: c.settings.xrayMode == XrayMode.worker,
+                  onSelected: (_) {
+                    c.settings.xrayMode = XrayMode.worker;
+                    c.persist();
+                  },
+                ),
+                ChoiceChip(
+                  label: Text(s.xrayWarp),
+                  selected: c.settings.xrayMode == XrayMode.warp,
+                  onSelected: (_) {
+                    c.settings.xrayMode = XrayMode.warp;
+                    c.persist();
+                  },
+                ),
+                ChoiceChip(
+                  label: Text(s.xrayServerless),
+                  selected: c.settings.xrayMode == XrayMode.serverless,
+                  onSelected: (_) {
+                    c.settings.xrayMode = XrayMode.serverless;
+                    c.persist();
+                  },
+                ),
+              ],
+            ),
+          ),
         // The one-tap "connect with the Iran IP" answer used to be permanent:
         // the rule was switched off and forgotten, which is how a user ends up
         // with "only the local IP connects". It is a pause now, and this is

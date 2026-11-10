@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 
 import '../../models/settings.dart';
+import '../../services/core_args.dart';
 import '../../services/ios_policy.dart';
 import '../../services/split.dart';
 import '../../services/license_service.dart';
@@ -311,6 +312,51 @@ class ConfigPage extends StatelessWidget {
           },
         ),
         if (!Platform.isIOS) ...[
+          // Standalone top-level modes: plain Psiphon or plain Tor on the
+          // proxy port, with no WARP underneath. They reuse the existing
+          // ChainMode.psiphonOnly / torOnly and the existing AETHER_PSIPHON* /
+          // AETHER_TOR* env — no new core variables. The region/country
+          // fields below (in the second-hop section) already appear for these
+          // modes, so they are not duplicated here.
+          _label(s.standaloneMode),
+          Text(s.standaloneHelp,
+              style: const TextStyle(color: VoidrauColors.muted, fontSize: 12)),
+          const SizedBox(height: 8),
+          _seg(
+            st.chain == ChainMode.psiphonOnly
+                ? 'psiphonOnly'
+                : st.chain == ChainMode.torOnly
+                    ? 'torOnly'
+                    : 'standard',
+            {
+              'standard': s.standaloneStandard,
+              'psiphonOnly': s.hopPsiphonOnly,
+              'torOnly': s.hopTorOnly,
+            },
+            (v) {
+              // 'standard' only clears a standalone mode; a chain/reverse
+              // second hop chosen below is left untouched.
+              if (v == 'psiphonOnly') {
+                st.chain = ChainMode.psiphonOnly;
+              } else if (v == 'torOnly') {
+                st.chain = ChainMode.torOnly;
+              } else if (st.isStandaloneHop) {
+                st.chain = ChainMode.off;
+              }
+              c.persist();
+            },
+            wrap: true,
+          ),
+          if (st.chain == ChainMode.torOnly) ...[
+            const SizedBox(height: 8),
+            Text(s.standaloneTorHeavy,
+                style: const TextStyle(color: VoidrauColors.muted, fontSize: 12)),
+          ],
+          if (st.isStandaloneHop && !CoreLaunch.standaloneHopVerified) ...[
+            const SizedBox(height: 8),
+            Text(s.standaloneUnverified,
+                style: const TextStyle(color: VoidrauColors.coral, fontSize: 12)),
+          ],
           _label(s.secondHop),
           Text(s.secondHopHelp,
               style: const TextStyle(color: VoidrauColors.muted, fontSize: 12)),

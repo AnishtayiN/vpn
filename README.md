@@ -8,6 +8,11 @@ Telegram channel (releases, install files, notes and support): **[t.me/Voidrau](
 
 ---
 
+## What's New — Xray engine, Phase 1b (unreleased scaffold, Android only)
+
+- **Second engine beside Aether:** Xray-core for Worker/VLESS (your own Cloudflare Worker, deployed from the in-app setup wizard with your own API token), WARP (account registered on the device) and Serverless (direct + TLS fragment + UDP noise — no MITM, no CA install), plus chain proxies from links you enter yourself. Aether stays the default; Windows and iOS are unaffected.
+- **Status:** scaffold + first slice only. The native `xray.aar` has not been built yet and no on-phone Xray connection has been tested — see `docs/xray-release-notes.md` and `CHANGELOG.md`.
+
 ## What's New in v1.4.0 (تغییرات نسخه ۱.۴.۰)
 
 - **Aether core updated to v2.4.0** for Android 10+ and Windows, with SHA-256-pinned downloads in `scripts/pins.json`.
@@ -450,3 +455,7 @@ flutter build apk --release --dart-define=VOIDRAU_VERSION=1.1.0
 ```
 
 نکته‌ها: شناسه اندروید عمداً ثابت مانده است (`pm.dnschanger.nimbus`) تا نسخه جدید روی نسخه قبلی نصب شود و تنظیمات و امضای برنامه حفظ شود. کلید امضا را بین نسخه‌ها تغییر ندهید؛ برنامه APK با امضای متفاوت را نصب نمی‌کند. فهرست اجزای شخص ثالث در [NOTICE.md](NOTICE.md) است.
+
+### Attribution (Xray modes)
+
+The Worker relay logic, the Cloudflare deploy flow, the WARP registration flow and the share-link parsing in the Xray modes follow the approach of BPB-VPN (GNU GPL v3.0) and are re-implemented in VoidrauVPN's own code — no BPB code was copied verbatim and no BPB name, logo or brand is used. Xray-core itself is MPL-2.0. The MITM domain-fronting part of BPB (own CA, TLS decryption) was deliberately NOT implemented. Details: `CHANGELOG.md` and `docs/xray-release-notes.md`.

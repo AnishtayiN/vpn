@@ -404,6 +404,18 @@ class S {
   String get hopTor => isFa ? 'Tor' : 'Tor';
   String get hopTorReverse => isFa ? 'Tor (معکوس)' : 'Tor reverse';
   String get hopTorOnly => isFa ? 'فقط Tor' : 'Tor only';
+  String get standaloneMode => isFa ? 'حالت مستقل' : 'Standalone mode';
+  String get standaloneStandard =>
+      isFa ? 'معمولی (پروتکل + مسیر دوم)' : 'Standard (protocol + second hop)';
+  String get standaloneHelp => isFa
+      ? '«فقط Psiphon» یا «فقط Tor» یعنی همهٔ ترافیک فقط از Psiphon یا Tor عبور می‌کند و WARP زیر آن نیست. در یک زمان فقط یک تونل باز است؛ انتخاب هر حالت، حالت قبلی را کنار می‌گذارد.'
+      : '“Psiphon only” or “Tor only” means all traffic exits through Psiphon or Tor alone, with no WARP underneath. Only one tunnel runs at a time; picking a mode replaces the previous one.';
+  String get standaloneTorHeavy => isFa
+      ? 'Tor سنگین‌ترین حالت است: مصرف داده و باتری بیشتر و سرعت کمتر — فقط وقتی لازم است از آن استفاده کنید.'
+      : 'Tor is the heaviest mode: more data and battery, slower — use it only when needed.';
+  String get standaloneUnverified => isFa
+      ? 'بودن Psiphon/Tor در هستهٔ ۲٫۴٫۰ هنوز تأیید نشده است (فقط در ۲٫۳٫۰ تأیید شده). اگر وصل نشد، به حالت معمولی برگردید.'
+      : 'Psiphon/Tor in core 2.4.0 is not verified yet (confirmed only in 2.3.0). If it fails to connect, switch back to Standard.';
   String get hopRegion => isFa ? 'کشور خروجی Psiphon' : 'Psiphon exit country';
   String get hopRegionHelp => isFa
       ? 'مثلاً DE یا US — خالی یعنی خودش انتخاب کند'
@@ -526,5 +538,113 @@ class S {
   String get copyDiagReport => isFa ? 'کپی گزارش کامل سیستم' : 'Copy Full Diagnostics Report';
   String get diagReportCopied => isFa ? 'گزارش عیب‌یابی کپی شد' : 'Diagnostics report copied to clipboard';
   String get dnsLeakTest => isFa ? 'بررسی نشت DNS و IP' : 'DNS & IP Leak Check';
+
+  // ── Xray engine (Android only) ─────────────────────────────────────────
+  String get xrayTitle => isFa ? 'حالت‌های Xray' : 'Xray modes';
+  String get xrayHelp => isFa
+      ? 'موتور دوم کنار Aether — فقط اندروید. هر حالت جداگانه فعال و خاموش می‌شود و در یک زمان فقط یک تونل باز است. هیچ سرور، ورکر یا کلید آماده‌ای در برنامه نیست.'
+      : 'A second engine beside Aether — Android only. Each mode can be switched on or off separately, and only one tunnel runs at a time. The app ships no server, Worker or key.';
+  String get xrayAndroidOnly => isFa
+      ? 'حالت‌های Xray فعلاً فقط روی اندروید هستند؛ ویندوز و iOS با همان Aether کار می‌کنند.'
+      : 'Xray modes are Android-only for now; Windows and iOS keep using Aether.';
+  String get xrayModeLabel => isFa ? 'حالت Xray' : 'Xray mode';
+  String get xrayOff => isFa ? 'خاموش (Aether)' : 'Off (Aether)';
+  String get xrayWorker => 'Worker';
+  String get xrayWarp => 'WARP';
+  String get xrayServerless => isFa ? 'مستقیم (Serverless)' : 'Serverless';
+  String get xrayWorkerHelp => isFa
+      ? 'VLESS از طریق ورکر کلادفلر خودتان — ورکر با توکن خودتان دیپلوی می‌شود و فقط TCP را رله می‌کند.'
+      : 'VLESS through your own Cloudflare Worker — deployed with your own token, TCP relay only.';
+  String get xrayWarpHelp => isFa
+      ? 'وایرگارد به WARP کلادفلر با حسابی که روی همین دستگاه ثبت می‌شود؛ بدون ورکر. پروکسی‌های UDP هم روی همین حالت سوار می‌شوند.'
+      : 'WireGuard to Cloudflare WARP with an account registered on this device; no Worker. UDP proxies ride on this mode.';
+  String get xrayServerlessHelp => isFa
+      ? 'اتصال مستقیم با فرگمنت TLS و نویز UDP — بدون سرور، بدون MITM و بدون نصب گواهی.'
+      : 'Direct connections with TLS fragmentation and UDP noise — no server, no MITM, no certificate install.';
+  String get xrayFragment => isFa ? 'فرگمنت TLS' : 'TLS fragment';
+  String get xrayFragmentHelp => isFa
+      ? 'تقسیم ClientHello به قطعه‌های کوچک'
+      : 'Split the ClientHello into small pieces';
+  String get xrayNoise => isFa ? 'نویز UDP' : 'UDP noise';
+  String get xrayNoiseHelp => isFa
+      ? 'بسته‌های نویز تصادفی روی UDP'
+      : 'Random noise packets over UDP';
+  String get xrayModeSaved =>
+      isFa ? 'حالت Xray ذخیره شد' : 'Xray mode saved';
+  String get xrayUseServerless =>
+      isFa ? 'استفاده از حالت مستقیم' : 'Use Serverless mode';
+
+  // ── setup wizard ───────────────────────────────────────────────────────
+  String get wizardToken => isFa ? 'توکن API کلادفلر' : 'Cloudflare API token';
+  String get wizardTokenHint =>
+      isFa ? 'توکن را اینجا بچسبانید' : 'Paste the token here';
+  String get wizardCheckToken =>
+      isFa ? 'بررسی توکن و نمایش حساب‌ها' : 'Check token & list accounts';
+  String get wizardMakeToken =>
+      isFa ? 'ساخت توکن در کلادفلر' : 'Create a token at Cloudflare';
+  String get wizardTokenHelp => isFa
+      ? 'توکن فقط در حافظهٔ امن گوشی می‌ماند و هرگز در کد، گزارش یا گیت نمی‌رود. برای حذف، «حذف ورکر» را بزنید.'
+      : 'The token stays only in the phone’s secure storage and never goes into code, logs or git. Use “Remove Worker” to delete it.';
+  String get wizardCheckingToken =>
+      isFa ? 'در حال بررسی توکن…' : 'Checking the token…';
+  String get wizardAccount => isFa ? 'حساب کلادفلر' : 'Cloudflare account';
+  String get wizardFallback =>
+      isFa ? 'سایت جایگزین (اختیاری)' : 'Fallback site (optional)';
+  String get wizardFallbackHint =>
+      isFa ? 'مثلاً example.com' : 'e.g. example.com';
+  String get wizardProxyIps =>
+      isFa ? 'آی‌پی‌های پروکسی (اختیاری)' : 'Proxy IPs (optional)';
+  String get wizardProxyIpsHint => isFa
+      ? 'هر خط یک host:port — برای هدف‌های میزبانی‌شده روی کلادفلر'
+      : 'One host:port per line — for Cloudflare-hosted targets';
+  String get wizardCustomDomain =>
+      isFa ? 'دامنهٔ اختصاصی (اختیاری)' : 'Custom domain (optional)';
+  String get wizardCustomDomainHint =>
+      isFa ? 'مثلاً vpn.example.com' : 'e.g. vpn.example.com';
+  String get wizardDeploy => isFa ? 'دیپلوی ورکر' : 'Deploy Worker';
+  String get wizardDeploying =>
+      isFa ? 'در حال دیپلوی ورکر…' : 'Deploying the Worker…';
+  String wizardDeployed(String domain) =>
+      isFa ? 'ورکر دیپلوی شد: $domain' : 'Worker deployed: $domain';
+  String get wizardDeployedNote => isFa
+      ? 'ورکر شما آماده است — حالت Worker را از صفحهٔ اتصال انتخاب کنید.'
+      : 'Your Worker is ready — pick Worker mode on the Connect page.';
+  String get wizardRemoveWorker =>
+      isFa ? 'حذف ورکر (توکن و UUID هم پاک می‌شود)' : 'Remove Worker (also wipes the token and UUID)';
+  String get wizardRegisteringWarp =>
+      isFa ? 'در حال ثبت حساب WARP…' : 'Registering a WARP account…';
+  String get wizardRegisterWarp =>
+      isFa ? 'ثبت حساب WARP' : 'Register a WARP account';
+  String get wizardReRegisterWarp =>
+      isFa ? 'ثبت دوبارهٔ حساب WARP' : 'Re-register the WARP account';
+  String get wizardWarpDone =>
+      isFa ? 'حساب WARP ثبت شد' : 'WARP account registered';
+  String get wizardWarpHelp => isFa
+      ? 'کلیدها روی همین دستگاه ساخته می‌شوند؛ کلید خصوصی هرگز از گوشی خارج نمی‌شود و فقط در حافظهٔ امن می‌ماند.'
+      : 'Keys are generated on this device; the private key never leaves the phone and stays only in secure storage.';
+
+  // ── chain proxies ──────────────────────────────────────────────────────
+  String get chainTitle => isFa ? 'پروکسی‌های زنجیره‌ای' : 'Chain proxies';
+  String get chainHelp => isFa
+      ? 'لینک پروکسی‌هایی که خودتان وارد می‌کنید، به‌عنوان خروجی اتصال Xray استفاده می‌شوند. برنامه هیچ پروکسی آماده‌ای ندارد.'
+      : 'Proxy links you enter yourself, used as the exit of an Xray connection. The app ships no proxy.';
+  String get chainUdpNote => isFa
+      ? 'پروکسی‌های UDP (وایرگارد / Hysteria2) فقط روی WARP سوار می‌شوند؛ ورکر فقط TCP رله می‌کند و Serverless اصلاً زنجیره ندارد.'
+      : 'UDP proxies (WireGuard / Hysteria2) ride on WARP only; the Worker relays TCP only and Serverless has no chain at all.';
+  String get chainHint => isFa
+      ? 'لینک را بچسبانید: vless:// ،vmess:// ،trojan:// ،ss:// ،socks:// ،http:// ،wireguard:// ،hysteria2:// یا فایل کانفیگ وایرگارد'
+      : 'Paste a link: vless://, vmess://, trojan://, ss://, socks://, http://, wireguard://, hysteria2://, or a WireGuard config file';
+  String get chainAdd => isFa ? 'افزودن' : 'Add';
+  String get chainPaste => isFa ? 'چسباندن' : 'Paste';
+  String chainAdded(int n) =>
+      isFa ? '$n پروکسی اضافه شد' : '$n prox${n == 1 ? 'y' : 'ies'} added';
+  String get chainInvalid =>
+      isFa ? 'لینک پشتیبانی نمی‌شود' : 'Link not supported';
+  String get chainEmpty =>
+      isFa ? 'هنوز پروکسی‌ای اضافه نشده است.' : 'No proxy added yet.';
+  String get chainUdpOnly =>
+      isFa ? 'فقط UDP — فقط روی WARP' : 'UDP only — WARP only';
+  String get chainUseAsExit =>
+      isFa ? 'استفاده به‌عنوان خروجی' : 'Use as exit';
 }
 

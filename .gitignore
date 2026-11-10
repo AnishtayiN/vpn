@@ -26,6 +26,8 @@ release/
 key.properties
 # iOS is generated from overlays/ios + scripts/ios (like the other platforms).
 /ios/
+# Android is generated from overlays/android + scripts/apply_overlays.py.
+/android/
 *.ipa
 *.xcarchive/
 *.dSYM/
@@ -35,3 +37,5 @@ key.properties
 native/ios-core/target/
 .wrangler/
 
+
+xray/.bin/

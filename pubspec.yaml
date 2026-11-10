@@ -10,7 +10,9 @@ dependencies:
   flutter:
     sdk: flutter
   crypto: ^3.0.6
+  flutter_secure_storage: ^9.2.4
   http: ^1.2.2
+  http_parser: ^4.1.2
   package_info_plus: ^8.1.2
   path: ^1.9.0
   path_provider: ^2.1.5
@@ -28,3 +30,6 @@ flutter:
     - assets/branding/icon.png
     - assets/legal/Aether-AGPL-3.0.txt
     - assets/legal/Hev-MIT.txt
+    # Xray Worker script, deployed by the setup wizard to the user's own
+    # Cloudflare account (see lib/services/cloudflare_api.dart).
+    - worker/worker.js

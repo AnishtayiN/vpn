@@ -1,0 +1,54 @@
+# Builds ONLY the Xray-core .aar (Android) so the Go+NDK+gomobile step can
+# be proven on its own. It does NOT touch the release flow: release.yml keeps
+# building Aether exactly as before, and no APK/AAB is produced here.
+# Once this workflow is green, fold its steps into release.yml as described
+# in docs/xray-release-notes.md.
+name: Build Xray core (.aar)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.27"
+  JAVA_VERSION: "17"
+
+jobs:
+  xray-aar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: ''
+      - name: Install NDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "ndk;27.0.12077973"
+          echo "ANDROID_HOME=${ANDROID_SDK_ROOT}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/27.0.12077973" >> "$GITHUB_ENV"
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: xray/go.mod
+      - name: Verify Xray module checksums
+        run: cd xray && go mod verify
+      - name: Build Xray core (.aar)
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        run: |
+          bash scripts/build_xray.sh
+          test -s android/app/libs/xray.aar
+          ls -la android/app/libs/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xray-aar
+          path: android/app/libs/xray.aar
