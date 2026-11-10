@@ -70,6 +70,32 @@ def _ensure_extra(ctx: str, needle: str, extra: str) -> str:
     return ctx[:pos] + "\n" + extra + ctx[pos:]
 
 
+def _ensure_xray_aar_dependency(text: str, is_kts: bool) -> str:
+    """Declare the locally built Xray .aar as a Gradle dependency.
+
+    scripts/build_xray.sh builds the .aar into android/app/libs/ before
+    `flutter build apk`, but Gradle only puts it on the compile classpath
+    if it is declared here. Without this line the Kotlin code in
+    XrayCoreManager.kt fails with `Unresolved reference: xray` (and
+    Controller/Xray/trafficUp/trafficDown/start) even though the .aar
+    file exists on disk — that is exactly what killed release runs
+    42914265748 and 42916241006. Idempotent: a second run leaves the
+    file unchanged. The Flutter 3.27.4 scaffold has no dependencies
+    block at all, so one is appended when missing.
+    """
+    if "libs/xray.aar" in text:
+        return text
+    if is_kts:
+        line = '    implementation(files("libs/xray.aar"))'
+    else:
+        line = '    implementation files("libs/xray.aar")'
+    block = re.search(r"dependencies\s*\{", text)
+    if block is not None:
+        pos = block.end()
+        return text[:pos] + "\n" + line + text[pos:]
+    return text.rstrip("\n") + "\n\ndependencies {\n" + line + "\n}\n"
+
+
 def patch_android_gradle() -> None:
     gradle = ROOT / "android" / "app" / "build.gradle.kts"
     groovy = ROOT / "android" / "app" / "build.gradle"
@@ -227,6 +253,13 @@ def patch_android_gradle() -> None:
                     1,
                 )
             text = replaced
+
+    # Xray core: the .aar built by scripts/build_xray.sh must be declared
+    # as a dependency, or Gradle never puts it on the compile classpath
+    # and XrayCoreManager.kt fails with Unresolved reference: xray.
+    # (The .aar is built after this script runs, but Gradle only resolves
+    # dependencies at build time, so declaring it here is sufficient.)
+    text = _ensure_xray_aar_dependency(text, path.suffix == ".kts")
 
     path.write_text(text, encoding="utf-8")
     print("patched", path.relative_to(ROOT))
