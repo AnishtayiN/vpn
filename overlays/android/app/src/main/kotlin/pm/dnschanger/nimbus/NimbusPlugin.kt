@@ -126,6 +126,21 @@ object NimbusPlugin {
                     }
                     result.success(null)
                 }
+                // Xray engine (Android only): the Dart side talks to the
+                // xray.aar core through XrayCoreManager, on this same engine
+                // channel — never through the Aether "start" path above, so
+                // the two engines can never run at the same time by accident.
+                "startXray" -> {
+                    val args = call.arguments as? Map<*, *> ?: emptyMap<String, Any>()
+                    val config = "${args["config"] ?: ""}"
+                    val mode = "${args["mode"] ?: "vpn"}"
+                    XrayCoreManager.start(activity, config, mode, result)
+                }
+                "stopXray" -> {
+                    XrayCoreManager.stop(activity)
+                    result.success(null)
+                }
+                "xrayStatus" -> result.success(XrayCoreManager.status())
                 else -> result.notImplemented()
             }
         }

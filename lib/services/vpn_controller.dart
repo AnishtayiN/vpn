@@ -16,10 +16,13 @@ import 'license_service.dart';
 import 'exit_pin.dart';
 import 'ios_policy.dart';
 import 'platform_engine.dart';
+import 'secure_store.dart';
 import 'socks_probe.dart';
 import 'speed.dart';
 import 'update_service.dart';
+import 'warp.dart';
 import 'windows_proxy.dart';
+import 'xray_engine.dart';
 
 /// A gateway to redial: the peer address the core should use plus the protocol
 /// that produced it. A named shape (rather than an inline record) so that
@@ -32,6 +35,13 @@ class VpnController extends ChangeNotifier {
 
   final engine = PlatformEngine();
   final updates = UpdateService();
+
+  /// Second engine (Android only). Aether keeps working unchanged; Xray is
+  /// only started when [VpnSettings.xrayMode] is not [XrayMode.off].
+  final xray = XrayEngine();
+
+  /// True while an Xray mode (not Aether) is the active tunnel.
+  bool get xrayActive => xray.isRunning;
 
   VpnSettings settings = VpnSettings();
   EngineSnapshot snapshot = const EngineSnapshot();
@@ -93,6 +103,17 @@ class VpnController extends ChangeNotifier {
   /// one-tap "connect with the Iran IP" answer.
   bool get exitRuleEnforced =>
       !settings.exitRulePaused && settings.exitFilter != ExitFilter.off;
+
+  /// True when the connection is a standalone Psiphon-only or Tor-only mode
+  /// (plain Psiphon/Tor, no WARP underneath).
+  bool get standaloneHopActive => settings.isStandaloneHop;
+
+  /// True when a standalone mode is selected but the bundled core is not a
+  /// version in which Psiphon/Tor are verified to exist (2.3.0 only — see
+  /// CoreLaunch.standaloneHopVerified). The UI shows the warning; the mode
+  /// stays selectable so it can be tested on a real device.
+  bool get standaloneHopUnverified =>
+      standaloneHopActive && !CoreLaunch.standaloneHopVerified;
 
   /// True while the user's rule is remembered but deliberately not enforced.
   bool get exitRulePaused => settings.exitRulePaused;
@@ -449,6 +470,17 @@ class VpnController extends ChangeNotifier {
         snapshot.phase == EnginePhase.error ||
         snapshot.phase == EnginePhase.disconnecting) {
       await disconnect();
+      return;
+    }
+    // Xray modes (Android only) take their own path: the config is built
+    // from secure storage + settings and handed to the native Xray core.
+    // Aether's ladder, exit search and watchdog do not apply there.
+    if (settings.xrayMode != XrayMode.off && XrayEngine.supported) {
+      if (xrayActive) {
+        await disconnectXray();
+      } else {
+        await connectXray();
+      }
       return;
     }
     // Any mid-flight state cancels the in-flight attempt so the orb never
@@ -1018,6 +1050,146 @@ class VpnController extends ChangeNotifier {
     await connect();
   }
 
+  /// Brings an Xray tunnel up: build the config (secrets from secure
+  /// storage, never from code), hand it to the native Xray core, wait for
+  /// the core to report running, then prove the SOCKS data plane before
+  /// calling it connected. The exit-country search does not apply here:
+  /// Worker/WARP exits are Cloudflare's, not a scanned gateway.
+  Future<void> connectXray() async {
+    if (busy) return;
+    XrayEngine.requireSupported();
+    if (await _releaseGate()) return;
+    _wantUp = true;
+    _userDisconnect = false;
+    busy = true;
+    _set(snapshot.copyWith(
+      phase: EnginePhase.preparing,
+      message: s.preparing,
+      clearExit: true,
+    ));
+    try {
+      // One tunnel at a time: Aether must be down before Xray starts.
+      await engine.stop();
+      final uuid = await SecureStore.readWorkerUuid();
+      WarpAccount? warp;
+      final warpJson = await SecureStore.readWarpAccount();
+      if (warpJson != null && warpJson.isNotEmpty) {
+        try {
+          warp = WarpAccount.fromJson(
+            jsonDecode(warpJson) as Map<String, dynamic>,
+          );
+        } catch (_) {
+          warp = null;
+        }
+      }
+      final config = XrayConfigBuilder.buildJson(
+        settings,
+        workerUuid: uuid,
+        warpAccount: warp,
+      );
+      if (settings.mode == ConnectionMode.vpn &&
+          (Platform.isAndroid || Platform.isIOS)) {
+        final ok = await engine.prepareVpn();
+        if (!ok) {
+          _set(snapshot.copyWith(
+            phase: EnginePhase.error,
+            message: s.needVpnPerm,
+          ));
+          return;
+        }
+      }
+      await xray.start(
+        config,
+        vpnMode: settings.mode == ConnectionMode.vpn,
+      );
+      // Wait for the native core to report running (generous budget: the
+      // first WARP handshake on a filtered network is the slow part).
+      final deadline = DateTime.now().add(const Duration(seconds: 120));
+      var up = false;
+      while (DateTime.now().isBefore(deadline) && _wantUp) {
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        final st = await xray.status();
+        if (st['running'] == true) {
+          up = true;
+          break;
+        }
+      }
+      if (!up || !_wantUp) {
+        await xray.stop();
+        _set(snapshot.copyWith(
+          phase: EnginePhase.error,
+          message: up ? s.disconnecting : 'Xray timed out',
+        ));
+        return;
+      }
+      // Prove the data plane through the same SOCKS listener the dashboard
+      // uses — a listener that carries nothing is not a connection.
+      try {
+        await SocksProbe.prove(port: settings.socksPort);
+      } catch (e) {
+        await xray.stop();
+        _set(snapshot.copyWith(
+          phase: EnginePhase.error,
+          message: 'Xray tunnel carries no traffic: $e',
+        ));
+        return;
+      }
+      _watchdogTries = 0;
+      _lastHealthy = DateTime.now();
+      _set(snapshot.copyWith(
+        phase: EnginePhase.connected,
+        protocol: 'xray-${settings.xrayMode.name}',
+        message: s.active,
+        connectedAt: DateTime.now(),
+      ));
+      rate.reset();
+      _log('xray connected: ${settings.xrayMode.name}');
+      _statsTimer?.cancel();
+      _startStats();
+      _clock?.cancel();
+      _clock = Timer.periodic(const Duration(seconds: 1), (_) {
+        notifyListeners();
+      });
+    } on StateError catch (e) {
+      // Missing Worker / WARP account / bad config: an honest error, not a
+      // spinner. The wizard is where it gets fixed.
+      _log('xray: $e');
+      _set(snapshot.copyWith(
+        phase: EnginePhase.error,
+        message: e.message,
+      ));
+    } catch (e) {
+      _log('xray: $e');
+      await xray.stop();
+      _set(snapshot.copyWith(
+        phase: EnginePhase.error,
+        message: '$e',
+      ));
+    } finally {
+      busy = false;
+      notifyListeners();
+    }
+  }
+
+  /// Tears an Xray tunnel down.
+  Future<void> disconnectXray() async {
+    _wantUp = false;
+    _userDisconnect = true;
+    _watchdogTimer?.cancel();
+    _statsTimer?.cancel();
+    _clock?.cancel();
+    rate.reset();
+    busy = true;
+    _set(snapshot.copyWith(
+        phase: EnginePhase.disconnecting, message: s.disconnecting));
+    try {
+      await xray.stop();
+    } finally {
+      busy = false;
+      _set(const EngineSnapshot());
+    }
+  }
+
   Future<void> disconnect() async {
     _wantUp = false;
     _userDisconnect = true;
@@ -1037,6 +1209,8 @@ class VpnController extends ChangeNotifier {
     _set(snapshot.copyWith(
         phase: EnginePhase.disconnecting, message: s.disconnecting));
     try {
+      // The orb's disconnect path must also stop an Xray tunnel.
+      if (xray.isRunning) await xray.stop();
       await engine.stop();
     } finally {
       busy = false;

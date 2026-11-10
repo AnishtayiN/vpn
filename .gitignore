@@ -35,3 +35,5 @@ key.properties
 native/ios-core/target/
 .wrangler/
 
+
+xray/.bin/

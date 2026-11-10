@@ -183,6 +183,62 @@ void main() {
       expect(e.containsKey('AETHER_PSIPHON'), isFalse);
       expect(e.containsKey('AETHER_TOR'), isFalse);
     });
+
+    test('standalone psiphon-only sends only, with its region', () {
+      final e = env(VpnSettings(
+        chain: ChainMode.psiphonOnly,
+        psiphonRegion: 'de',
+      ));
+      expect(e['AETHER_PSIPHON'], 'only');
+      expect(e['AETHER_PSIPHON_REGION'], 'DE');
+      expect(e.containsKey('AETHER_TOR'), isFalse);
+    });
+
+    test('standalone tor-only sends only, with its country', () {
+      final e = env(VpnSettings(
+        chain: ChainMode.torOnly,
+        torCountry: 'IR',
+      ));
+      expect(e['AETHER_TOR'], 'only');
+      expect(e['AETHER_TOR_COUNTRY'], 'ir');
+      expect(e.containsKey('AETHER_PSIPHON'), isFalse);
+    });
+
+    test('standalone modes are recognised, chain modes are not', () {
+      expect(CoreLaunch.isStandalone(ChainMode.psiphonOnly), isTrue);
+      expect(CoreLaunch.isStandalone(ChainMode.torOnly), isTrue);
+      expect(CoreLaunch.isStandalone(ChainMode.psiphon), isFalse);
+      expect(CoreLaunch.isStandalone(ChainMode.torReverse), isFalse);
+      expect(CoreLaunch.isStandalone(ChainMode.off), isFalse);
+      expect(VpnSettings(chain: ChainMode.torOnly).isStandaloneHop, isTrue);
+      expect(VpnSettings().isStandaloneHop, isFalse);
+    });
+
+    test('standalone modes are verified on 2.3.0 only, not on the 2.4.0 default', () {
+      // `flutter test` runs without --dart-define, so coreVersion is the
+      // 2.4.0 default here; the legacy build injects 2.3.0 and the same
+      // getter then returns true.
+      expect(CoreLaunch.coreVersion, '2.4.0');
+      expect(CoreLaunch.standaloneHopVerified, isFalse);
+    });
+
+    test('a standalone mode walks a single ladder rung, not five', () {
+      final ladder = CoreLaunch.smartLadder(VpnSettings(
+        protocol: Protocol.smart,
+        chain: ChainMode.psiphonOnly,
+      ));
+      expect(ladder, [Protocol.masque]);
+      final tor = CoreLaunch.smartLadder(VpnSettings(
+        protocol: Protocol.wg,
+        chain: ChainMode.torOnly,
+      ));
+      expect(tor, [Protocol.wg]);
+      // A plain Smart Connect (no standalone hop) still walks the full ladder.
+      expect(
+        CoreLaunch.smartLadder(VpnSettings(protocol: Protocol.smart)).length,
+        5,
+      );
+    });
   });
 
   group('extras', () {

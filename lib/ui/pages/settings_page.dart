@@ -9,6 +9,8 @@ import '../../services/links.dart';
 import '../../services/vpn_controller.dart';
 import '../../theme/voidrau_theme.dart';
 import '../widgets/telegram_button.dart';
+import 'chain_proxies_page.dart';
+import 'setup_wizard.dart';
 
 class SettingsPage extends StatelessWidget {
   const SettingsPage({super.key, required this.controller});
@@ -215,6 +217,50 @@ class SettingsPage extends StatelessWidget {
           ),
         ),
       ];
+
+    // ── Xray engine (Android only) ─────────────────────────────────────
+    // Aether stays the default everywhere; the Xray modes are an opt-in
+    // second engine, so the section is hidden on Windows/iOS entirely.
+    if (Platform.isAndroid) {
+      children.addAll([
+        const SizedBox(height: 24),
+        Text(s.xrayTitle,
+            style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
+        const SizedBox(height: 8),
+        Text(s.xrayHelp,
+            style: const TextStyle(color: VoidrauColors.muted, height: 1.5)),
+        const SizedBox(height: 12),
+        _seg(st.xrayMode.name, {
+          'off': s.xrayOff,
+          'worker': s.xrayWorker,
+          'warp': s.xrayWarp,
+          'serverless': s.xrayServerless,
+        }, (v) {
+          st.xrayMode = XrayMode.values.firstWhere((e) => e.name == v);
+          c.persist();
+        }),
+        const SizedBox(height: 12),
+        FilledButton.icon(
+          onPressed: () => Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => SetupWizardPage(controller: c),
+            ),
+          ),
+          icon: const Icon(Icons.cloud_upload_rounded, size: 18),
+          label: Text(s.xrayTitle),
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: () => Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => ChainProxiesPage(controller: c),
+            ),
+          ),
+          icon: const Icon(Icons.link_rounded, size: 18),
+          label: Text(s.chainTitle),
+        ),
+      ]);
+    }
     return AbsorbPointer(
       absorbing: locked,
       child: ListView(

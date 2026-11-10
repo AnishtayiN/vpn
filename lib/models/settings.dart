@@ -66,6 +66,13 @@ enum PerfProfile {
 /// endpoints answer but the handshake is being probed, "the tunnel through
 /// Psiphon"/"through Tor" is the difference between a working connection and a
 /// dead one — and it is a checkbox here instead of a second app.
+///
+/// The `*Only` values are also the standalone top-level modes: plain Psiphon
+/// (or plain Tor) on the same proxy port, with no WARP at all. Whether the
+/// 2.4.0 core still ships them is NOT verified in this repository — the only
+/// version-scoped statement here is the 2.3.0 one above, so the standalone-hop
+/// check in core_args.dart treats the standalone modes as verified on 2.3.0
+/// only, and the UI must say so instead of claiming they work on 2.4.0.
 enum ChainMode {
   /// No second hop.
   off,
@@ -87,6 +94,65 @@ enum ChainMode {
 
   /// Plain Tor on the same proxy port.
   torOnly,
+}
+
+/// Second engine beside Aether: Xray-core (Android only for now).
+///
+/// `off` means "Aether as today" — every Xray mode is opt-in, separately
+/// disableable, and exactly one tunnel runs at a time. MASQUE already lives
+/// in Aether, so Xray does not re-implement it here.
+enum XrayMode {
+  /// Aether (default, unchanged behaviour).
+  off,
+
+  /// VLESS over WebSocket + TLS through the user's own Cloudflare Worker.
+  worker,
+
+  /// WireGuard to Cloudflare WARP (own registered account, no Worker).
+  warp,
+
+  /// Direct connections with TLS fragmentation + UDP noise only.
+  /// No MITM, no domain fronting, no CA install — deliberately not implemented.
+  serverless,
+}
+
+/// Variant inside an Xray mode. Worker: normal / fragment. WARP: normal /
+/// obfuscated (UDP noise over the WireGuard transport).
+enum XrayVariant { normal, fragment, obfuscated }
+
+/// One user-entered chain proxy: a share link the user pasted, nothing
+/// bundled with the app. The link itself may carry credentials, so it is
+/// stored with the settings the user entered — never shipped, never logged.
+class ChainProxy {
+  const ChainProxy({required this.id, required this.name, required this.link});
+
+  final String id;
+  final String name;
+
+  /// The share link as entered (vless://, vmess://, trojan://, ss://,
+  /// socks://, http://, wireguard://, hysteria2://) or a WireGuard config
+  /// converted to a wireguard:// link.
+  final String link;
+
+  Map<String, dynamic> toJson() => {'id': id, 'name': name, 'link': link};
+
+  /// True when the link is a UDP-only proxy (WireGuard / Hysteria2): it can
+  /// only ride on WARP, never through the TCP-only Worker relay.
+  static bool isUdpLink(String link) {
+    final scheme = link.trim().split('://').first.toLowerCase();
+    return scheme == 'wireguard' ||
+        scheme == 'wg' ||
+        scheme == 'hysteria2' ||
+        scheme == 'hy2';
+  }
+
+  static ChainProxy? parse(Object? v) {
+    if (v is! Map) return null;
+    final id = '${v['id'] ?? ''}';
+    final link = '${v['link'] ?? ''}';
+    if (id.isEmpty || link.isEmpty) return null;
+    return ChainProxy(id: id, name: '${v['name'] ?? id}', link: link);
+  }
 }
 
 class VpnSettings {
@@ -146,6 +212,21 @@ class VpnSettings {
     this.tcpKeepaliveSecs = 60,
     this.halfCloseSecs = 30,
     this.logLevel = 'info',
+    // ── Xray engine (Android only; off = Aether as today) ───────────────
+    this.xrayMode = XrayMode.off,
+    this.xrayVariant = XrayVariant.normal,
+    this.workerDomain = '',
+    this.workerScriptName = 'voidrau',
+    this.workerAccountId = '',
+    this.workerDeployed = false,
+    this.workerFallback = '',
+    this.workerProxyIps = const [],
+    this.warpRegistered = false,
+    this.warpEndpoints = const [],
+    this.serverlessFragment = true,
+    this.serverlessNoise = true,
+    this.chainProxies = const [],
+    this.chainExitId = '',
   });
 
   ConnectionMode mode;
@@ -232,6 +313,12 @@ class VpnSettings {
   /// Second hop carrying the tunnel (Psiphon / Tor), see [ChainMode].
   ChainMode chain;
 
+  /// True when the connection is a standalone Psiphon-only or Tor-only mode
+  /// (plain Psiphon/Tor on the proxy port, no WARP) rather than a protocol
+  /// with a second hop. See [ChainMode] for the 2.4.0 verification caveat.
+  bool get isStandaloneHop =>
+      chain == ChainMode.psiphonOnly || chain == ChainMode.torOnly;
+
   /// Country the Psiphon exit should be in, e.g. `DE`. Empty = any.
   String psiphonRegion;
 
@@ -272,6 +359,74 @@ class VpnSettings {
   int halfCloseSecs;
 
   String logLevel;
+
+  // ── Xray engine (Android only) ─────────────────────────────────────────
+  //
+  // Secrets live OUTSIDE this object: the Cloudflare API token, the Worker
+  // VLESS UUID and the WARP private key are kept in secure storage
+  // (see SecureStore) and never in SharedPreferences, logs or git.
+  // What is stored here is only what the UI needs to show: domains, ids,
+  // flags and the user's own chain-proxy links.
+
+  /// Which engine a connect takes. [XrayMode.off] = Aether, unchanged.
+  XrayMode xrayMode;
+
+  /// Variant of the chosen Xray mode (fragment / obfuscated).
+  XrayVariant xrayVariant;
+
+  /// The user's own deployed Worker host, e.g. `voidrau-abc.workers.dev`
+  /// or a custom domain attached to it. Empty = not deployed yet.
+  String workerDomain;
+
+  /// Worker script name on the user's Cloudflare account.
+  String workerScriptName;
+
+  /// Cloudflare account id the Worker was deployed to (not a secret).
+  String workerAccountId;
+
+  /// True once a deploy has succeeded (the wizard sets this).
+  bool workerDeployed;
+
+  /// Optional fallback site the Worker serves for plain HTTP requests.
+  String workerFallback;
+
+  /// Optional proxy IPs the Worker retries through for Cloudflare-hosted
+  /// targets. Entered by the user; empty is valid.
+  List<String> workerProxyIps;
+
+  /// True once a WARP account has been registered on this device.
+  bool warpRegistered;
+
+  /// WARP endpoints offered at registration (host:port list).
+  List<String> warpEndpoints;
+
+  /// Serverless: split the TLS ClientHello into fragments.
+  bool serverlessFragment;
+
+  /// Serverless: send UDP noise packets (QUIC-shaped).
+  bool serverlessNoise;
+
+  /// Chain proxies the user entered (share links), in list order.
+  List<ChainProxy> chainProxies;
+
+  /// Id of the chain proxy used as the exit, or '' for "first usable".
+  String chainExitId;
+
+  /// The chain proxy chosen as the exit for [mode], or the first one the
+  /// mode can carry. UDP-only proxies (WireGuard / Hysteria2) can only ride
+  /// on WARP — the Worker relays TCP only. Serverless is direct by
+  /// definition and never takes a chain exit, so it always returns null.
+  ChainProxy? chainExitFor(XrayMode mode) {
+    if (mode == XrayMode.serverless) return null;
+    final usable = chainProxies
+        .where((c) => !ChainProxy.isUdpLink(c.link) || mode == XrayMode.warp)
+        .toList();
+    if (usable.isEmpty) return null;
+    for (final c in usable) {
+      if (c.id == chainExitId) return c;
+    }
+    return usable.first;
+  }
 
   /// What the core is actually given for `AETHER_PERF_PROFILE`, or null when
   /// the core should detect the machine itself.
@@ -418,6 +573,20 @@ class VpnSettings {
         'tcpKeepaliveSecs': tcpKeepaliveSecs,
         'halfCloseSecs': halfCloseSecs,
         'logLevel': logLevel,
+        'xrayMode': xrayMode.name,
+        'xrayVariant': xrayVariant.name,
+        'workerDomain': workerDomain,
+        'workerScriptName': workerScriptName,
+        'workerAccountId': workerAccountId,
+        'workerDeployed': workerDeployed,
+        'workerFallback': workerFallback,
+        'workerProxyIps': workerProxyIps,
+        'warpRegistered': warpRegistered,
+        'warpEndpoints': warpEndpoints,
+        'serverlessFragment': serverlessFragment,
+        'serverlessNoise': serverlessNoise,
+        'chainProxies': chainProxies.map((c) => c.toJson()).toList(),
+        'chainExitId': chainExitId,
       };
 
   /// Normalises a stored country list: upper-case ISO-3166 alpha-2 codes only,
@@ -518,6 +687,22 @@ class VpnSettings {
       tcpKeepaliveSecs: num('tcpKeepaliveSecs', 60),
       halfCloseSecs: num('halfCloseSecs', 30),
       logLevel: json['logLevel']?.toString() ?? 'info',
+      xrayMode: parse(XrayMode.values, 'xrayMode', XrayMode.off),
+      xrayVariant: parse(XrayVariant.values, 'xrayVariant', XrayVariant.normal),
+      workerDomain: json['workerDomain']?.toString() ?? '',
+      workerScriptName: json['workerScriptName']?.toString() ?? 'voidrau',
+      workerAccountId: json['workerAccountId']?.toString() ?? '',
+      workerDeployed: json['workerDeployed'] == true,
+      workerFallback: json['workerFallback']?.toString() ?? '',
+      workerProxyIps: lines(json['workerProxyIps']),
+      warpRegistered: json['warpRegistered'] == true,
+      warpEndpoints: lines(json['warpEndpoints']),
+      serverlessFragment: json['serverlessFragment'] != false,
+      serverlessNoise: json['serverlessNoise'] != false,
+      chainProxies: (json['chainProxies'] is List
+          ? (json['chainProxies'] as List).map(ChainProxy.parse).whereType<ChainProxy>().toList()
+          : const <ChainProxy>[]),
+      chainExitId: json['chainExitId']?.toString() ?? '',
     );
   }
 
