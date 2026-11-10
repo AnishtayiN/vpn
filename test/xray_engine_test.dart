@@ -69,7 +69,9 @@ void main() {
       );
       expect(
         () => XrayConfigBuilder.build(
-          VpnSettings(xrayMode: XrayMode.worker, workerDeployed: true,
+          VpnSettings(
+              xrayMode: XrayMode.worker,
+              workerDeployed: true,
               workerDomain: 'voidrau-abc.workers.dev'),
         ),
         throwsStateError, // UUID missing
@@ -116,8 +118,8 @@ void main() {
       final settings = out['settings'] as Map;
       expect(settings['secretKey'], 'cHJpdmF0ZWtleQ==');
       expect(settings['reserved'], [1, 2, 3]);
-      expect((settings['peers'] as List).first['endpoint'],
-          '162.159.192.4:2408');
+      expect(
+          (settings['peers'] as List).first['endpoint'], '162.159.192.4:2408');
     });
 
     test('obfuscated WARP adds the UDP-noise finalmask', () {
@@ -158,7 +160,7 @@ void main() {
       final cfg = XrayConfigBuilder.build(
         VpnSettings(
           xrayMode: XrayMode.serverless,
-          chainProxies: const [
+          xrayChainProxies: const [
             ChainProxy(id: 'a', name: 'x', link: _vlessLink),
           ],
         ),
@@ -210,7 +212,7 @@ void main() {
           xrayMode: XrayMode.worker,
           workerDeployed: true,
           workerDomain: 'voidrau-abc.workers.dev',
-          chainProxies: const [
+          xrayChainProxies: const [
             ChainProxy(id: 'a', name: 'x', link: _vlessLink),
           ],
         ),
@@ -267,7 +269,8 @@ void main() {
       expect(decoded['fb'], 'https://example.com');
     });
 
-    test('token normalisation strips Bearer and quotes, rejects the global key', () {
+    test('token normalisation strips Bearer and quotes, rejects the global key',
+        () {
       expect(
         CloudflareApi.normalizeToken(
           'curl -H "Authorization: Bearer abcDEF1234567890abcdefghij1234567890"',
@@ -297,30 +300,30 @@ void main() {
         xrayVariant: XrayVariant.obfuscated,
         warpRegistered: true,
         warpEndpoints: const ['162.159.192.4:2408'],
-        chainProxies: const [
+        xrayChainProxies: const [
           ChainProxy(id: 'a', name: 'x', link: _vlessLink),
         ],
-        chainExitId: 'a',
+        xrayChainExitId: 'a',
       );
       final loaded = VpnSettings.fromJson(st.toJson());
       expect(loaded.xrayMode, XrayMode.warp);
       expect(loaded.xrayVariant, XrayVariant.obfuscated);
       expect(loaded.warpRegistered, isTrue);
       expect(loaded.warpEndpoints, ['162.159.192.4:2408']);
-      expect(loaded.chainProxies.length, 1);
-      expect(loaded.chainProxies.first.link, _vlessLink);
-      expect(loaded.chainExitId, 'a');
+      expect(loaded.xrayChainProxies.length, 1);
+      expect(loaded.xrayChainProxies.first.link, _vlessLink);
+      expect(loaded.xrayChainExitId, 'a');
     });
 
     test('chain exit picks the chosen proxy, or the first usable one', () {
       final st = VpnSettings(
         xrayMode: XrayMode.worker,
-        chainProxies: const [
+        xrayChainProxies: const [
           ChainProxy(id: 'a', name: 'x', link: _vlessLink),
         ],
       );
-      expect(st.chainExitFor(XrayMode.worker)?.id, 'a');
-      expect(st.chainExitFor(XrayMode.serverless), isNull);
+      expect(st.xrayChainExitFor(XrayMode.worker)?.id, 'a');
+      expect(st.xrayChainExitFor(XrayMode.serverless), isNull);
     });
   });
 }

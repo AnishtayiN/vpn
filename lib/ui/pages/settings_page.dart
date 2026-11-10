@@ -250,15 +250,18 @@ class SettingsPage extends StatelessWidget {
           label: Text(s.xrayTitle),
         ),
         const SizedBox(height: 8),
-        OutlinedButton.icon(
-          onPressed: () => Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (_) => ChainProxiesPage(controller: c),
+        // Chain proxies only exist for Xray: hide the entry while Aether
+        // is the selected engine — the list would silently do nothing.
+        if (st.xrayMode != XrayMode.off)
+          OutlinedButton.icon(
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => ChainProxiesPage(controller: c),
+              ),
             ),
+            icon: const Icon(Icons.link_rounded, size: 18),
+            label: Text(s.chainTitle),
           ),
-          icon: const Icon(Icons.link_rounded, size: 18),
-          label: Text(s.chainTitle),
-        ),
       ]);
     }
     return AbsorbPointer(

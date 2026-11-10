@@ -13,6 +13,9 @@ void main() {
       privateDns: false,
       autoDownload: true,
       autoUpdate: true,
+      xrayMode: XrayMode.warp,
+      secondHop: SecondHop.tor,
+      standaloneMode: StandaloneMode.torOnly,
     );
     IosPolicy.normalize(settings);
     expect(settings.mode, ConnectionMode.vpn);
@@ -22,6 +25,11 @@ void main() {
     expect(settings.privateDns, isTrue);
     expect(settings.autoDownload, isFalse);
     expect(settings.autoUpdate, isFalse);
+    // Xray and the Psiphon/Tor hop modes do not exist on iOS: a stale
+    // value stored on another device must not survive the import.
+    expect(settings.xrayMode, XrayMode.off);
+    expect(settings.secondHop, SecondHop.off);
+    expect(settings.standaloneMode, StandaloneMode.standard);
   });
 
   test('iOS pins the performance profile the extension can afford', () {

@@ -39,7 +39,7 @@ class _ChainProxiesPageState extends State<ChainProxiesPage> {
     try {
       final added = parseChainProxies(text);
       final st = c.settings;
-      st.chainProxies = [...st.chainProxies, ...added];
+      st.xrayChainProxies = [...st.xrayChainProxies, ...added];
       await c.persist();
       _input.clear();
       if (mounted) {
@@ -58,9 +58,9 @@ class _ChainProxiesPageState extends State<ChainProxiesPage> {
 
   Future<void> _remove(ChainProxy proxy) async {
     final st = c.settings;
-    st.chainProxies =
-        st.chainProxies.where((p) => p.id != proxy.id).toList();
-    if (st.chainExitId == proxy.id) st.chainExitId = '';
+    st.xrayChainProxies =
+        st.xrayChainProxies.where((p) => p.id != proxy.id).toList();
+    if (st.xrayChainExitId == proxy.id) st.xrayChainExitId = '';
     await c.persist();
   }
 
@@ -78,8 +78,8 @@ class _ChainProxiesPageState extends State<ChainProxiesPage> {
             padding: const EdgeInsets.fromLTRB(20, 14, 20, 40),
             children: [
               Text(s.chainHelp,
-                  style: const TextStyle(
-                      color: VoidrauColors.muted, height: 1.5)),
+                  style:
+                      const TextStyle(color: VoidrauColors.muted, height: 1.5)),
               const SizedBox(height: 6),
               Text(s.chainUdpNote,
                   style: const TextStyle(
@@ -117,10 +117,10 @@ class _ChainProxiesPageState extends State<ChainProxiesPage> {
                 ],
               ),
               const SizedBox(height: 18),
-              if (st.chainProxies.isEmpty)
+              if (st.xrayChainProxies.isEmpty)
                 Text(s.chainEmpty,
                     style: const TextStyle(color: VoidrauColors.muted)),
-              for (final proxy in st.chainProxies)
+              for (final proxy in st.xrayChainProxies)
                 _tile(context, s, st, proxy, mode),
             ],
           ),
@@ -137,13 +137,12 @@ class _ChainProxiesPageState extends State<ChainProxiesPage> {
     XrayMode mode,
   ) {
     final info = ChainInfo.of(proxy.link);
-    final usable = info != null && info.canChainOver(mode == XrayMode.off
-        ? XrayMode.worker
-        : mode);
-    final isExit = st.chainExitId == proxy.id ||
-        (st.chainExitId.isEmpty &&
-            st.chainProxies.isNotEmpty &&
-            st.chainProxies.first == proxy);
+    final usable = info != null &&
+        info.canChainOver(mode == XrayMode.off ? XrayMode.worker : mode);
+    final isExit = st.xrayChainExitId == proxy.id ||
+        (st.xrayChainExitId.isEmpty &&
+            st.xrayChainProxies.isNotEmpty &&
+            st.xrayChainProxies.first == proxy);
     return Card(
       color: VoidrauColors.surface,
       child: ListTile(
@@ -170,7 +169,7 @@ class _ChainProxiesPageState extends State<ChainProxiesPage> {
               ),
               tooltip: s.chainUseAsExit,
               onPressed: () async {
-                st.chainExitId = proxy.id;
+                st.xrayChainExitId = proxy.id;
                 await c.persist();
               },
             ),

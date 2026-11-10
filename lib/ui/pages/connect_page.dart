@@ -64,7 +64,9 @@ class ConnectPage extends StatelessWidget {
             child: OrbButton(
               phase: snap.phase,
               label: label,
-              hint: snap.phase == EnginePhase.disconnected ? s.tapToSecure : title,
+              hint: snap.phase == EnginePhase.disconnected
+                  ? s.tapToSecure
+                  : title,
               mercury: c.settings.orbStyle == OrbStyle.mercury,
               onTap: c.toggle,
             ),
@@ -95,7 +97,8 @@ class ConnectPage extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 10),
-        Text(title, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
+        Text(title,
+            style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
         const SizedBox(height: 6),
         // While the exit-country rule is on, the status line reports the search
         // (which countries have already been rejected, which attempt this is)
@@ -109,7 +112,9 @@ class ConnectPage extends StatelessWidget {
           textAlign: TextAlign.center,
           style: const TextStyle(color: VoidrauColors.muted),
         ),
-        if (!connected)
+        // The exit rule only applies to Aether: while Xray is the selected
+        // engine the badge would describe a rule no tunnel enforces.
+        if (!connected && !c.useXray)
           Padding(
             padding: const EdgeInsets.only(top: 8),
             child: ExitFilterBadge(controller: c),
@@ -119,7 +124,7 @@ class ConnectPage extends StatelessWidget {
         // to run (or is running) without opening Configurations. Tor is
         // labelled the heaviest mode, and on a core where Psiphon/Tor are
         // unverified (2.4.0) the warning is shown, not a promise.
-        if (c.standaloneHopActive)
+        if (c.standaloneHopActive && !c.useXray)
           Padding(
             padding: const EdgeInsets.only(top: 8),
             child: Column(
@@ -133,14 +138,14 @@ class ConnectPage extends StatelessWidget {
                     border: Border.all(color: VoidrauColors.line),
                   ),
                   child: Text(
-                    '${s.standaloneMode}: ${c.settings.chain == ChainMode.psiphonOnly ? s.hopPsiphonOnly : s.hopTorOnly}',
+                    '${s.standaloneMode}: ${c.settings.standaloneMode == StandaloneMode.psiphonOnly ? s.hopPsiphonOnly : s.hopTorOnly}',
                     style: const TextStyle(
                         color: VoidrauColors.cyan,
                         fontWeight: FontWeight.w600,
                         fontSize: 12),
                   ),
                 ),
-                if (c.settings.chain == ChainMode.torOnly)
+                if (c.settings.standaloneMode == StandaloneMode.torOnly)
                   Padding(
                     padding: const EdgeInsets.only(top: 6),
                     child: Text(
@@ -226,7 +231,8 @@ class ConnectPage extends StatelessWidget {
                 Text(
                   s.exitPausedBody,
                   textAlign: TextAlign.center,
-                  style: const TextStyle(color: VoidrauColors.muted, fontSize: 12),
+                  style:
+                      const TextStyle(color: VoidrauColors.muted, fontSize: 12),
                 ),
                 const SizedBox(height: 8),
                 FilledButton.tonalIcon(
@@ -304,9 +310,7 @@ class ConnectPage extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.only(bottom: 20),
           child: Text(
-            connected
-                ? s.freeNote
-                : (snap.isActive ? s.detecting : s.freeNote),
+            connected ? s.freeNote : (snap.isActive ? s.detecting : s.freeNote),
             textAlign: TextAlign.center,
             style: const TextStyle(color: VoidrauColors.muted, fontSize: 13),
           ),
@@ -328,7 +332,8 @@ class ConnectPage extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  const Icon(Icons.system_update_alt, color: VoidrauColors.cyan),
+                  const Icon(Icons.system_update_alt,
+                      color: VoidrauColors.cyan),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
@@ -358,7 +363,8 @@ class ConnectPage extends StatelessWidget {
     return Expanded(
       child: Column(
         children: [
-          Text(k, style: const TextStyle(color: VoidrauColors.muted, fontSize: 12)),
+          Text(k,
+              style: const TextStyle(color: VoidrauColors.muted, fontSize: 12)),
           const SizedBox(height: 4),
           Text(v,
               textAlign: TextAlign.center,

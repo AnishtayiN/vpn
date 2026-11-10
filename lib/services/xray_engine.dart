@@ -117,7 +117,7 @@ class XrayConfigBuilder {
     VpnSettings settings, {
     String? workerUuid,
     WarpAccount? warpAccount,
-    ChainProxy? chain,
+    ChainProxy? exitProxy,
   }) {
     final mode = settings.xrayMode;
     if (mode == XrayMode.off) {
@@ -166,7 +166,7 @@ class XrayConfigBuilder {
 
     // Optional chain exit: the chosen proxy carries the traffic, dialled
     // through the main connection. UDP proxies only ride on WARP.
-    final exit = chain ?? settings.chainExitFor(mode);
+    final exit = exitProxy ?? settings.xrayChainExitFor(mode);
     final hasChain = exit != null && mode != XrayMode.serverless;
     if (hasChain) {
       // The chain outbound must dial *through* the main (`proxy`) outbound,
@@ -195,7 +195,10 @@ class XrayConfigBuilder {
           'listen': '127.0.0.1',
           'port': settings.socksPort,
           'settings': {'udp': true, 'auth': 'noauth'},
-          'sniffing': {'enabled': true, 'destOverride': ['http', 'tls']},
+          'sniffing': {
+            'enabled': true,
+            'destOverride': ['http', 'tls']
+          },
         },
       ],
       'outbounds': [
@@ -385,14 +388,14 @@ class XrayConfigBuilder {
     VpnSettings settings, {
     String? workerUuid,
     WarpAccount? warpAccount,
-    ChainProxy? chain,
+    ChainProxy? exitProxy,
   }) =>
       jsonEncode(
         build(
           settings,
           workerUuid: workerUuid,
           warpAccount: warpAccount,
-          chain: chain,
+          exitProxy: exitProxy,
         ),
       );
 }

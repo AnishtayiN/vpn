@@ -43,6 +43,23 @@ class VpnController extends ChangeNotifier {
   /// True while an Xray mode (not Aether) is the active tunnel.
   bool get xrayActive => xray.isRunning;
 
+  /// Single source of truth for which engine a (re)connect takes: Xray
+  /// whenever a mode is selected *and* the engine exists on this platform
+  /// (Android only), Aether otherwise. Every (re)connect path — [toggle],
+  /// [applyAndReconnect] and the watchdog — routes through [reconnect], so
+  /// a running Xray tunnel can never silently fall back to Aether.
+  /// Pure and unit-testable: [supported] is [XrayEngine.supported] in
+  /// production, injected in tests.
+  static bool useXrayFor(XrayMode mode, {required bool supported}) =>
+      mode != XrayMode.off && supported;
+
+  bool get useXray =>
+      useXrayFor(settings.xrayMode, supported: XrayEngine.supported);
+
+  /// Re-dial on the engine the settings select: Xray when [useXray],
+  /// Aether otherwise.
+  Future<void> reconnect() => useXray ? connectXray() : connect();
+
   VpnSettings settings = VpnSettings();
   EngineSnapshot snapshot = const EngineSnapshot();
   UpdateInfo? update;
@@ -119,8 +136,7 @@ class VpnController extends ChangeNotifier {
   bool get exitRulePaused => settings.exitRulePaused;
 
   /// True when a matching exit country is required before a tunnel is accepted.
-  bool get exitFilterActive =>
-      exitRuleEnforced && _wantUp && !_userDisconnect;
+  bool get exitFilterActive => exitRuleEnforced && _wantUp && !_userDisconnect;
 
   /// Human-readable rule, e.g. "Germany → any country except Iran".
   String get exitFilterLabel {
@@ -182,7 +198,7 @@ class VpnController extends ChangeNotifier {
   Timer? _statsTimer;
   Timer? _clock;
   Timer? _watchdogTimer;
-  // Set while the watchdog (not the user) re-enters connect(): the exit search
+  // Set while the watchdog (not the user) re-enters reconnect(): the exit search
   // must resume with its counter intact or exitMaxTries is never reached.
   bool _watchdogResume = false;
   StreamSubscription? _events;
@@ -213,6 +229,10 @@ class VpnController extends ChangeNotifier {
       settings = VpnSettings.fromJson(jsonDecode(raw) as Map<String, dynamic>);
     }
     if (Platform.isIOS) IosPolicy.normalize(settings);
+    // Xray is Android-only: a stale xrayMode stored on another device must
+    // never survive on Windows. (There is no Windows policy class; boot is
+    // the one place settings are normalised per platform.)
+    if (Platform.isWindows) settings.xrayMode = XrayMode.off;
     _events = engine.events().listen(_onEvent, onError: (_) {});
     if (Platform.isWindows) {
       _winLogs = WindowsEngine.instance.logs.listen((line) => _log(line));
@@ -220,8 +240,8 @@ class VpnController extends ChangeNotifier {
       // Self-heal: a run that ended hard (window closed, crash) cannot
       // clean up after itself, so it may leave the system proxy pointing at
       // our dead listener. Undo any leftover that is unambiguously ours.
-      unawaited(WindowsSystemProxy.instance.restore(
-          ourPort: settings.socksPort));
+      unawaited(
+          WindowsSystemProxy.instance.restore(ourPort: settings.socksPort));
     }
     unawaited(engine.installedApps().then((list) {
       apps
@@ -266,7 +286,8 @@ class VpnController extends ChangeNotifier {
         _userDisconnect = false;
         _startStats();
         _clock?.cancel();
-        _clock = Timer.periodic(const Duration(seconds: 1), (_) => notifyListeners());
+        _clock = Timer.periodic(
+            const Duration(seconds: 1), (_) => notifyListeners());
       }
     } catch (e) {
       _log('iOS status: $e');
@@ -355,7 +376,8 @@ class VpnController extends ChangeNotifier {
       // block the very version it announced (first run after the update, even
       // offline, must already be usable).
       final target = '${json['version'] ?? ''}';
-      if (target.isNotEmpty && !UpdateService.isNewer(target, AppInfo.version)) {
+      if (target.isNotEmpty &&
+          !UpdateService.isNewer(target, AppInfo.version)) {
         await prefs.remove(_forceUpdateKey);
         return;
       }
@@ -364,7 +386,8 @@ class VpnController extends ChangeNotifier {
       _outdatedNotes = '${json['notes'] ?? ''}';
       final url = '${json['url'] ?? ''}';
       _outdatedUrl = url.isEmpty ? null : url;
-      _log('stored update notice: v${_outdatedVersion.isEmpty ? '?' : _outdatedVersion}');
+      _log(
+          'stored update notice: v${_outdatedVersion.isEmpty ? '?' : _outdatedVersion}');
     } catch (_) {
       await prefs.remove(_forceUpdateKey);
     }
@@ -392,7 +415,8 @@ class VpnController extends ChangeNotifier {
     final info = update;
     if (info == null) {
       final fallback = _outdatedUrl ?? AppInfo.telegramUrl;
-      await launchUrl(Uri.parse(fallback), mode: LaunchMode.externalApplication);
+      await launchUrl(Uri.parse(fallback),
+          mode: LaunchMode.externalApplication);
       return;
     }
     await downloadUpdate();
@@ -475,7 +499,7 @@ class VpnController extends ChangeNotifier {
     // Xray modes (Android only) take their own path: the config is built
     // from secure storage + settings and handed to the native Xray core.
     // Aether's ladder, exit search and watchdog do not apply there.
-    if (settings.xrayMode != XrayMode.off && XrayEngine.supported) {
+    if (useXray) {
       if (xrayActive) {
         await disconnectXray();
       } else {
@@ -498,7 +522,7 @@ class VpnController extends ChangeNotifier {
       }));
       return;
     }
-    await connect();
+    await reconnect();
   }
 
   /// True when the exit rule is enforced inside the core as well, which is the
@@ -537,8 +561,7 @@ class VpnController extends ChangeNotifier {
     if (f == ExitFilter.off || st.exitRulePaused) return true;
     final c = SocksProbe.countryCode(exitCountry ?? '');
     if (c.isEmpty) return true;
-    bool blocked() =>
-        st.exitBlocked.map((e) => e.toUpperCase()).contains(c);
+    bool blocked() => st.exitBlocked.map((e) => e.toUpperCase()).contains(c);
     if (f == ExitFilter.nonIran) return !blocked();
     // Preferred: the wanted countries are accepted explicitly, everything else
     // still has to clear the blocked list (so clearing the preferred list can
@@ -712,9 +735,8 @@ class VpnController extends ChangeNotifier {
     Protocol? only,
     int epoch = 0,
   }) async {
-    final ladder = only != null
-        ? <Protocol>[only]
-        : CoreLaunch.smartLadder(settings);
+    final ladder =
+        only != null ? <Protocol>[only] : CoreLaunch.smartLadder(settings);
     var lastError = 'connect failed';
     for (var i = 0; i < ladder.length; i++) {
       if (!_wantUp) return AttemptOutcome.failed;
@@ -890,7 +912,8 @@ class VpnController extends ChangeNotifier {
   /// Fresh exit lookup straight through the tunnel's own SOCKS listener. The
   /// dashboard poller has not started yet at this point, so without this the
   /// filter would judge the *previous* tunnel's country.
-  Future<({String ip, String country, String colo, int pingMs})?> _probeExit() async {
+  Future<({String ip, String country, String colo, int pingMs})?>
+      _probeExit() async {
     ({String ip, String country, String colo, int pingMs})? last;
     final deadline = DateTime.now().add(const Duration(seconds: 25));
     while (DateTime.now().isBefore(deadline) && _wantUp) {
@@ -965,7 +988,8 @@ class VpnController extends ChangeNotifier {
       _fallback = (endpoint: last.endpoint, protocol: last.protocol);
     }
     exitPromptBody = s.exitPromptBody(
-      _promptAsks * (settings.exitAskAfter <= 0 ? 180 : settings.exitAskAfter) ~/
+      _promptAsks *
+          (settings.exitAskAfter <= 0 ? 180 : settings.exitAskAfter) ~/
           60,
       exitFilterLabel,
       _exitTries,
@@ -986,6 +1010,11 @@ class VpnController extends ChangeNotifier {
   /// (max tries reached), it is restarted from scratch.
   /// The way back from the one-tap answer: the rule was never lost, so this
   /// just stops pausing it and re-dials until an exit matches again.
+  ///
+  /// Aether-only by design (like [keepSearchingForExit] and
+  /// [acceptBlockedExit] below): the exit-country search exists only for
+  /// Aether — Xray exits are Cloudflare's, not a scanned gateway — so these
+  /// helpers intentionally dial [connect] directly, never [reconnect].
   Future<void> resumeExitRule() async {
     if (!settings.exitRulePaused) return;
     settings.exitRulePaused = false;
@@ -999,7 +1028,7 @@ class VpnController extends ChangeNotifier {
     if (snapshot.isActive || busy) {
       await disconnect();
     }
-    await connect();
+    await connect(); // Aether-only by design: see the doc comment above.
   }
 
   Future<void> keepSearchingForExit() async {
@@ -1010,7 +1039,7 @@ class VpnController extends ChangeNotifier {
     if (restart) {
       _exitTries = 0;
       _rejectedExits.clear();
-      await connect();
+      await connect(); // Aether-only by design: see resumeExitRule.
       return;
     }
     _armPromptTimer();
@@ -1047,7 +1076,7 @@ class VpnController extends ChangeNotifier {
     _pendingDial = null;
     _wantUp = true;
     _userDisconnect = false;
-    await connect();
+    await connect(); // Aether-only by design: see resumeExitRule.
   }
 
   /// Brings an Xray tunnel up: build the config (secrets from secure
@@ -1246,8 +1275,7 @@ class VpnController extends ChangeNotifier {
             phase: EnginePhase.connected,
             endpoint: st['endpoint']?.toString() ?? snapshot.endpoint,
             protocol: st['protocol']?.toString() ?? proto.name,
-            message:
-                st['message']?.toString() ?? snapshot.message,
+            message: st['message']?.toString() ?? snapshot.message,
           ));
           return true;
         }
@@ -1354,16 +1382,14 @@ class VpnController extends ChangeNotifier {
       // Android publishes its counters through both the event stream and the
       // status poll; a platform that answers with neither keeps the last values
       // the events delivered, and the meter is fed either way.
-      final down = int.tryParse('${st['download'] ?? ''}') ??
-          snapshot.downloadBytes;
-      final up =
-          int.tryParse('${st['upload'] ?? ''}') ?? snapshot.uploadBytes;
+      final down =
+          int.tryParse('${st['download'] ?? ''}') ?? snapshot.downloadBytes;
+      final up = int.tryParse('${st['upload'] ?? ''}') ?? snapshot.uploadBytes;
       final endpoint = '${st['endpoint'] ?? ''}';
       _set(snapshot.copyWith(
         downloadBytes: down,
         uploadBytes: up,
-        endpoint:
-            endpoint.isEmpty ? snapshot.endpoint : endpoint,
+        endpoint: endpoint.isEmpty ? snapshot.endpoint : endpoint,
       ));
       rate.update(down, up);
     } catch (_) {
@@ -1439,11 +1465,12 @@ class VpnController extends ChangeNotifier {
   bool get splitNeedsRedial => snapshot.phase == EnginePhase.connected;
 
   /// Re-dials so the split rules (or the performance profile) take effect.
+  /// Routes through [reconnect]: a Worker/WARP tunnel stays on Xray.
   Future<void> applyAndReconnect() async {
     if (!snapshot.isActive && !busy) return;
     _log('applying the new settings — reconnecting');
     await disconnect();
-    await connect();
+    await reconnect();
   }
 
   void _onEvent(Map<String, dynamic> event) {
@@ -1513,14 +1540,18 @@ class VpnController extends ChangeNotifier {
         unawaited((() async {
           _watchdogResume = true;
           try {
-            await connect();
+            // Routes through reconnect(): a stalled Xray tunnel is re-dialled
+            // on Xray, never silently swapped to Aether.
+            await reconnect();
           } finally {
             _watchdogResume = false;
           }
         })());
       }
     });
-    if (forceReconnect) _log('watchdog: reconnect scheduled in ${delay.inSeconds}s');
+    if (forceReconnect) {
+      _log('watchdog: reconnect scheduled in ${delay.inSeconds}s');
+    }
   }
 
   /// Elevation and OS build never change for a running process, but they are
@@ -1542,9 +1573,7 @@ class VpnController extends ChangeNotifier {
   /// True when a device VPN was asked for but this instance cannot deliver it
   /// because it is not running as Administrator.
   bool get needsElevation =>
-      Platform.isWindows &&
-      settings.mode == ConnectionMode.vpn &&
-      !elevated;
+      Platform.isWindows && settings.mode == ConnectionMode.vpn && !elevated;
 
   String get needAdminText => s.needAdmin;
 

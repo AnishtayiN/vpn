@@ -13,9 +13,15 @@ class IosPolicy {
     // come straight back to it. Blocking still works (nothing is dialled).
     settings.routeDirect = const [];
     // A packet-tunnel extension may not fork/exec, and Tor's pluggable
-    // transports are separate binaries: the second hop is unavailable here.
-    settings.chain = ChainMode.off;
-    settings.privateDns = true; // Tunnel-scoped DNS, never the physical interface.
+    // transports are separate binaries: the second hop and the standalone
+    // Psiphon/Tor modes are unavailable here.
+    settings.secondHop = SecondHop.off;
+    settings.standaloneMode = StandaloneMode.standard;
+    // Xray is Android-only: a stale xrayMode stored on another device must
+    // never survive on iOS either.
+    settings.xrayMode = XrayMode.off;
+    settings.privateDns =
+        true; // Tunnel-scoped DNS, never the physical interface.
     // The native shim pins the profile and the netstack buffers to what an
     // extension's memory budget allows, so the UI must not claim otherwise.
     settings.perf = PerfProfile.eco;
