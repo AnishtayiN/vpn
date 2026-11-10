@@ -34,6 +34,7 @@ env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   FLUTTER_VERSION: "3.27.4"
   JAVA_VERSION: "17"
+  GO_VERSION: "1.27"
   AETHER_TAG: "v2.4.0"
   AETHER_LEGACY_TAG: "v2.3.0"
   HEV_TAG: "2.17.1"
@@ -146,6 +147,27 @@ jobs:
       - name: Build HEV JNI
         run: bash scripts/build_hev.sh
       - run: flutter pub get
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: xray/go.mod
+      - name: Verify Xray module checksums
+        run: cd xray && go mod verify
+      # XrayCoreManager.kt imports the gomobile `xray` package, so the .aar
+      # must exist before `flutter build apk` compiles the Kotlin code.
+      # The .aar is a build artifact (never committed); build it here with
+      # scripts/build_xray.sh, after the Android platform was scaffolded,
+      # so `flutter create` / overlays cannot wipe it. Fail loudly if it
+      # is missing instead of shipping an APK whose Xray modes cannot start.
+      - name: Build Xray core (.aar)
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        run: |
+          bash scripts/build_xray.sh
+          test -s android/app/libs/xray.aar
+          ls -la android/app/libs/
       - name: Build APKs (universal + per-ABI)
         env:
           ANDROID_KEYSTORE_PATH: ${{ secrets.ANDROID_KEYSTORE_PATH }}
