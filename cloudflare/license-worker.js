@@ -1,4 +1,4 @@
-// VoidrauVPN License Bot + API — Cloudflare Worker (single file). v2.0.1
+// VoidrauVPN License Bot + API — Cloudflare Worker (single file). v2.1.0
 //
 // Deploy: wrangler deploy (or paste in the dashboard). Needs a KV namespace
 // bound as LICENSES and the secret BOT_TOKEN (from @BotFather).
@@ -20,10 +20,18 @@
 //   • ⏰ یادآوری انقضا  → scheduled() daily + opportunistic check on /start & status
 //   • 🆘 پشتیبانی واقعی → FAQ menu + write-to-support with admin reply mode
 //   • 📖 راهنما         → per-platform guides (Android / Windows / iOS)
+//   • 📱 نشست‌ها        → sessions inside the licence object (lic.sessions,
+//                          lic.maxUsers): device registration on /api/license,
+//                          409 session-limit, revoke / revoke-all, bot
+//                          sessions page, per-plan maxUsers (admin)
 //   • 📥 دانلود         → latest GitHub release files sent directly in-chat
+//                          (1h cache + stale fallback + direct release link;
+//                          per-platform list; over-limit files get a direct
+//                          download link instead of a dead end)
 //   • /panel            → interactive admin panel + live stat cards + expiring list
-//   • /stats            → full statistics report (users, active, pending, revenue)
+//   • /setusers <key> <1..5> → admin: set a licence's maxUsers
 //   • /find <id|key>    → search any user or license key details
+//                          (+ maxUsers, session count, change buttons)
 //   • /gen <days> [tid] → admin: mint a key
 //   • /ok <tid> <days>  → admin: approve a pending purchase
 //   • /adddays <id> <d> → admin: add bonus days to existing license
@@ -32,17 +40,25 @@
 //   • /id               → show numeric telegram ID
 //
 // HTTP API (used by the app):
-//   GET  /api/license?key=...   → { ok, plan, expiresAt, serverTime, remainingSeconds, isPaid }
-//   GET  /api/status?key=...    → same shape as /license
+//   GET  /api/license?key=...[&deviceId=...&deviceName=...&platform=...&appVersion=...]
+//        → { ok, plan, expiresAt, serverTime, remainingSeconds, isPaid,
+//            maxUsers, activeSessions, sessionId, sessions }
+//        → 409 { ok:false, error:'session-limit', maxUsers, activeCount, sessions }
+//          when the licence is at its device limit and this device is new
+//   GET  /api/status?key=...[&deviceId=...]
+//        → same shape as /license + sessionActive (this device's session
+//          still exists) when deviceId is given
+//   POST /api/sessions/revoke     { key, sessionId, deviceId } → { ok, sessions }
+//   POST /api/sessions/revoke-all { key, deviceId, keepSessionId? } → { ok, sessions }
 //   GET  /api/health            → { ok, service, time, version }
 //   POST /api/trial             → { ok, key, expiresAt, serverTime }
 
-const BOT_VERSION = '2.0.1';
+const BOT_VERSION = '2.1.0';
 
 const DEFAULT_PLANS = [
-  { id: 'm1', label: '۱ ماهه — ۱۰۰ هزار تومان', days: 30 },
-  { id: 'm3', label: '۳ ماهه — ۲۵۰ هزار تومان', days: 90 },
-  { id: 'm12', label: 'یک‌ساله — ۸۰۰ هزار تومان', days: 365 },
+  { id: 'm1', label: '۱ ماهه — ۱۰۰ هزار تومان', days: 30, maxUsers: 1 },
+  { id: 'm3', label: '۳ ماهه — ۲۵۰ هزار تومان', days: 90, maxUsers: 2 },
+  { id: 'm12', label: 'یک‌ساله — ۸۰۰ هزار تومان', days: 365, maxUsers: 3 },
 ];
 const TRIAL_DAYS = 1;
 
@@ -166,6 +182,180 @@ function escMd(s) {
   return String(s ?? '').replace(/([_*\[`])/g, '\\$1');
 }
 
+// ── v2.1: sessions + multi-user plans (pure helpers, unit-tested) ───────
+// Sessions live inside the licence object in KV: lic.sessions (array) and
+// lic.maxUsers. No new KV key is needed for sessions themselves.
+// A session older than 30 days without a lastSeen touch counts as inactive
+// for the limit and is marked so in the bot — it is never auto-deleted;
+// only the owner (app with key+deviceId, bot with telegramId) removes it.
+const STALE_SESSION_SECS = 30 * 86400;
+const PLATFORM_FA = { android: 'اندروید', windows: 'ویندوز', ios: 'آیفون', unknown: 'ناشناس' };
+const PLATFORM_EMOJI = { android: '🤖', windows: '🪟', ios: '🍎', unknown: '❓' };
+
+function newSessionId() {
+  const b = new Uint8Array(8);
+  crypto.getRandomValues(b);
+  return 'ses_' + [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
+}
+
+function normalizePlatform(p) {
+  const v = String(p || '').toLowerCase().trim();
+  return ['android', 'windows', 'ios'].includes(v) ? v : 'unknown';
+}
+
+// Sessions as stored, keeping only well-formed entries.
+function normalizeSessions(lic) {
+  const arr = Array.isArray(lic?.sessions) ? lic.sessions : [];
+  return arr.filter((s) => s && typeof s.id === 'string' && typeof s.deviceId === 'string');
+}
+
+function sessionIsActive(s, nowSec) {
+  return !!s && Number.isFinite(s.lastSeen) && nowSec - s.lastSeen <= STALE_SESSION_SECS;
+}
+
+function activeSessionsOf(lic, nowSec) {
+  return normalizeSessions(lic).filter((s) => sessionIsActive(s, nowSec));
+}
+
+function sessionSummary(s) {
+  return {
+    id: s.id,
+    name: s.name || '',
+    platform: s.platform || 'unknown',
+    appVersion: s.appVersion || '',
+    lastSeen: s.lastSeen || 0,
+  };
+}
+
+// Effective device limit for a licence. Existing licences default to 1
+// (multi-user is never granted silently); trial is always 1.
+function maxUsersOf(lic) {
+  if (!lic) return 1;
+  if (lic.plan === 'trial') return 1;
+  const n = parseInt(lic.maxUsers, 10);
+  return Number.isFinite(n) && n >= 1 && n <= 5 ? n : 1;
+}
+
+// Effective device limit for a plan object: stored maxUsers wins, else the
+// built-in default for the plan id (m1:1, m3:2, m12:3), else 1.
+function planMaxUsers(plan) {
+  if (!plan) return 1;
+  const n = parseInt(plan.maxUsers, 10);
+  if (Number.isFinite(n) && n >= 1 && n <= 5) return n;
+  return { m1: 1, m3: 2, m12: 3 }[plan.id] || 1;
+}
+
+// Register (or touch) a device session on a licence.
+// Returns { ok:true, sessionId, sessions, activeCount, maxUsers } or
+// { ok:false, limited:true, maxUsers, activeCount, sessions } when the
+// licence is at its limit and this deviceId is not registered yet.
+// Upgrade migration: an unidentified legacy seat belongs to no known
+// device, so the first identified device takes it over instead of being
+// blocked by a seat the owner can never name (old apps never enforce
+// sessions, so nothing keeps working on the legacy seat is lost).
+function registerSession(lic, info, nowSec) {
+  const sessions = normalizeSessions(lic);
+  const maxUsers = maxUsersOf(lic);
+  const devId = String(info.deviceId || '');
+  const existing = sessions.find((s) => s.deviceId === devId);
+  if (existing) {
+    existing.lastSeen = nowSec;
+    if (info.name) existing.name = String(info.name).slice(0, 64);
+    if (info.platform) existing.platform = info.platform;
+    if (info.appVersion) existing.appVersion = String(info.appVersion).slice(0, 32);
+    lic.sessions = sessions;
+    return { ok: true, sessionId: existing.id, sessions: sessions.map(sessionSummary), activeCount: activeSessionsOf(lic, nowSec).length, maxUsers };
+  }
+  const active = sessions.filter((s) => sessionIsActive(s, nowSec));
+  const legacy = active.find((s) => s.deviceId === 'legacy');
+  if (active.length >= maxUsers && !legacy) {
+    return { ok: false, limited: true, maxUsers, activeCount: active.length, sessions: active.map(sessionSummary) };
+  }
+  const ns = {
+    id: newSessionId(),
+    deviceId: devId,
+    name: info.name || `دستگاه ${PLATFORM_FA[info.platform] || 'ناشناس'}`,
+    platform: info.platform || 'unknown',
+    appVersion: info.appVersion || '',
+    firstSeen: nowSec,
+    lastSeen: nowSec,
+  };
+  if (legacy) {
+    // Take over the legacy seat (same id, so bot links stay valid).
+    ns.id = legacy.id;
+    ns.firstSeen = legacy.firstSeen || nowSec;
+    sessions[sessions.indexOf(legacy)] = ns;
+  } else {
+    sessions.push(ns);
+  }
+  lic.sessions = sessions;
+  return { ok: true, sessionId: ns.id, replacedLegacy: !!legacy, sessions: sessions.map(sessionSummary), activeCount: activeSessionsOf(lic, nowSec).length, maxUsers };
+}
+
+// Legacy apps never send a deviceId: the licence keeps working, and a
+// single anonymous legacy seat is created once (only when the licence has
+// no sessions at all) so the owner can see it in the bot and revoke it.
+// Returns true when a session was created or touched (caller should save).
+function ensureLegacySession(lic, nowSec) {
+  const sessions = normalizeSessions(lic);
+  if (!sessions.length) {
+    lic.sessions = [{
+      id: newSessionId(),
+      deviceId: 'legacy',
+      name: 'دستگاه ناشناس',
+      platform: 'unknown',
+      appVersion: '',
+      firstSeen: nowSec,
+      lastSeen: nowSec,
+    }];
+    return true;
+  }
+  const legacy = sessions.find((s) => s.deviceId === 'legacy');
+  if (legacy && legacy.lastSeen !== nowSec) {
+    legacy.lastSeen = nowSec;
+    lic.sessions = sessions;
+    return true;
+  }
+  return false;
+}
+
+function revokeSessionFrom(lic, sessionId) {
+  const sessions = normalizeSessions(lic);
+  const kept = sessions.filter((s) => s.id !== sessionId);
+  const removed = kept.length !== sessions.length;
+  lic.sessions = kept;
+  return removed;
+}
+
+function revokeAllSessionsFrom(lic, keepSessionId) {
+  const sessions = normalizeSessions(lic);
+  lic.sessions = keepSessionId ? sessions.filter((s) => s.id === keepSessionId) : [];
+  return sessions.length - lic.sessions.length;
+}
+
+// ── v2.1: download file selection (pure, unit-tested) ───────────────────
+const RELEASE_PAGE_URL = 'https://github.com/AnishtayiN/vpn/releases/latest';
+// Telegram's bot-API sendDocument limit (the worker also enforces it).
+const TG_SEND_LIMIT = 48 * 1024 * 1024;
+
+// Per-platform download list, in display order: Android arm64-v8a,
+// Android armeabi-v7a, Legacy arm64-v8a, Windows Installer, Windows
+// Portable. The old [...apk, ...exe, ...other].slice(0, 8) never reached
+// the Windows files because there are 8 APKs. If no slot matches (an
+// unexpected asset layout), fall back to any downloadable files, capped.
+function pickDownloadFiles(files) {
+  const list = Array.isArray(files) ? files : [];
+  const isApk = (f) => f.name.toLowerCase().endsWith('.apk');
+  const arm64 = list.find((f) => isApk(f) && /arm64-v8a/i.test(f.name) && !/legacy/i.test(f.name));
+  const armeabi = list.find((f) => isApk(f) && /armeabi-v7a/i.test(f.name) && !/legacy/i.test(f.name));
+  const legacyArm64 = list.find((f) => isApk(f) && /legacy/i.test(f.name) && /arm64-v8a/i.test(f.name));
+  const installer = list.find((f) => f.name.toLowerCase().endsWith('.exe') && /installer/i.test(f.name));
+  const portable = list.find((f) => f.name.toLowerCase().endsWith('.zip') && /portable/i.test(f.name));
+  const pick = [arm64, armeabi, legacyArm64, installer, portable].filter(Boolean);
+  if (pick.length) return pick;
+  return list.filter((f) => /\.(apk|exe|zip)$/i.test(f.name)).slice(0, 5);
+}
+
 // Shared guide copy (L6): defined once, reused by every platform guide
 // instead of three divergent copies.
 const GUIDE_NO_CODE = '💡 کد ندارید؟ از خانه، «🎁 تست رایگان» را بزنید یا لایسنس بخرید.';
@@ -185,17 +375,34 @@ async function mapLimit(items, limit, fn) {
 const homeRow = () => [[{ text: '🏠 خانه', callback_data: 'home' }]];
 const withHome = (rows) => [...(rows || []), ...homeRow()];
 
-async function getReleaseFiles(env) {
+// v2.1: 1h cache + stale fallback. If GitHub fails (rate limit without
+// GITHUB_TOKEN, transient error), the last cached list is returned even
+// after expiry, so a transient GitHub failure no longer shows "no file
+// found" while the release exists. Returns { files, stale }.
+async function getReleaseFilesInfo(env) {
   let files = null;
   try {
     files = JSON.parse((await env.LICENSES.get('cache:relfiles')) || 'null');
   } catch (_) {}
-  if (Array.isArray(files) && files.length) return files;
-  files = (await releaseFiles(env)) || [];
-  if (files.length) {
-    await env.LICENSES.put('cache:relfiles', JSON.stringify(files), { expirationTtl: 600 });
+  if (Array.isArray(files) && files.length) return { files, stale: false };
+  const fresh = await releaseFiles(env);
+  if (Array.isArray(fresh) && fresh.length) {
+    try {
+      await env.LICENSES.put('cache:relfiles', JSON.stringify(fresh), { expirationTtl: 3600 });
+      await env.LICENSES.put('cache:relfiles:stale', JSON.stringify(fresh));
+    } catch (_) {}
+    return { files: fresh, stale: false };
   }
-  return files;
+  let old = null;
+  try {
+    old = JSON.parse((await env.LICENSES.get('cache:relfiles:stale')) || 'null');
+  } catch (_) {}
+  if (Array.isArray(old) && old.length) return { files: old, stale: true };
+  return { files: [], stale: false };
+}
+
+async function getReleaseFiles(env) {
+  return (await getReleaseFilesInfo(env)).files;
 }
 
 async function setReceiptStatus(env, tid, status, planId) {
@@ -209,7 +416,18 @@ async function getLic(env, key) {
   if (!key) return null;
   const raw = await env.LICENSES.get(`lic:${key}`);
   if (raw == null) return null;
-  return typeof raw === 'string' ? JSON.parse(raw) : raw;
+  const lic = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  // v2.1: licences minted before sessions existed have no sessions /
+  // maxUsers fields — default them in memory (maxUsers 1, never silently
+  // multi-user; trial is always 1). The defaults are persisted on the
+  // next write of the licence object.
+  if (lic && typeof lic === 'object') {
+    if (!Array.isArray(lic.sessions)) lic.sessions = [];
+    const n = parseInt(lic.maxUsers, 10);
+    lic.maxUsers = Number.isFinite(n) && n >= 1 && n <= 5 ? n : 1;
+    if (lic.plan === 'trial') lic.maxUsers = 1;
+  }
+  return lic;
 }
 
 async function putLic(env, key, lic) {
@@ -237,7 +455,7 @@ async function mintKey(env, tid, days, plan = 'custom') {
   // yields exactly `days` — never double. A minted-but-never-extended key
   // is already expired, never a free licence. (days param kept so callers
   // keep their shape; the value is applied by extend via issueKey.)
-  const lic = { key, telegramId: String(tid), plan, days: 0, issuedAt: now, expiresAt: now };
+  const lic = { key, telegramId: String(tid), plan, days: 0, issuedAt: now, expiresAt: now, maxUsers: 1, sessions: [] };
   await putLic(env, key, lic);
   await bindUser(env, tid, key);
   return key;
@@ -258,8 +476,20 @@ async function extend(env, key, days) {
 // Single issue path (H3): mint + extend exactly once, so lic.days always
 // equals the real plan length and the progress bar is correct. All six
 // issue sites (doTrial, /api/trial, /gen, /ok, okr:, gift:yes) use this.
+// v2.1: a licence issued for a known plan id takes that plan's maxUsers
+// (m1:1, m3:2, m12:3, or the admin-set value); trial / paid / custom stay 1
+// unless the caller sets maxUsers afterwards (receipt approval does).
 async function issueKey(env, tid, days, plan = 'custom') {
   const key = await mintKey(env, tid, days, plan);
+  const plans = await plansOf(env);
+  const p = plans.find((x) => x.id === plan);
+  if (p) {
+    const lic = await getLic(env, key);
+    if (lic) {
+      lic.maxUsers = planMaxUsers(p);
+      await putLic(env, key, lic);
+    }
+  }
   await extend(env, key, days);
   return key;
 }
@@ -355,6 +585,7 @@ async function mainMenu(env, from, lic) {
     [{ text: '✅ چک‌این روزانه', callback_data: 'checkin' }, { text: '👥 دعوت دوستان', callback_data: 'ref' }],
     [{ text: '🏆 لیدربورد دعوت', callback_data: 'top' }, { text: '📥 دانلود برنامه', callback_data: 'dl' }],
     [{ text: '🔑 کد لایسنس من', callback_data: 'mykey' }, { text: '📊 وضعیت لایسنس', callback_data: 'status' }],
+    [{ text: '📱 نشست‌ها', callback_data: 'sessions' }],
     [{ text: '🧾 وضعیت رسید من', callback_data: 'receipt' }, { text: '📖 راهنما', callback_data: 'help' }],
     [{ text: '🆘 پشتیبانی', callback_data: 'support' }],
   ];
@@ -421,48 +652,70 @@ const DL_FILES_KEY = 'dlfiles';
 const dlLabel = (n) => n.replace(/^VoidrauVPN-/, '').replace(/\.apk$|\.exe$|\.zip$/i, '');
 
 async function doDownloads(env, tid) {
-  const files = await getReleaseFiles(env);
-  const apk = files.filter((f) => f.name.toLowerCase().endsWith('.apk'));
-  const exe = files.filter((f) => f.name.toLowerCase().endsWith('.exe'));
-  const other = files.filter((f) => f.name.toLowerCase().endsWith('.zip'));
-  const pick = [...apk, ...exe, ...other].slice(0, 8);
+  const { files, stale } = await getReleaseFilesInfo(env);
+  const pick = pickDownloadFiles(files);
   if (!pick.length) {
-    return { text: '⚠️ فعلاً فایلی برای ارسال پیدا نشد. لطفاً چند دقیقه بعد امتحان کنید یا از کانال رسمی دانلود نمایید.', reply_markup: { inline_keyboard: homeRow() } };
+    // No cache at all and GitHub unreachable: offer the release page
+    // directly instead of the old dead-end "no file found" message.
+    return {
+      text: '⚠️ در حال حاضر نتوانستیم لیست فایل‌ها را از گیت‌هاب بگیریم.\n\nمی‌توانید مستقیم از صفحهٔ ریلیز، آخرین نسخه را دانلود کنید:',
+      reply_markup: {
+        inline_keyboard: withHome([[{ text: '📥 صفحهٔ دانلود در گیت‌هاب', url: RELEASE_PAGE_URL }]]),
+      },
+    };
   }
   await env.LICENSES.put(`${DL_FILES_KEY}:${tid}`, JSON.stringify(pick), { expirationTtl: 3600 });
   const rows = pick.map((f, i) => [
     { text: `📄 ${dlLabel(f.name)} (${humanSize(f.size)})`, callback_data: `file:${i}` },
   ]);
   const tag = pick[0]?.tag || '';
+  const staleNote = stale ? '\n⚠️ لیست زیر از کش قدیمی است و ممکن است کاملاً به‌روز نباشد.' : '';
   return {
-    text: `📥 آخرین نسخه موجود: *${tag}*\nفایل مورد نظر برای دستگاه خود را انتخاب نمایید تا مستقیماً برایتان ارسال شود:`,
+    text: `📥 آخرین نسخه موجود: *${tag}*${staleNote}\nفایل مورد نظر برای دستگاه خود را انتخاب نمایید تا مستقیماً برایتان ارسال شود:`,
     parse_mode: 'Markdown',
     reply_markup: {
-      inline_keyboard: withHome([...rows, [{ text: '🔄 بروزرسانی لیست فایل‌ها', callback_data: 'dlrefresh' }]]),
+      inline_keyboard: withHome([
+        ...rows,
+        [{ text: '🔄 بروزرسانی لیست فایل‌ها', callback_data: 'dlrefresh' }],
+        [{ text: '🌐 صفحهٔ ریلیز در گیت‌هاب', url: RELEASE_PAGE_URL }],
+      ]),
     },
   };
 }
 
-async function sendReleaseFile(env, tid, url, name) {
+// v2.1: when a file is too big for Telegram, send its direct download link
+// instead of a dead end — and never claim the file was sent when it was not.
+async function sendDownloadLink(env, tid, url, name, size) {
+  await tgSafe(env.BOT_TOKEN, 'sendMessage', {
+    chat_id: tid,
+    text: `📥 فایل *${escMd(name)}* (${humanSize(size)}) برای ارسال مستقیم در تلگرام خیلی بزرگ است.\n\nاز دکمهٔ زیر مستقیم دانلود کنید:`,
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: [[{ text: '📥 دانلود مستقیم فایل', url }]] },
+  });
+}
+
+async function sendReleaseFile(env, tid, url, name, size) {
+  // Returns true when the file was actually sent as a document, 'link'
+  // when only a direct download link was sent (over Telegram's size
+  // limit). The caller must not report success unless it gets true.
+  const knownSize = Number(size) || 0;
+  if (knownSize > TG_SEND_LIMIT) {
+    await sendDownloadLink(env, tid, url, name, knownSize);
+    return 'link';
+  }
   const ghHeaders = {};
   if (env.GITHUB_TOKEN) ghHeaders.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
   const res = await fetch(url, { headers: ghHeaders, redirect: 'follow' });
   if (!res.ok) throw new Error(`github ${res.status}`);
   const len = Number(res.headers ? res.headers.get('content-length') || 0 : 0);
-  if (len && len > 48 * 1024 * 1024) {
-    await tgSafe(env.BOT_TOKEN, 'sendMessage', {
-      chat_id: tid,
-      text: `⚠️ فایل ${name} حجمش بیش از حد مجاز تلگرام است (${humanSize(len)}).\nلطفاً از کانال رسمی @Voidrau دانلود فرمایید.`,
-    });
-    return;
+  if (len && len > TG_SEND_LIMIT) {
+    await sendDownloadLink(env, tid, url, name, len);
+    return 'link';
   }
   const buf = await res.arrayBuffer();
-  if (buf.byteLength > 48 * 1024 * 1024) {
-    await tgSafe(env.BOT_TOKEN, 'sendMessage', {
-      chat_id: tid,
-      text: `⚠️ فایل ${name} حجمش بیش از حد مجاز تلگرام است (${humanSize(buf.byteLength)}).\nاز کانال رسمی دانلود نمایید.`,
-    });
-    return;
+  if (buf.byteLength > TG_SEND_LIMIT) {
+    await sendDownloadLink(env, tid, url, name, buf.byteLength);
+    return 'link';
   }
   const fd = new FormData();
   fd.append('chat_id', String(tid));
@@ -473,6 +726,7 @@ async function sendReleaseFile(env, tid, url, name) {
   });
   const j = await out.json().catch(() => ({}));
   if (!j.ok) throw new Error(j.description || 'telegram upload failed');
+  return true;
 }
 
 async function doHelp() {
@@ -492,14 +746,20 @@ async function doHelpPlatform(env, platform) {
   const files = await getReleaseFiles(env);
   const back = [[{ text: '⬅️ بازگشت به راهنما', callback_data: 'help' }]];
   if (platform === 'android') {
-    const apk = files.find((f) => /universal/i.test(f.name) && f.name.toLowerCase().endsWith('.apk'))
+    // v2.1: most phones are arm64-v8a, so the arm64 APK (47 MB, sendable
+    // in Telegram) is the default — the 132 MB Universal APK used to be
+    // the default and could never be sent in-chat. Universal stays as an
+    // alternative for older/other devices.
+    const apk = files.find((f) => /arm64-v8a/i.test(f.name) && !/legacy/i.test(f.name) && f.name.toLowerCase().endsWith('.apk'))
       || files.find((f) => f.name.toLowerCase().endsWith('.apk'));
+    const universal = files.find((f) => /universal/i.test(f.name) && !/legacy/i.test(f.name) && f.name.toLowerCase().endsWith('.apk'));
     const rows = [];
     if (apk) rows.push([{ text: `📥 دانلود نسخه اندروید (${apk.tag || ''} — ${humanSize(apk.size)})`, url: apk.url }]);
+    if (universal && universal !== apk) rows.push([{ text: `📥 نسخه یونیورسال (جایگزین — ${humanSize(universal.size)})`, url: universal.url }]);
     rows.push([{ text: '📥 همهٔ فایل‌های دانلود', callback_data: 'dl' }]);
     return {
       text: '🤖 *راهنمای اندروید*\n\n' +
-        '۱. از دکمهٔ دانلود زیر، فایل APK یونیورسال را بگیرید و نصب کنید (در صورت هشدار، «نصب از منبع ناشناس» را تایید کنید).\n' +
+        '۱. از دکمهٔ دانلود زیر، فایل APK مخصوص گوشی خود (arm64-v8a) را بگیرید و نصب کنید (در صورت هشدار، «نصب از منبع ناشناس» را تایید کنید). اگر گوشی شما قدیمی است یا این فایل نصب نشد، نسخهٔ یونیورسال را امتحان کنید.\n' +
         '۲. برنامه را باز کنید و در تب «لایسنس»، کد خود را وارد نمایید.\n' +
         '۳. دکمهٔ اتصال را بزنید؛ در اولین اتصال، تایید VPN سیستم را قبول کنید.\n\n' +
         GUIDE_NO_CODE,
@@ -601,6 +861,46 @@ async function doReceiptStatus(env, tid) {
     parse_mode: 'Markdown',
     reply_markup: { inline_keyboard: homeRow() },
   };
+}
+
+// ── v2.1: bot sessions page ───────────────────────────────────────────
+// Only the licence owner (telegramId) can see or remove sessions. The bot
+// itself is not a device, so "delete all" really deletes all — the confirm
+// text says every device must re-activate afterwards.
+async function doSessions(env, tid) {
+  const key = await userKey(env, tid);
+  if (!key) {
+    return { text: '📱 شما هنوز لایسنسی ندارید — با «🎁 تست رایگان» شروع کنید.', reply_markup: { inline_keyboard: homeRow() } };
+  }
+  const lic = await getLic(env, key);
+  if (!lic || !lic.expiresAt || lic.plan === 'revoked') {
+    return { text: '📱 لایسنس شما نامعتبر یا باطل شده است.', reply_markup: { inline_keyboard: homeRow() } };
+  }
+  if (String(lic.telegramId || '') !== String(tid)) {
+    return { text: '⛔ این لایسنس به شما تعلق ندارد.', reply_markup: { inline_keyboard: homeRow() } };
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const sessions = normalizeSessions(lic);
+  const active = sessions.filter((s) => sessionIsActive(s, now));
+  const maxUsers = maxUsersOf(lic);
+  let t = `📱 *نشست‌های لایسنس شما*\n\n${active.length} از ${maxUsers} نشست فعال\n\n`;
+  if (!sessions.length) {
+    t += 'هنوز هیچ دستگاهی با این لایسنس فعال نشده است.\nکد را در برنامه وارد کنید تا دستگاه شما اینجا دیده شود.';
+  } else {
+    for (const s of sessions) {
+      const stale = !sessionIsActive(s, now);
+      const emoji = PLATFORM_EMOJI[s.platform] || '❓';
+      t += `${emoji} *${escMd(s.name || 'دستگاه ناشناس')}*\n` +
+        `   نسخهٔ اپ: ${s.appVersion ? escMd(s.appVersion) : '—'}\n` +
+        `   آخرین فعالیت: *${formatJalali(s.lastSeen)}*${stale ? ' — غیرفعال (بیش از ۳۰ روز)' : ''}\n\n`;
+    }
+    t += '💡 نشست غیرفعال به‌صورت خودکار حذف نمی‌شود؛ اگر دستگاهی را نمی‌شناسید، آن را حذف کنید تا جایش آزاد شود.';
+  }
+  const rows = sessions.map((s) => [
+    { text: `🗑 حذف ${String(s.name || 'دستگاه').slice(0, 20)}`, callback_data: `sesdel:${s.id}` },
+  ]);
+  if (sessions.length) rows.push([{ text: '🗑 حذف همهٔ نشست‌ها', callback_data: 'sesdelall' }]);
+  return { text: t, parse_mode: 'Markdown', reply_markup: { inline_keyboard: withHome(rows) } };
 }
 
 async function doStatus(env, tid) {
@@ -888,7 +1188,9 @@ async function handleHttp(request, env, ctx) {
     if (lic.expiresAt <= now) {
       return json({ ok: false, error: 'expired', expiresAt: lic.expiresAt, serverTime: now }, 410);
     }
-    return json({
+    const isLicense = url.pathname === '/api/license';
+    const deviceId = (url.searchParams.get('deviceId') || '').trim();
+    const base = {
       ok: true,
       key: lic.key,
       plan: lic.plan,
@@ -898,6 +1200,89 @@ async function handleHttp(request, env, ctx) {
       remainingSeconds: Math.max(0, lic.expiresAt - now),
       daysLeft: Math.max(0, Math.ceil((lic.expiresAt - now) / 86400)),
       isPaid: lic.plan === 'paid' || lic.plan === 'admin',
+      maxUsers: maxUsersOf(lic),
+    };
+    if (!deviceId) {
+      // Legacy app (no deviceId): it keeps working exactly as before, and
+      // the licence gets one anonymous legacy seat (see
+      // ensureLegacySession) so the owner can see it in the bot.
+      if (ensureLegacySession(lic, now)) await putLic(env, key, lic);
+      return json({
+        ...base,
+        sessions: normalizeSessions(lic).map(sessionSummary),
+        activeSessions: activeSessionsOf(lic, now).length,
+      });
+    }
+    const info = {
+      deviceId,
+      name: (url.searchParams.get('deviceName') || '').trim().slice(0, 64),
+      platform: normalizePlatform(url.searchParams.get('platform')),
+      appVersion: (url.searchParams.get('appVersion') || '').trim().slice(0, 32),
+    };
+    if (!isLicense) {
+      // /api/status: read-only touch — report whether THIS device's
+      // session still exists (revoked sessions make the app sign out on
+      // the next online check). New devices register via /api/license.
+      const sessions = normalizeSessions(lic);
+      const mine = sessions.find((s) => s.deviceId === deviceId);
+      let sessionActive = false;
+      if (mine) {
+        mine.lastSeen = now;
+        lic.sessions = sessions;
+        await putLic(env, key, lic);
+        sessionActive = true;
+      }
+      return json({
+        ...base,
+        sessionActive,
+        sessions: sessions.map(sessionSummary),
+        activeSessions: activeSessionsOf(lic, now).length,
+      });
+    }
+    const reg = registerSession(lic, info, now);
+    if (!reg.ok) {
+      return json(
+        { ok: false, error: 'session-limit', maxUsers: reg.maxUsers, activeCount: reg.activeCount, sessions: reg.sessions },
+        409
+      );
+    }
+    await putLic(env, key, lic);
+    return json({
+      ...base,
+      sessionId: reg.sessionId,
+      sessions: reg.sessions,
+      activeSessions: reg.activeCount,
+    });
+  }
+
+  // v2.1: session management from the app. deviceId must be one of the
+  // licence's own sessions (proof of ownership from the app side); the
+  // bot manages sessions with telegramId ownership instead.
+  if ((url.pathname === '/api/sessions/revoke' || url.pathname === '/api/sessions/revoke-all') && request.method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const key = String(body.key || '').trim();
+    const deviceId = String(body.deviceId || '').trim();
+    if (!key || !deviceId) return json({ ok: false, error: 'missing-params' }, 400);
+    const lic = await getLic(env, key);
+    if (!lic || !lic.expiresAt) return json({ ok: false, error: 'invalid' }, 404);
+    if (lic.plan === 'revoked') return json({ ok: false, error: 'revoked' }, 403);
+    const caller = normalizeSessions(lic).find((s) => s.deviceId === deviceId);
+    if (!caller) return json({ ok: false, error: 'forbidden' }, 403);
+    if (url.pathname === '/api/sessions/revoke') {
+      const sessionId = String(body.sessionId || '').trim();
+      if (!sessionId) return json({ ok: false, error: 'missing-params' }, 400);
+      if (!revokeSessionFrom(lic, sessionId)) return json({ ok: false, error: 'session-not-found' }, 404);
+    } else {
+      const keep = String(body.keepSessionId || '').trim() || null;
+      revokeAllSessionsFrom(lic, keep);
+    }
+    await putLic(env, key, lic);
+    const now = Math.floor(Date.now() / 1000);
+    return json({
+      ok: true,
+      sessions: normalizeSessions(lic).map(sessionSummary),
+      activeSessions: activeSessionsOf(lic, now).length,
+      maxUsers: maxUsersOf(lic),
     });
   }
 
@@ -1137,6 +1522,11 @@ async function handle(upd, env, steps, ctx) {
       const target = tS;
       const days = parseInt(dS);
       const recRaw = await env.LICENSES.get(`receipt:${target}`);
+      // v2.1: the receipt remembers which plan was picked, so a newly
+      // issued licence takes that plan's device limit (extend keeps
+      // maxUsers untouched on an existing licence).
+      let recPlanId = null;
+      try { recPlanId = JSON.parse(recRaw || 'null')?.planId || null; } catch (_) {}
       if (!recRaw) {
         out = { text: `ℹ️ رسید کاربر ${target} قبلاً پردازش شده است.` };
       } else if (!Number.isFinite(days) || days < 1 || days > 3650) {
@@ -1153,6 +1543,15 @@ async function handle(upd, env, steps, ctx) {
           await upgradePlan(env, k, 'paid');
         } else {
           k = await issueKey(env, target, days, 'paid');
+          if (recPlanId) {
+            const plans = await plansOf(env);
+            const pp = plans.find((x) => x.id === recPlanId);
+            const nl = await getLic(env, k);
+            if (pp && nl) {
+              nl.maxUsers = planMaxUsers(pp);
+              await putLic(env, k, nl);
+            }
+          }
         }
         // M4: one bounded extend for all stored credit (see applyCredit).
         await applyCredit(env, k, target);
@@ -1237,8 +1636,13 @@ async function handle(upd, env, steps, ctx) {
         await tgSafe(token, 'answerCallbackQuery', { callback_query_id: cb.id, text: '⏳ در حال ارسال فایل...' });
         cb._answered = true;
         try {
-          await sendReleaseFile(env, tid, f.url, f.name);
-          await sendReply(env, tid, {text: '✅ فایل برنامه با موفقیت ارسال شد 👆\n🤖 اندروید: فایل را باز کرده و نصب کنید.\n🪟 ویندوز: فایل نصبی را اجرا فرمایید.',});
+          const sent = await sendReleaseFile(env, tid, f.url, f.name, f.size);
+          // Only report success when the file was really sent. When the
+          // file was over Telegram's limit, sendReleaseFile already sent
+          // its direct download link — claiming a send here would be a lie.
+          if (sent === true) {
+            await sendReply(env, tid, {text: '✅ فایل برنامه با موفقیت ارسال شد 👆\n🤖 اندروید: فایل را باز کرده و نصب کنید.\n🪟 ویندوز: فایل نصبی را اجرا فرمایید.',});
+          }
         } catch (e) {
           await sendReply(env, tid, {text: `❌ ارسال فایل ناموفق بود: ${e.message}\nلطفاً دوباره امتحان کنید.`,
             reply_markup: {
@@ -1256,6 +1660,51 @@ async function handle(upd, env, steps, ctx) {
       out = await doSupport(env);
     } else if (cb.data === 'status') {
       out = await doStatus(env, tid);
+    } else if (cb.data === 'sessions') {
+      out = await doSessions(env, tid);
+    } else if (cb.data.startsWith('sesdel:')) {
+      const sid = cb.data.slice(7);
+      const key = await userKey(env, tid);
+      const lic = key ? await getLic(env, key) : null;
+      if (!lic || String(lic.telegramId || '') !== String(tid)) {
+        out = { text: '⛔ این لایسنس به شما تعلق ندارد.', reply_markup: { inline_keyboard: homeRow() } };
+      } else if (!revokeSessionFrom(lic, sid)) {
+        out = { text: '⚠️ این نشست قبلاً حذف شده است.', reply_markup: { inline_keyboard: homeRow() } };
+      } else {
+        await putLic(env, key, lic);
+        const page = await doSessions(env, tid);
+        page.text = '✅ نشست حذف شد.\n\n' + page.text;
+        out = page;
+      }
+    } else if (cb.data === 'sesdelall') {
+      const key = await userKey(env, tid);
+      const lic = key ? await getLic(env, key) : null;
+      if (!lic || String(lic.telegramId || '') !== String(tid)) {
+        out = { text: '⛔ این لایسنس به شما تعلق ندارد.', reply_markup: { inline_keyboard: homeRow() } };
+      } else {
+        out = {
+          text: '⚠️ *حذف همهٔ نشست‌ها؟*\n\nهمهٔ دستگاه‌ها از لایسنس خارج می‌شوند و برای اتصال دوباره باید کد لایسنس را در برنامه وارد کنند.\n\nمطمئن هستید؟',
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: withHome([
+              [{ text: '✅ بله، همه را حذف کن', callback_data: 'sesdelall:yes' }],
+              [{ text: '❌ لغو', callback_data: 'sessions' }],
+            ]),
+          },
+        };
+      }
+    } else if (cb.data === 'sesdelall:yes') {
+      const key = await userKey(env, tid);
+      const lic = key ? await getLic(env, key) : null;
+      if (!lic || String(lic.telegramId || '') !== String(tid)) {
+        out = { text: '⛔ این لایسنس به شما تعلق ندارد.', reply_markup: { inline_keyboard: homeRow() } };
+      } else {
+        revokeAllSessionsFrom(lic, null);
+        await putLic(env, key, lic);
+        const page = await doSessions(env, tid);
+        page.text = '✅ همهٔ نشست‌ها حذف شدند. دستگاه‌ها باید دوباره لایسنس را فعال کنند.\n\n' + page.text;
+        out = page;
+      }
     } else if (cb.data === 'home') {
       await env.LICENSES.delete(`gift:${tid}`);
       await env.LICENSES.delete(`supMode:${tid}`);
@@ -1353,6 +1802,37 @@ async function handle(upd, env, steps, ctx) {
       out = ['android', 'windows', 'ios'].includes(p)
         ? await doHelpPlatform(env, p)
         : await doHelp();
+    } else if (cb.data.startsWith('fsetu:') && String(tid) === String(env.ADMIN_ID)) {
+      // v2.1: quick maxUsers buttons under a /find result.
+      const parts = cb.data.split(':');
+      const fkey = parts[1];
+      const n = parseInt(parts[2], 10);
+      const flic = fkey ? await getLic(env, fkey) : null;
+      if (!flic || !Number.isFinite(n) || n < 1 || n > 5) {
+        out = { text: '❌ لایسنس یا عدد نامعتبر است.' };
+      } else if (flic.plan === 'trial') {
+        out = { text: '⚠️ تریال همیشه ۱ کاربر است و قابل تغییر نیست.' };
+      } else {
+        flic.maxUsers = n;
+        await putLic(env, fkey, flic);
+        out = await findPayload(env, fkey, flic.telegramId, flic);
+        out.text = `✅ حداکثر کاربر به *${n} کاربر* تغییر کرد.\n\n` + out.text;
+      }
+    } else if (cb.data.startsWith('planusers:') && String(tid) === String(env.ADMIN_ID)) {
+      // v2.1: per-plan device-limit buttons in the plan editor.
+      const [, pid, nS] = cb.data.split(':');
+      const n = parseInt(nS, 10);
+      const plans = await plansOf(env);
+      const p = plans.find((x) => x.id === pid);
+      if (!p || !Number.isFinite(n) || n < 1 || n > 5) {
+        out = { text: '❌ پلن یا عدد نامعتبر است.' };
+      } else {
+        p.maxUsers = n;
+        await env.LICENSES.put('setting:plans', JSON.stringify(plans));
+        const page = await planUsersEditor(env);
+        page.text = `✅ حداکثر کاربر پلن «${escMd(p.label)}» به *${n} کاربر* تغییر کرد.\n\n` + page.text;
+        out = page;
+      }
     } else if (cb.data === 'ad:expiring' && String(tid) === String(env.ADMIN_ID)) {
       out = await expiringList(env);
     } else if (cb.data.startsWith('ad:') && String(tid) === String(env.ADMIN_ID)) {
@@ -1390,6 +1870,10 @@ async function handle(upd, env, steps, ctx) {
           'لیست پلن‌ها را بفرستید، هر خط: شناسه|برچسب|تعداد روز\nمثال:\nm1|۱ ماهه — ۱۰۰ هزار تومان|30\nm3|۳ ماهه — ۲۵۰ هزار تومان|90\nm12|یک‌ساله — ۸۰۰ هزار تومان|365',
           'plans'
         );
+      } else if (a === 'plans') {
+        out = await planUsersEditor(env);
+      } else if (a === 'panel') {
+        out = await adminPanel(env, tid);
       } else if (a === 'pending') {
         out = await pendingList(env, tid);
       } else if (a === 'users') {
@@ -1486,6 +1970,9 @@ async function handle(upd, env, steps, ctx) {
         return;
       }
       if (mode === 'plans') {
+        // v2.1: the text editor only sets id/label/days — a plan's
+        // maxUsers survives a re-save (a new id gets its built-in default).
+        const oldPlans = await plansOf(env);
         const rows = [];
         const bad = [];
         for (const [n, raw] of text.split('\n').entries()) {
@@ -1498,7 +1985,8 @@ async function handle(upd, env, steps, ctx) {
             bad.push(`خط ${n + 1}: ${l.slice(0, 40)}`);
             continue;
           }
-          rows.push({ id: parts[0].replace(/\s+/g, ''), label: parts[1], days: parseInt(parts[2]) });
+          const pid = parts[0].replace(/\s+/g, '');
+          rows.push({ id: pid, label: parts[1], days: parseInt(parts[2]), maxUsers: planMaxUsers(oldPlans.find((x) => x.id === pid) || { id: pid }) });
         }
         const ids = rows.map((r) => r.id);
         if (new Set(ids).size !== ids.length) {
@@ -1764,21 +2252,41 @@ async function ensureIndexed(env, tid) {
         await sendReply(env, tid, {text: `❌ موردی برای «${q}» یافت نشد.`});
         return;
       }
-      const now = Math.floor(Date.now() / 1000);
-      const active = lic && lic.expiresAt && lic.expiresAt > now && lic.plan !== 'revoked';
-      const joins = targetTid ? parseInt((await env.LICENSES.get(`refjoin:${targetTid}`)) || '0') : 0;
-      const credit = targetTid ? parseInt((await env.LICENSES.get(`credit:${targetTid}`)) || '0') : 0;
-      const info =
-        `🔍 *اطلاعات کاربر و لایسنس*\n\n` +
-        `👤 آیدی عددی: \`${targetTid || 'نامشخص'}\`\n` +
-        `🔑 کد لایسنس: \`${key || 'ندارد'}\`\n` +
-        `📦 پلن: *${lic?.plan || 'نامشخص'}*\n` +
-        `🚦 وضعیت: *${active ? 'فعال ✅' : 'غیرفعال / منقضی ❌'}*\n` +
-        `⏳ باقی‌مانده: *${lic?.expiresAt ? formatDuration(lic.expiresAt - now) : '—'}*\n` +
-        `📅 تاریخ انقضا: *${lic?.expiresAt ? formatJalali(lic.expiresAt) : '—'}*\n` +
-        `👥 تعداد دعوت‌ها: ${joins} نفر\n` +
-        `🎁 اعتبار هدیه ذخیره: ${credit} روز`;
-      await sendReply(env, tid, {text: info, parse_mode: 'Markdown'});
+      await sendReply(env, tid, await findPayload(env, key, targetTid, lic), steps);
+      return;
+    }
+    // v2.1: /setusers <key|tid> <1..5> — set a licence's device limit.
+    // Trial is always 1 user and cannot be changed.
+    if (text.startsWith('/setusers')) {
+      const [, keyS, nS] = text.split(/\s+/);
+      const n = parseInt(nS || '0', 10);
+      if (!keyS || !Number.isFinite(n) || n < 1 || n > 5) {
+        await sendReply(env, tid, {text: 'فرمت: /setusers <کد لایسنس یا آیدی> <عدد ۱ تا ۵>'});
+        return;
+      }
+      let key = keyS;
+      let lic = null;
+      let targetTid = keyS;
+      if (keyS.toUpperCase().startsWith('VDRV-')) {
+        key = keyS.toUpperCase();
+        lic = await getLic(env, key);
+        targetTid = lic?.telegramId;
+      } else {
+        key = await userKey(env, targetTid);
+        lic = key ? await getLic(env, key) : null;
+      }
+      if (!lic || !key) {
+        await sendReply(env, tid, {text: `❌ لایسنسی برای «${keyS}» یافت نشد.`});
+        return;
+      }
+      if (lic.plan === 'trial') {
+        await sendReply(env, tid, {text: '⚠️ تریال همیشه ۱ کاربر است و قابل تغییر نیست.'});
+        return;
+      }
+      lic.maxUsers = n;
+      await putLic(env, key, lic);
+      const cnt = normalizeSessions(lic).length;
+      await sendReply(env, tid, {text: `✅ حداکثر کاربر لایسنس \`${key}\` به *${n} کاربر* تغییر کرد.\n📱 نشست‌های ثبت‌شده: ${cnt}`, parse_mode: 'Markdown'});
       return;
     }
     if (text.startsWith('/revoke')) {
@@ -1875,11 +2383,27 @@ async function ensureIndexed(env, tid) {
       }
       let key = await userKey(env, target);
       let lic = key ? await getLic(env, key) : null;
+      let isNew = false;
       if (lic && lic.expiresAt) {
         await extend(env, key, days);
         await upgradePlan(env, key, 'paid');
       } else {
         key = await issueKey(env, target, days, 'paid');
+        isNew = true;
+      }
+      // v2.1: a newly issued licence takes the device limit of the plan
+      // the user last picked (extend keeps maxUsers on an existing one).
+      if (isNew) {
+        const lastPlanId = await getSetting(env, `lastPlan:${target}`, '');
+        if (lastPlanId) {
+          const plans = await plansOf(env);
+          const pp = plans.find((x) => x.id === lastPlanId);
+          const nl = await getLic(env, key);
+          if (pp && nl) {
+            nl.maxUsers = planMaxUsers(pp);
+            await putLic(env, key, nl);
+          }
+        }
       }
       await applyCredit(env, key, target);
       await env.LICENSES.delete(`receipt:${target}`);
@@ -1957,6 +2481,7 @@ async function ensureIndexed(env, tid) {
         `• \`/panel\` — باز کردن پنل تنظیمات ربات\n` +
         `• \`/stats\` — گزارش آمار سیستم\n` +
         `• \`/find <آیدی یا کد>\` — جستجو و جزئیات کاربر یا لایسنس\n` +
+        `• \`/setusers <کد یا آیدی> <۱ تا ۵>\` — حداکثر دستگاه هم‌زمان یک لایسنس\n` +
         `• \`/gen <روز> [آیدی]\` — تولید لایسنس مستقیم\n` +
         `• \`/ok <آیدی> <روز>\` — تایید پرداخت کاربر\n` +
         `• \`/adddays <آیدی یا کد> <روز>\` — افزودن روز به لایسنس موجود\n` +
@@ -2043,7 +2568,8 @@ async function buyMenuFull(env) {
     text: `${escMd(buyText)}\n\n💳 شماره کارت جهت واریز:\n\`${escMd(card)}\`\n\nلطفاً پلن مورد نظر را انتخاب و پس از واریز، عکس رسید را در همین چت ارسال نمایید:`,
     parse_mode: 'Markdown',
     reply_markup: {
-      inline_keyboard: withHome((await plansOf(env)).map((p) => [{ text: p.label, callback_data: `plan:${p.id}` }])),
+      // v2.1: each plan label shows its device limit ("تا N کاربر").
+      inline_keyboard: withHome((await plansOf(env)).map((p) => [{ text: `${p.label} (تا ${planMaxUsers(p)} کاربر)`, callback_data: `plan:${p.id}` }])),
     },
   };
 }
@@ -2150,6 +2676,52 @@ async function buildStatsMessage(env) {
   };
 }
 
+// v2.1: /find payload — licence/user details plus maxUsers, session
+// counts, and quick buttons to change the device limit (not for trial).
+async function findPayload(env, key, targetTid, lic) {
+  const now = Math.floor(Date.now() / 1000);
+  const active = lic && lic.expiresAt && lic.expiresAt > now && lic.plan !== 'revoked';
+  const joins = targetTid ? parseInt((await env.LICENSES.get(`refjoin:${targetTid}`)) || '0') : 0;
+  const credit = targetTid ? parseInt((await env.LICENSES.get(`credit:${targetTid}`)) || '0') : 0;
+  const sessions = lic ? normalizeSessions(lic) : [];
+  const activeCount = lic ? activeSessionsOf(lic, now).length : 0;
+  const info =
+    `🔍 *اطلاعات کاربر و لایسنس*\n\n` +
+    `👤 آیدی عددی: \`${targetTid || 'نامشخص'}\`\n` +
+    `🔑 کد لایسنس: \`${key || 'ندارد'}\`\n` +
+    `📦 پلن: *${lic?.plan || 'نامشخص'}*\n` +
+    `🚦 وضعیت: *${active ? 'فعال ✅' : 'غیرفعال / منقضی ❌'}*\n` +
+    `⏳ باقی‌مانده: *${lic?.expiresAt ? formatDuration(lic.expiresAt - now) : '—'}*\n` +
+    `📅 تاریخ انقضا: *${lic?.expiresAt ? formatJalali(lic.expiresAt) : '—'}*\n` +
+    `👥 حداکثر کاربر: *${lic ? maxUsersOf(lic) : '—'}*\n` +
+    `📱 نشست‌ها: *${activeCount} فعال از ${sessions.length} ثبت‌شده*\n` +
+    `👥 تعداد دعوت‌ها: ${joins} نفر\n` +
+    `🎁 اعتبار هدیه ذخیره: ${credit} روز`;
+  const rows = [];
+  if (lic && key && lic.plan !== 'trial') {
+    rows.push([1, 2, 3, 5].map((v) => ({ text: (v === maxUsersOf(lic) ? '✅ ' : '') + `${v} کاربر`, callback_data: `fsetu:${key}:${v}` })));
+  }
+  return { text: info, parse_mode: 'Markdown', reply_markup: rows.length ? { inline_keyboard: rows } : undefined };
+}
+
+// v2.1: per-plan device-limit editor (admin panel). Each plan gets one
+// row of 1/2/3/5-user buttons; the current value is marked ✅.
+async function planUsersEditor(env) {
+  const plans = await plansOf(env);
+  let t = '👥 *کاربران هر پلن*\n\nبرای هر پلن، حداکثر تعداد دستگاه هم‌زمان را انتخاب کنید (۱ تا ۵).\nتریال همیشه ۱ کاربر است و قابل تغییر نیست.\n\n';
+  const rows = [];
+  for (const p of plans) {
+    const n = planMaxUsers(p);
+    t += `• ${escMd(p.label)} — تا *${n} کاربر*\n`;
+    rows.push([1, 2, 3, 5].map((v) => ({ text: v === n ? `✅ ${p.id}: ${v}` : `${p.id}: ${v}`, callback_data: `planusers:${p.id}:${v}` })));
+  }
+  return {
+    text: t,
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: withHome([...rows, [{ text: '⬅️ بازگشت به پنل', callback_data: 'ad:panel' }]]) },
+  };
+}
+
 async function adminPanel(env, tid) {
   const card = await getSetting(env, 'cardNumber', '—');
   const buy = await getSetting(env, 'buyText', 'خرید لایسنس');
@@ -2180,6 +2752,7 @@ async function adminPanel(env, tid) {
       inline_keyboard: withHome([
         [{ text: '✏️ متن خرید', callback_data: 'ad:editbuy' }, { text: '💳 شماره کارت', callback_data: 'ad:editcard' }],
         [{ text: '💰 قیمت‌ها', callback_data: 'ad:editplans' }, { text: '📢 کانال اجباری', callback_data: 'ad:editch' }],
+        [{ text: '👥 کاربران هر پلن', callback_data: 'ad:plans' }],
         [{ text: '🆘 پشتیبانی', callback_data: 'ad:editsup' }, { text: '🎁 روز تست', callback_data: 'ad:edittrial' }],
         [{ text: '📊 آمار کامل', callback_data: 'ad:stats' }, { text: `🧾 رسیدها (${pending})`, callback_data: 'ad:pending' }],
         [{ text: '⏰ در آستانهٔ انقضا', callback_data: 'ad:expiring' }, { text: '👥 کاربران اخیر', callback_data: 'ad:users' }],
@@ -2348,6 +2921,7 @@ async function doPlan(env, tid, planId) {
   return {
     text:
       `🛒 *پلن انتخابی:* ${escMd(p.label)}\n\n` +
+      `👥 تا *${planMaxUsers(p)} دستگاه* هم‌زمان می‌توانند با این لایسنس وصل شوند.\n\n` +
       `💳 لطفاً مبلغ را به شماره کارت زیر واریز کنید:\n\`${escMd(card)}\`\n\n` +
       `سپس تصویر فیش یا اسکرین‌شات رسید را همین‌جا ارسال کنید تا تایید شود.`,
     parse_mode: 'Markdown',
