@@ -487,7 +487,9 @@ class VpnController extends ChangeNotifier {
     // License gate: connecting requires an active (or graced) license.
     if (snapshot.phase != EnginePhase.connected &&
         !(await LicenseService.instance.check())) {
-      toast = s.licenseRequiredToast;
+      toast = LicenseService.instance.lastError == 'session-revoked'
+          ? s.sessionRevokedToast
+          : s.licenseRequiredToast;
       notifyListeners();
       return;
     }

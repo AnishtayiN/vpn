@@ -1,5 +1,28 @@
 # CHANGELOG — VoidrauVPN
 
+## v1.5.3: نشست‌ها و پلن‌های چندکاربره
+
+- `LicenseService`: شناسهٔ پایدار دستگاه (`device.id` در secure storage،
+  ۳۲ کاراکتر hex از `Random.secure`، بدون پکیج جدید) + نام دستگاه از
+  سیستم‌عامل، پلتفرم و نسخهٔ اپ در هر `check()` به `/api/license` فرستاده
+  می‌شود. پاسخ `maxUsers`، `sessions`، `sessionId` و `sessionActive` را
+  ذخیره می‌کند؛ اگر نشست این دستگاه حذف شده باشد (`sessionActive == false`
+  یا دستگاه در لیست نشست‌ها نباشد) کلید پاک و کاربر به صفحهٔ لایسنس
+  برمی‌گردد با پیام «نشست این دستگاه حذف شد».
+- خطای 409 `session-limit` به‌صورت ساخت‌یافته (`lastLimitError`: سقف + لیست
+  دستگاه‌های فعال) نگه داشته می‌شود؛ صفحهٔ فعال‌سازی لیست دستگاه‌ها را
+  نشان می‌دهد و حذف یکی و تلاش دوباره را پیشنهاد می‌کند (یا مدیریت از ربات
+  @VoidRauBot).
+- صفحهٔ جدید «نشست‌ها» (`lib/ui/pages/sessions_page.dart`، از صفحهٔ لایسنس):
+  لیست نشست‌ها با نام دستگاه، پلتفرم، نسخهٔ اپ و آخرین فعالیت به تاریخ
+  شمسی، نشان «این دستگاه»، برچسب «غیرفعال» برای نشست‌های بی‌فعالیت بیش از
+  ۳۰ روز، حذف یک نشست و حذف همه به‌جز این دستگاه (هر دو با تأیید).
+  صفحهٔ لایسنس «تا N دستگاه» را نشان می‌دهد.
+- متدهای `revokeSession(sessionId)` و `revokeAllSessions(keepCurrent: true)`
+  با همان API ورکر (`POST /api/sessions/revoke` و `revoke-all`).
+- تست‌ها: `test/sessions_test.dart` (شکل deviceId، تجزیهٔ نشست‌ها، خطای
+  session-limit، مسیرهای check/revoke با HTTP ساختگی).
+
 ## Unreleased — v1.5.2: Psiphon/Tor actually work + connection-mode UX
 
 Root cause (see `../bpb-audit/psiphon-tor-diagnosis-fa.md` in the audit notes):

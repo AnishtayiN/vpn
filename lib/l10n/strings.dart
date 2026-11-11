@@ -1,3 +1,5 @@
+import '../data/jalali.dart';
+
 class S {
   S(this.languageCode);
   final String languageCode;
@@ -550,6 +552,57 @@ class S {
   String get licenseRequiredToast => isFa
       ? 'لایسنس فعال نیست — از تب «لایسنس» تست رایگان بگیرید'
       : 'No active license — get a free trial from the License tab';
+  String get sessionRevoked => isFa
+      ? 'نشست این دستگاه حذف شد — دوباره با کد لایسنس وارد شوید'
+      : 'This device’s session was removed — sign in again with your key';
+  String get sessionRevokedToast => isFa
+      ? 'نشست این دستگاه حذف شد — دوباره وارد شوید'
+      : 'This device’s session was removed — sign in again';
+
+  // ── sessions ───────────────────────────────────────────────────────────
+  String get sessionsTitle => isFa ? 'نشست‌ها' : 'Sessions';
+  String get sessionsThisDevice => isFa ? 'این دستگاه' : 'This device';
+  String get sessionsInactive => isFa ? 'غیرفعال' : 'Inactive';
+  String get sessionsEmpty => isFa
+      ? 'هنوز نشستی ثبت نشده است'
+      : 'No sessions yet';
+  String get sessionsDelete => isFa ? 'حذف' : 'Remove';
+  String get sessionsDeleteAllExceptThis => isFa
+      ? 'حذف همه به‌جز این دستگاه'
+      : 'Remove all except this device';
+  String get sessionsManageInBot => isFa
+      ? 'مدیریت نشست‌ها در ربات'
+      : 'Manage sessions in the bot';
+  String get sessionsLastActive => isFa ? 'آخرین فعالیت:' : 'Last active:';
+  String get sessionsUnknownDevice => isFa ? 'دستگاه ناشناس' : 'Unknown device';
+  String get sessionsDeleteTitle => isFa ? 'حذف نشست؟' : 'Remove session?';
+  String get sessionsDeleteAllTitle =>
+      isFa ? 'حذف همهٔ نشست‌های دیگر؟' : 'Remove all other sessions?';
+  String sessionsDeleteBody(String name) => isFa
+      ? 'نشست «$name» حذف می‌شود و آن دستگاه باید دوباره لایسنس را فعال کند.'
+      : 'Session “$name” will be removed and that device must activate the license again.';
+  String get sessionsDeleteAllBody => isFa
+      ? 'همهٔ دستگاه‌های دیگر از لایسنس بیرون انداخته می‌شوند و باید دوباره لایسنس را فعال کنند. این دستگاه فعال می‌ماند.'
+      : 'All other devices will be signed out of the license and must activate it again. This device stays active.';
+  String get sessionsDeleted => isFa ? 'نشست حذف شد' : 'Session removed';
+  String get sessionsDeleteFailed => isFa
+      ? 'حذف نشست انجام نشد — دوباره تلاش کنید'
+      : 'Could not remove the session — try again';
+  String sessionsUpToDevices(int n) => isFa
+      ? 'تا ${JalaliDate.toPersianDigits('$n')} دستگاه'
+      : 'Up to $n devices';
+  String sessionsActiveCount(int active, int max) => isFa
+      ? '${JalaliDate.toPersianDigits('$active')} از ${JalaliDate.toPersianDigits('$max')} نشست فعال'
+      : '$active of $max active sessions';
+  String get sessionLimitTitle => isFa
+      ? 'سقف دستگاه‌های این لایسنس پر شده است'
+      : 'This license’s device limit is reached';
+  String get sessionLimitBody => isFa
+      ? 'برای فعال‌سازی این دستگاه، یکی از دستگاه‌های زیر را حذف کنید یا از ربات مدیریت کنید.'
+      : 'To activate this device, remove one of the devices below or manage them in the bot.';
+  String get sessionLimitRetry => isFa
+      ? 'بعد از حذف، دوباره فعال‌سازی را بزنید'
+      : 'After removing one, try activating again';
 
   // ── diagnostics additions ────────────────────────────────────────────────
   String get exitLock => isFa ? 'قفل کشور خروجی در هسته' : 'Core exit lock';
