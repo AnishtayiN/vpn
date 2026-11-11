@@ -144,6 +144,20 @@ jobs:
         env:
           AETHER_TAG: ${{ matrix.aether_tag }}
         run: bash scripts/fetch_cores.sh android
+      - name: Verify Psiphon/Tor helpers are staged
+        run: |
+          set -euo pipefail
+          # Without these, Psiphon dies at startup and Tor can only use plain
+          # bridges — the app would ship modes that can never connect.
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            for f in libaether.so libpsiphon.so liblyrebird.so; do
+              if [[ ! -s "android/app/src/main/jniLibs/$abi/$f" ]]; then
+                echo "::error::missing staged helper $abi/$f"
+                exit 1
+              fi
+            done
+            echo "$abi: $(du -sh android/app/src/main/jniLibs/$abi | cut -f1)"
+          done
       - name: Build HEV JNI
         run: bash scripts/build_hev.sh
       - run: flutter pub get
@@ -262,6 +276,11 @@ jobs:
           for f in aether.exe tun2socks.exe tun2socks-legacy.exe wintun.dll; do
             if [[ ! -s "$f" ]]; then echo "::error::missing required sidecar $f"; exit 1; fi
           done
+          # Psiphon/Tor helpers: without them Psiphon dies at startup and Tor
+          # can only use plain bridges.
+          for f in pt/psiphon-tunnel-core.exe pt/lyrebird.exe; do
+            if [[ ! -s "$f" ]]; then echo "::error::missing required sidecar $f"; exit 1; fi
+          done
           # The C bridge is a fallback for old Windows: loud warning, not fatal.
           for f in hev-socks5-tunnel.exe msys-2.0.dll; do
             if [[ ! -s "$f" ]]; then echo "::warning::optional sidecar $f is missing"; fi
@@ -292,7 +311,7 @@ jobs:
         run: |
           $out = "build\windows\x64\runner\Release"
           if (-not (Test-Path $out)) { $out = "build\windows\runner\Release" }
-          Copy-Item third_party\windows\* $out -Force
+          Copy-Item third_party\windows\* $out -Recurse -Force
           Get-ChildItem $out -Filter *.exe | Select-Object Name, Length | Format-Table -AutoSize
           Get-ChildItem $out -Filter *.dll | Select-Object Name, Length | Format-Table -AutoSize
           New-Item -ItemType Directory -Force release | Out-Null

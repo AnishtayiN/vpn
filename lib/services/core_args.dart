@@ -15,17 +15,24 @@ import 'split.dart';
 /// AETHER_PSIPHON_BIND is already the 2.4.0 form, and no ENROLL_ADDRESS
 /// or API-fragment variable is used anywhere in this file.
 ///
-/// That is a statement about the *names*, not about what the 2.4.0 binary
-/// bundles: the only version-scoped evidence in this repository that Psiphon
-/// and Tor ship inside the core is for 2.3.0 (`SecondHop` / `StandaloneMode`
-/// in settings.dart).
-/// No `aether --help` output, 2.4.0 changelog or on-device run in this repo
-/// confirms them in 2.4.0, so the standalone Psiphon-only / Tor-only modes
-/// are treated as verified on 2.3.0 only ([standaloneHopVerified]) and the UI
-/// must warn on 2.4.0 instead of claiming they work there. The env vars are
-/// still sent unchanged — that is the only way to test 2.4.0 for real, and a
-/// core that does not know them fails the connect honestly instead of
-/// silently pretending to be Psiphon/Tor.
+/// That is a statement about the *names*. What the 2.4.0 binary *bundles*
+/// is now verified too, not assumed: the 2.4.0 release notes list
+/// psiphon-tunnel-core and lyrebird in every archive's LICENSES folder, the
+/// Android arm64 tarball ships `pt/psiphon-tunnel-core` and `pt/lyrebird`,
+/// the binary's own strings contain every `AETHER_PSIPHON*` / `AETHER_TOR*`
+/// name used here, and `aether --help` documents `--psiphon` /
+/// `--psiphon-reverse` / `--psiphon-only` and `--tor` / `--tor-reverse` /
+/// `--tor-only` with `AETHER_PSIPHON` / `AETHER_TOR` taking exactly
+/// `chain` / `reverse` / `only` — the tokens [_chainToken] sends.
+///
+/// The one thing the names cannot do on their own is conjure the helper
+/// binaries: Psiphon needs `psiphon-tunnel-core` and Tor's bridges need
+/// `lyrebird`, and neither ships inside the `aether` binary itself. The app
+/// must stage them beside the core (`scripts/fetch_cores.sh`) and point the
+/// core at them (`AETHER_PSIPHON_BIN` / `AETHER_TOR_PT`, set by the native
+/// launchers) — without them Psiphon dies at startup and Tor only ever
+/// sees plain bridges. That staging is what [standaloneHopVerified] now
+/// stands for, alongside the core version.
 /// transports, the QUIC v2 opener, ECH, the exit lock, traffic counters, the
 /// performance profile, the Psiphon/Tor chains and the routing rules.
 class CoreLaunch {
@@ -110,17 +117,37 @@ class CoreLaunch {
           (s.secondHop == SecondHop.psiphon ||
               s.secondHop == SecondHop.psiphonReverse));
 
+  /// Whether the effective hop dials the tunnel *through* Psiphon/Tor
+  /// (reverse) instead of carrying Psiphon/Tor inside it. A reverse hop
+  /// only speaks TCP, so the core refuses WireGuard outright and runs
+  /// MASQUE over HTTP/2 instead — see [smartVariant] and [smartLadder].
+  static bool isReverseHop(VpnSettings s) =>
+      s.standaloneMode == StandaloneMode.standard &&
+      (s.secondHop == SecondHop.psiphonReverse ||
+          s.secondHop == SecondHop.torReverse);
+
+  /// Whether the connection is a slow starter: a standalone Psiphon/Tor
+  /// mode, or a reverse hop the tunnel must be dialled through. Psiphon
+  /// gets up to 180 s to come up (`AETHER_PSIPHON_READY_SECS`) and Tor's
+  /// bootstrap plus bridges usually take a minute or two, so the traffic
+  /// validation and the connect budget must wait longer for these than for
+  /// a plain WARP tunnel.
+  static bool isSlowHop(VpnSettings s) => isStandalone(s) || isReverseHop(s);
+
   /// True for the standalone top-level modes: plain Psiphon or plain Tor on
   /// the proxy port, with no WARP underneath.
   static bool isStandalone(VpnSettings s) => s.isStandaloneHop;
 
   /// Whether the standalone Psiphon-only / Tor-only modes are verified to
-  /// exist in the bundled core. The only version-scoped evidence in this
-  /// repository is for Aether 2.3.0 (see the `SecondHop` docs in
-  /// settings.dart), so this is true on the legacy build only. On 2.4.0 the
-  /// modes stay selectable — that is how they get tested on a real device —
-  /// but the UI must show the unverified note and never claim they work there.
-  static bool get standaloneHopVerified => coreVersion.startsWith('2.3.');
+  /// exist in the bundled core *and* to have their helper binaries staged
+  /// beside it. Both Aether 2.3.0 and 2.4.0 ship Psiphon (pt/
+  /// psiphon-tunnel-core) and Tor (arti + pt/lyrebird) — verified from the
+  /// 2.4.0 release notes, the tarball contents, the binary's own strings
+  /// and a live `aether --help` run — and `fetch_cores.sh` stages those
+  /// helpers for both builds. An unknown future core version stays
+  /// unverified until the same check is done for it.
+  static bool get standaloneHopVerified =>
+      coreVersion.startsWith('2.3.') || coreVersion.startsWith('2.4.');
 
   /// Core token for the effective hop: `chain` / `reverse` for a second hop,
   /// `only` for a standalone mode (which wins over any second hop), null
@@ -257,7 +284,7 @@ class CoreLaunch {
         env['AETHER_PSIPHON_BIND'] = chainBind;
         final region = settings.psiphonRegion.trim().toUpperCase();
         if (region.isNotEmpty) env['AETHER_PSIPHON_REGION'] = region;
-        env['AETHER_PSIPHON_MODE'] = settings.psiphonCdn ? 'cdn' : 'direct';
+        env['AETHER_PSIPHON_MODE'] = settings.psiphonCdn ? 'cdn' : 'auto';
         if (settings.hopHttp) {
           // The hop's own HTTP listener would collide with the tunnel's, so a
           // dedicated port is reserved for it.
@@ -320,6 +347,23 @@ class CoreLaunch {
     // the same only-mode core five times. One rung, the effective protocol
     // (Smart still resolves to MASQUE — the env still needs AETHER_PROTOCOL).
     if (isStandalone(settings)) return [_effective(settings, null)];
+    // A reverse hop only speaks TCP: the core refuses WireGuard outright
+    // ("tor carries tcp only and warp's wireguard endpoints answer on udp
+    // alone"), so a fixed WireGuard protocol becomes MASQUE and the Smart
+    // ladder drops its WireGuard rung instead of wasting an attempt on a
+    // refusal that is known before dialling.
+    if (isReverseHop(settings)) {
+      if (settings.protocol == Protocol.wg) return [Protocol.masque];
+      if (settings.protocol != Protocol.smart) {
+        return [settings.protocol];
+      }
+      return const [
+        Protocol.masque,
+        Protocol.masque,
+        Protocol.gool,
+        Protocol.mim,
+      ];
+    }
     if (settings.protocol != Protocol.smart) {
       return [settings.protocol];
     }
@@ -359,8 +403,21 @@ class CoreLaunch {
     required Protocol proto,
     String? endpoint,
   }) {
-    final variant = base.copyWithProtocol(proto);
-    final masque = proto == Protocol.masque || proto == Protocol.mim;
+    // A reverse hop only speaks TCP: the core refuses WireGuard outright
+    // ("tor carries tcp only and warp's wireguard endpoints answer on udp
+    // alone"), so a WireGuard rung is rewritten to MASQUE over HTTP/2 —
+    // the carrier the core itself uses for reverse hops — instead of
+    // sending a combination that is known to fail before dialling.
+    final effectiveProto =
+        (isReverseHop(base) && proto == Protocol.wg)
+            ? Protocol.masque
+            : proto;
+    final variant = base.copyWithProtocol(effectiveProto);
+    final masque =
+        effectiveProto == Protocol.masque || effectiveProto == Protocol.mim;
+    if (isReverseHop(base) && masque) {
+      variant.transport = MasqueTransport.h2;
+    }
     if (base.protocol == Protocol.smart && ladder.length > 1) {
       // The second rung of every pass carries the hidden handshake: it is the
       // rung that runs after the plain QUIC attempt has already failed.

@@ -96,6 +96,16 @@ class ConfigPage extends StatelessWidget {
             c.persist();
           }, enabled: !xray),
         ],
+        // A reverse hop only speaks TCP: the core refuses WireGuard and runs
+        // MASQUE over HTTP/2, so the protocol picker above is not what runs.
+        // Say so here instead of letting the user believe WireGuard was used.
+        if (CoreLaunch.isReverseHop(st) && !xray)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(s.reverseForcesMasque,
+                style:
+                    const TextStyle(color: VoidrauColors.muted, fontSize: 12)),
+          ),
         _label(s.ipVersion),
         _seg(st.ipVersion.name, const {
           'v4': 'IPv4',
@@ -332,8 +342,9 @@ class ConfigPage extends StatelessWidget {
           // standalone env (AETHER_PSIPHON* / AETHER_TOR*) — no new core
           // variables. The region/country fields below (in the second-hop
           // section) already appear for these modes, so they are not
-          // duplicated here.
-          _label(s.standaloneMode),
+          // duplicated here. This is the connection mode itself, so it
+          // carries that label — the same words the Connect page shows.
+          _label(s.connectionMode),
           Text(s.standaloneHelp,
               style: const TextStyle(color: VoidrauColors.muted, fontSize: 12)),
           const SizedBox(height: 8),
@@ -363,20 +374,39 @@ class ConfigPage extends StatelessWidget {
             Text(s.standaloneUnverified,
                 style: const TextStyle(color: VoidrauColors.coral, fontSize: 12)),
           ],
+          if (st.isStandaloneHop) ...[
+            const SizedBox(height: 8),
+            Text(s.standaloneSlow,
+                style: const TextStyle(color: VoidrauColors.muted, fontSize: 12)),
+          ],
           _label(s.secondHop),
           Text(s.secondHopHelp,
               style: const TextStyle(color: VoidrauColors.muted, fontSize: 12)),
           const SizedBox(height: 8),
-          _seg(st.secondHop.name, {
-            'off': s.hopOff,
-            'psiphon': s.hopPsiphon,
-            'psiphonReverse': s.hopPsiphonReverse,
-            'tor': s.hopTor,
-            'torReverse': s.hopTorReverse,
-          }, (v) {
-            st.secondHop = SecondHop.values.firstWhere((e) => e.name == v);
-            c.persist();
-          }, wrap: true),
+          // A standalone mode has no WARP underneath to carry a second hop
+          // through, so the hop below is silently ignored while one is set.
+          // Grey it out and say so instead of letting the user pick a hop
+          // that will never run.
+          if (st.isStandaloneHop)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(s.hopIgnoredNote,
+                  style:
+                      const TextStyle(color: VoidrauColors.muted, fontSize: 12)),
+            ),
+          _disabledWhen(
+            st.isStandaloneHop,
+            _seg(st.secondHop.name, {
+              'off': s.hopOff,
+              'psiphon': s.hopPsiphon,
+              'psiphonReverse': s.hopPsiphonReverse,
+              'tor': s.hopTor,
+              'torReverse': s.hopTorReverse,
+            }, (v) {
+              st.secondHop = SecondHop.values.firstWhere((e) => e.name == v);
+              c.persist();
+            }, wrap: true),
+          ),
           if (st.secondHop != SecondHop.off || st.isStandaloneHop) ...[
             if (CoreLaunch.isPsiphon(st)) ...[
               _label(s.hopRegion),

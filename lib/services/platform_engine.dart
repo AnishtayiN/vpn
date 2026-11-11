@@ -322,6 +322,23 @@ class WindowsEngine {
       override: proto,
       configPath: p.join(runtimeDir, 'aether.toml'),
     );
+    // Psiphon/Tor helper binaries: fetch_cores.sh stages them in pt/ beside
+    // aether.exe. The core finds ./pt on its own only when its working
+    // directory is the exe dir — ours is runtimeDir — so point at them
+    // explicitly when they are there. Without them Psiphon dies at startup
+    // and Tor can only use plain bridges.
+    final ptDir = coreFile.existsSync()
+        ? p.join(exeDir, 'pt')
+        : p.join(Directory.current.path, 'third_party', 'windows', 'pt');
+    final psiphonBin = File(p.join(ptDir, 'psiphon-tunnel-core.exe'));
+    if (psiphonBin.existsSync()) {
+      env['AETHER_PSIPHON_BIN'] = psiphonBin.path;
+    }
+    final lyrebirdBin = File(p.join(ptDir, 'lyrebird.exe'));
+    if (lyrebirdBin.existsSync()) {
+      env['AETHER_TOR_PT'] = 'obfs4=${lyrebirdBin.path}';
+      env['AETHER_TOR_PT_DIR'] = ptDir;
+    }
     final corePath = coreFile.existsSync()
         ? coreFile.path
         : p.join(Directory.current.path, 'third_party', 'windows',
@@ -346,7 +363,12 @@ class WindowsEngine {
       }
     });
 
-    final ready = await _waitSocks(const Duration(seconds: 90));
+    // A standalone Psiphon/Tor mode or a reverse hop is a slow starter
+    // (Psiphon gets up to 180 s, Tor's bootstrap plus bridges a minute or
+    // two); the plain 90 s SOCKS wait would cut it off mid-bootstrap.
+    final slowHop = CoreLaunch.isSlowHop(settings);
+    final ready = await _waitSocks(
+        slowHop ? const Duration(seconds: 240) : const Duration(seconds: 90));
     if (!ready) {
       lastError = lastError.isEmpty
           ? 'SOCKS5 listener did not start (gateway scan found nothing)'
@@ -365,7 +387,15 @@ class WindowsEngine {
     message = 'Verifying the tunnel';
     _emit();
     try {
-      await SocksProbe.prove(port: _socksPort);
+      // A slow hop needs more than the default two 10 s probes: its first
+      // traffic can legitimately take minutes.
+      await SocksProbe.prove(
+        port: _socksPort,
+        attempts: slowHop ? 6 : 2,
+        timeout: slowHop
+            ? const Duration(seconds: 30)
+            : const Duration(seconds: 10),
+      );
     } catch (e) {
       lastError = 'tunnel carries no traffic';
       phase = EnginePhase.error;

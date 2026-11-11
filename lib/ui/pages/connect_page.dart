@@ -15,8 +15,11 @@ import '../widgets/flag_icon.dart';
 import '../widgets/orb_button.dart';
 
 class ConnectPage extends StatelessWidget {
-  const ConnectPage({super.key, required this.controller});
+  const ConnectPage({super.key, required this.controller, this.onShowDiagnostics});
   final VpnController controller;
+
+  /// Opens the Diagnostics page (the shell owns navigation).
+  final VoidCallback? onShowDiagnostics;
 
   @override
   Widget build(BuildContext context) {
@@ -112,6 +115,32 @@ class ConnectPage extends StatelessWidget {
           textAlign: TextAlign.center,
           style: const TextStyle(color: VoidrauColors.muted),
         ),
+        // A failed connect names its cause in the status line above; the
+        // full core log lives in Diagnostics — one tap away, not buried.
+        if (snap.phase == EnginePhase.error && onShowDiagnostics != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: TextButton.icon(
+              onPressed: onShowDiagnostics,
+              icon: const Icon(Icons.bug_report_outlined, size: 18),
+              label: Text(s.showDiagnostics),
+            ),
+          ),
+        // One line that says which tunnel the orb is about to dial — engine
+        // plus mode — so the user never has to reconcile the three pickers
+        // (protocol, standalone mode, Xray mode) in their head.
+        if (!connected)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(
+              _modeSummary(c, s),
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                  color: VoidrauColors.cyan,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12),
+            ),
+          ),
         // The exit rule only applies to Aether: while Xray is the selected
         // engine the badge would describe a rule no tunnel enforces.
         if (!connected && !c.useXray)
@@ -119,32 +148,15 @@ class ConnectPage extends StatelessWidget {
             padding: const EdgeInsets.only(top: 8),
             child: ExitFilterBadge(controller: c),
           ),
-        // Standalone Psiphon-only / Tor-only mode, when selected: shown on
-        // the connect screen itself so the user sees which tunnel is about
-        // to run (or is running) without opening Configurations. Tor is
-        // labelled the heaviest mode, and on a core where Psiphon/Tor are
-        // unverified (2.4.0) the warning is shown, not a promise.
+        // Standalone Psiphon-only / Tor-only mode, when selected: the mode
+        // itself is already in the summary line above, so only the notes
+        // that change behaviour stay here — Tor is the heaviest mode, and
+        // both hops are slow starters.
         if (c.standaloneHopActive && !c.useXray)
           Padding(
             padding: const EdgeInsets.only(top: 8),
             child: Column(
               children: [
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: VoidrauColors.surface,
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: VoidrauColors.line),
-                  ),
-                  child: Text(
-                    '${s.standaloneMode}: ${c.settings.standaloneMode == StandaloneMode.psiphonOnly ? s.hopPsiphonOnly : s.hopTorOnly}',
-                    style: const TextStyle(
-                        color: VoidrauColors.cyan,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 12),
-                  ),
-                ),
                 if (c.settings.standaloneMode == StandaloneMode.torOnly)
                   Padding(
                     padding: const EdgeInsets.only(top: 6),
@@ -155,6 +167,15 @@ class ConnectPage extends StatelessWidget {
                           color: VoidrauColors.muted, fontSize: 12),
                     ),
                   ),
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    s.standaloneSlow,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                        color: VoidrauColors.muted, fontSize: 12),
+                  ),
+                ),
                 if (c.standaloneHopUnverified)
                   Padding(
                     padding: const EdgeInsets.only(top: 6),
@@ -402,6 +423,45 @@ class ConnectPage extends StatelessWidget {
     final sec = (d.inSeconds % 60).toString().padLeft(2, '0');
     return '$h:$m:$sec';
   }
+}
+
+/// The single "which tunnel runs" line: engine plus mode, in one sentence.
+/// A standalone mode wins over any second hop (the hop is ignored there),
+/// so the hop is only named in Standard mode; a reverse hop forces MASQUE
+/// over HTTP/2 in the core, so the protocol shown is the one that runs.
+String _modeSummary(VpnController c, S s) {
+  final st = c.settings;
+  if (c.useXray) {
+    final mode = switch (st.xrayMode) {
+      XrayMode.worker => s.xrayWorker,
+      XrayMode.warp => s.xrayWarp,
+      XrayMode.serverless => s.xrayServerless,
+      XrayMode.off => s.xrayOff,
+    };
+    return s.connectionModeLine('Xray', mode);
+  }
+  if (st.standaloneMode == StandaloneMode.psiphonOnly) {
+    return s.connectionModeLine('Aether', s.hopPsiphonOnly);
+  }
+  if (st.standaloneMode == StandaloneMode.torOnly) {
+    return s.connectionModeLine('Aether', s.hopTorOnly);
+  }
+  final protocol = switch (st.protocol) {
+    Protocol.smart => 'Smart',
+    Protocol.masque => 'MASQUE',
+    Protocol.wg => 'WireGuard',
+    Protocol.gool => 'gool',
+    Protocol.mim => 'MASQUE×2',
+  };
+  final hop = switch (st.secondHop) {
+    SecondHop.off => '',
+    SecondHop.psiphon => s.hopPsiphon,
+    SecondHop.psiphonReverse => s.hopPsiphonReverse,
+    SecondHop.tor => s.hopTor,
+    SecondHop.torReverse => s.hopTorReverse,
+  };
+  final mode = hop.isEmpty ? protocol : '$protocol + $hop';
+  return s.connectionModeLine('Aether', mode);
 }
 
 /// The "where am I?" card shown once the tunnel is up: the flag of the country

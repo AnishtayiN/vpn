@@ -235,7 +235,10 @@ class _HomeShellState extends State<HomeShell> {
           body: IndexedStack(
             index: index,
             children: [
-              ConnectPage(controller: c),
+              ConnectPage(
+                controller: c,
+                onShowDiagnostics: () => setState(() => index = 5),
+              ),
               ConfigPage(controller: c),
               SpeedPage(controller: c),
               SplitPage(controller: c),

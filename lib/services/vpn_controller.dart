@@ -12,6 +12,7 @@ import '../l10n/strings.dart';
 import '../models/engine_state.dart';
 import '../models/settings.dart';
 import 'core_args.dart';
+import 'core_errors.dart';
 import 'license_service.dart';
 import 'exit_pin.dart';
 import 'ios_policy.dart';
@@ -747,18 +748,28 @@ class VpnController extends ChangeNotifier {
       // repeated search does not replay the same rung forever.
       final attempt = _variant(epoch * ladder.length + i, ladder, proto,
           endpoint: endpoint);
+      // The protocol that actually runs: identical to the rung, except a
+      // reverse hop rewrites WireGuard to MASQUE (see CoreLaunch.smartVariant).
+      // Everything downstream — display, wait, pin — must name the protocol
+      // that ran, or a saved pin would later re-dial the refused one.
+      final dialProto = attempt.protocol;
       _set(snapshot.copyWith(
         phase: EnginePhase.scanning,
-        protocol: proto.name,
+        protocol: dialProto.name,
         message: _rejectedExits.isEmpty
-            ? '${s.protocol}: ${proto.name}'
+            ? '${s.protocol}: ${dialProto.name}'
             : exitSearchStatus,
       ));
       try {
-        await engine.start(attempt, protocol: proto);
+        // The variant carries the effective protocol: a reverse hop rewrites
+        // a WireGuard rung to MASQUE (see CoreLaunch.smartVariant), so the
+        // override must come from the variant, not the raw ladder rung —
+        // passing the rung would send AETHER_PROTOCOL=wg to a core that
+        // refuses WireGuard through a reverse hop.
+        await engine.start(attempt, protocol: dialProto);
       } catch (e) {
         lastError = '$e';
-        _log('start ${proto.name}: $e');
+        _log('start ${dialProto.name}: $e');
         // The very first rung of a pass is the pinned gateway when one exists;
         // if it cannot even start, the pin is dead — drop it so the remaining
         // rungs scan fresh instead of retrying the stale peer every pass.
@@ -768,7 +779,7 @@ class VpnController extends ChangeNotifier {
         await engine.stop();
         continue;
       }
-      var up = await _waitConnected(proto);
+      var up = await _waitConnected(dialProto);
       if (up && Platform.isIOS && _wantUp) {
         try {
           // Native readiness proves SOCKS; also prove the actual device route.
@@ -791,12 +802,12 @@ class VpnController extends ChangeNotifier {
           ip: exit?.ip ?? '',
           country: cc,
           endpoint: ep,
-          protocol: proto.name,
+          protocol: dialProto.name,
         );
         if (matchesExitFilter(cc, settings)) {
-          unawaited(_finalizeConnected(proto));
+          unawaited(_finalizeConnected(dialProto));
           unawaited(_savePin(
-            (endpoint: ep, protocol: proto.name),
+            (endpoint: ep, protocol: dialProto.name),
             cc,
           ));
           return AttemptOutcome.accepted;
@@ -811,7 +822,7 @@ class VpnController extends ChangeNotifier {
         // one-tap fallback offered when the search runs long.
         if (cc.isNotEmpty &&
             settings.exitBlocked.map((e) => e.toUpperCase()).contains(cc)) {
-          _fallback = (endpoint: ep, protocol: proto.name);
+          _fallback = (endpoint: ep, protocol: dialProto.name);
         }
         // The core was handed the same rule and re-dials the gateway on its
         // own when the exit sits in a blocked country; tearing the tunnel down
@@ -823,11 +834,11 @@ class VpnController extends ChangeNotifier {
             ip: moved.ip,
             country: moved.country,
             endpoint: ep,
-            protocol: proto.name,
+            protocol: dialProto.name,
           );
-          unawaited(_finalizeConnected(proto));
+          unawaited(_finalizeConnected(dialProto));
           unawaited(_savePin(
-            (endpoint: ep, protocol: proto.name),
+            (endpoint: ep, protocol: dialProto.name),
             moved.country,
           ));
           return AttemptOutcome.accepted;
@@ -847,7 +858,7 @@ class VpnController extends ChangeNotifier {
           : (Platform.isWindows && WindowsEngine.instance.lastError.isNotEmpty
               ? WindowsEngine.instance.lastError
               : 'timeout');
-      _log('${proto.name}: $lastError');
+      _log('${dialProto.name}: $lastError');
       await engine.stop();
     }
     if (!_wantUp) return AttemptOutcome.failed;
@@ -867,7 +878,7 @@ class VpnController extends ChangeNotifier {
     _promptTimer?.cancel();
     _set(snapshot.copyWith(
       phase: EnginePhase.error,
-      message: lastError,
+      message: friendlyCoreError(lastError, s),
       clearConnectedAt: true,
     ));
     _scheduleWatchdog();
@@ -1255,10 +1266,15 @@ class VpnController extends ChangeNotifier {
     // Generous budget: the gateway scan on a filtered network is the slow
     // part (the reference client gives MASQUE 60s, then races the h2 carrier). Cutting
     // at 60s while the core is still mid-scan is what produced the endless
-    // spinner and ladder churn.
-    final budget = (Platform.isAndroid || Platform.isIOS)
-        ? const Duration(seconds: 210)
-        : const Duration(seconds: 150);
+    // spinner and ladder churn. A standalone Psiphon/Tor mode or a reverse
+    // hop is slower still — Psiphon gets up to 180 s to come up and Tor's
+    // bootstrap plus bridges usually take a minute or two — so those get a
+    // 300 s budget instead of being cut off mid-bootstrap.
+    final budget = CoreLaunch.isSlowHop(settings)
+        ? const Duration(seconds: 300)
+        : (Platform.isAndroid || Platform.isIOS)
+            ? const Duration(seconds: 210)
+            : const Duration(seconds: 150);
     final deadline = DateTime.now().add(budget);
     while (DateTime.now().isBefore(deadline)) {
       if (!_wantUp) return false;
@@ -1283,7 +1299,8 @@ class VpnController extends ChangeNotifier {
           final msg = st['message']?.toString() ?? '';
           _set(snapshot.copyWith(
             phase: EnginePhase.error,
-            message: msg.isEmpty ? snapshot.message : msg,
+            message: friendlyCoreError(
+                msg.isEmpty ? snapshot.message : msg, s),
           ));
           return false;
         }
@@ -1309,7 +1326,7 @@ class VpnController extends ChangeNotifier {
         if (win.phase == EnginePhase.error) {
           _set(snapshot.copyWith(
             phase: EnginePhase.error,
-            message: win.message,
+            message: friendlyCoreError(win.message, s),
           ));
           return false;
         }
@@ -1496,6 +1513,13 @@ class VpnController extends ChangeNotifier {
         orElse: () => snapshot.phase,
       );
       final connectedAt = int.tryParse('${event['connectedAt'] ?? 0}') ?? 0;
+      // A raw core error is English and names the core's own options; the
+      // Connect page shows it as the status line, so translate the known
+      // signatures into something actionable (unknown ones pass through).
+      final rawMessage = event['message']?.toString() ?? snapshot.message;
+      final shownMessage = phase == EnginePhase.error
+          ? friendlyCoreError(rawMessage, s)
+          : rawMessage;
       _set(snapshot.copyWith(
         phase: phase,
         connectedAt: Platform.isIOS && connectedAt > 0
@@ -1503,7 +1527,7 @@ class VpnController extends ChangeNotifier {
             : null,
         clearConnectedAt: Platform.isIOS && phase == EnginePhase.disconnected,
         clearExit: Platform.isIOS && phase == EnginePhase.disconnected,
-        message: event['message']?.toString() ?? snapshot.message,
+        message: shownMessage,
         endpoint: event['endpoint']?.toString() ?? snapshot.endpoint,
         protocol: event['protocol']?.toString() ?? snapshot.protocol,
         downloadBytes: int.tryParse('${event['download'] ?? ''}') ??
