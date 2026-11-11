@@ -1,4 +1,4 @@
-// VoidrauVPN License Bot + API — Cloudflare Worker (single file). v2.0.0
+// VoidrauVPN License Bot + API — Cloudflare Worker (single file). v2.0.1
 //
 // Deploy: wrangler deploy (or paste in the dashboard). Needs a KV namespace
 // bound as LICENSES and the secret BOT_TOKEN (from @BotFather).
@@ -37,7 +37,7 @@
 //   GET  /api/health            → { ok, service, time, version }
 //   POST /api/trial             → { ok, key, expiresAt, serverTime }
 
-const BOT_VERSION = '2.0.0';
+const BOT_VERSION = '2.0.1';
 
 const DEFAULT_PLANS = [
   { id: 'm1', label: '۱ ماهه — ۱۰۰ هزار تومان', days: 30 },
@@ -158,6 +158,30 @@ function leaderboardRank(rows, me) {
   return { top, rank: idx >= 0 ? idx + 1 : 0, total: sorted.length };
 }
 
+// Escape user-controlled text before interpolating it into a legacy-
+// Markdown message (H2). Telegram treats * _ [ ` as entities; one unescaped
+// character aborts the whole send with HTTP 400, and the failure used to be
+// silent (H1). Only mainMenu escaped before; every other interpolation does now.
+function escMd(s) {
+  return String(s ?? '').replace(/([_*\[`])/g, '\\$1');
+}
+
+// Shared guide copy (L6): defined once, reused by every platform guide
+// instead of three divergent copies.
+const GUIDE_NO_CODE = '💡 کد ندارید؟ از خانه، «🎁 تست رایگان» را بزنید یا لایسنس بخرید.';
+
+// Run async jobs over a list in bounded parallel batches (M7): a sequential
+// scan of hundreds of users risks the ~10 s Telegram webhook timeout, while
+// unbounded parallelism would spike subrequests. 25 at a time is the balance.
+async function mapLimit(items, limit, fn) {
+  const out = [];
+  for (let i = 0; i < items.length; i += limit) {
+    const batch = items.slice(i, i + limit);
+    out.push(...(await Promise.all(batch.map(fn))));
+  }
+  return out;
+}
+
 const homeRow = () => [[{ text: '🏠 خانه', callback_data: 'home' }]];
 const withHome = (rows) => [...(rows || []), ...homeRow()];
 
@@ -205,17 +229,15 @@ async function addCredit(env, tid, days) {
   await env.LICENSES.put(`credit:${tid}`, String(parseInt(cur) + days));
 }
 
-async function takeCredit(env, tid) {
-  const cur = parseInt((await env.LICENSES.get(`credit:${tid}`)) || '0');
-  if (!Number.isFinite(cur) || cur <= 0) return 0;
-  await env.LICENSES.put(`credit:${tid}`, String(cur - 1));
-  return 1;
-}
-
 async function mintKey(env, tid, days, plan = 'custom') {
   const key = keygen();
   const now = Math.floor(Date.now() / 1000);
-  const lic = { key, telegramId: String(tid), plan, days, issuedAt: now };
+  // H3 fix: a fresh licence starts with days: 0 and expiresAt: now.
+  // extend() is the SINGLE place that adds days, so mintKey()+extend(days)
+  // yields exactly `days` — never double. A minted-but-never-extended key
+  // is already expired, never a free licence. (days param kept so callers
+  // keep their shape; the value is applied by extend via issueKey.)
+  const lic = { key, telegramId: String(tid), plan, days: 0, issuedAt: now, expiresAt: now };
   await putLic(env, key, lic);
   await bindUser(env, tid, key);
   return key;
@@ -231,6 +253,29 @@ async function extend(env, key, days) {
   lic.days = (lic.days || 0) + days;
   await putLic(env, key, lic);
   return lic;
+}
+
+// Single issue path (H3): mint + extend exactly once, so lic.days always
+// equals the real plan length and the progress bar is correct. All six
+// issue sites (doTrial, /api/trial, /gen, /ok, okr:, gift:yes) use this.
+async function issueKey(env, tid, days, plan = 'custom') {
+  const key = await mintKey(env, tid, days, plan);
+  await extend(env, key, days);
+  return key;
+}
+
+// Drain stored credit in ONE read + ONE extend + ONE write (M4). The old
+// loop did 4 KV ops per credit day and could die at the 1,000-subrequest
+// ceiling mid-approval with the receipt already deleted — licence half
+// extended, user never told. Order matters: extend first, then zero the
+// credit, so if the zeroing write fails the user keeps the credit
+// (spendable later) instead of losing paid days.
+async function applyCredit(env, key, tid) {
+  const cur = parseInt((await env.LICENSES.get(`credit:${tid}`)) || '0');
+  if (!Number.isFinite(cur) || cur <= 0) return 0;
+  await extend(env, key, cur);
+  await env.LICENSES.put(`credit:${tid}`, '0');
+  return cur;
 }
 
 async function upgradePlan(env, key, plan) {
@@ -252,13 +297,50 @@ async function tg(token, method, body, env, steps) {
     steps.push('tg:' + method + ':' + (out.ok ? 'ok#' + out.result?.message_id : out.description));
   }
   if (env && env.LICENSES) {
-    if (!out.ok) {
-      await env.LICENSES.put('lastError', `tg ${method}: ${out.error_code || ''} ${out.description || 'unknown'}`);
-    } else if (method === 'sendMessage' && out.result?.message_id) {
-      await env.LICENSES.put('lastSentId', String(out.result.message_id));
-    }
+    try {
+      if (!out.ok) {
+        await env.LICENSES.put('lastError', `tg ${method}: ${out.error_code || ''} ${out.description || 'unknown'}`);
+      } else if (method === 'sendMessage' && out.result?.message_id) {
+        await env.LICENSES.put('lastSentId', String(out.result.message_id));
+      }
+    } catch (_) {}
   }
+  // H1: a failed send used to look exactly like a success — no caller ever
+  // checked out.ok, so support messages and payment codes were silently
+  // lost. Throw so every failure is visible; use tgSafe() for best-effort
+  // notifications and sendReply() for user-facing replies (plain-text
+  // fallback on Markdown parse errors).
+  if (!out.ok) throw new Error(`tg ${method} failed: ${out.error_code || ''} ${out.description || 'unknown'}`);
   return out;
+}
+
+// Best-effort Telegram call: returns the result, or null on failure (the
+// failure is already recorded in lastError by tg()). For notifications to
+// another user where there is nothing useful to do on failure.
+async function tgSafe(token, method, body, env, steps) {
+  try {
+    return await tg(token, method, body, env, steps);
+  } catch (e) {
+    if (steps) steps.push('tg:' + method + ':fail');
+    return null;
+  }
+}
+
+// User-facing reply: try as built (usually Markdown); on failure retry once
+// as plain text — a stray * or _ in the text must not swallow the reply.
+// Returns null only if both attempts fail.
+async function sendReply(env, chatId, payload, steps) {
+  try {
+    return await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: chatId, ...payload }, env, steps);
+  } catch (e) {
+    if (payload && payload.parse_mode) {
+      try {
+        const { parse_mode, ...plain } = payload;
+        return await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: chatId, ...plain }, env, steps);
+      } catch (_) {}
+    }
+    return null;
+  }
 }
 
 async function mainMenu(env, from, lic) {
@@ -368,7 +450,7 @@ async function sendReleaseFile(env, tid, url, name) {
   if (!res.ok) throw new Error(`github ${res.status}`);
   const len = Number(res.headers ? res.headers.get('content-length') || 0 : 0);
   if (len && len > 48 * 1024 * 1024) {
-    await tg(env.BOT_TOKEN, 'sendMessage', {
+    await tgSafe(env.BOT_TOKEN, 'sendMessage', {
       chat_id: tid,
       text: `⚠️ فایل ${name} حجمش بیش از حد مجاز تلگرام است (${humanSize(len)}).\nلطفاً از کانال رسمی @Voidrau دانلود فرمایید.`,
     });
@@ -376,7 +458,7 @@ async function sendReleaseFile(env, tid, url, name) {
   }
   const buf = await res.arrayBuffer();
   if (buf.byteLength > 48 * 1024 * 1024) {
-    await tg(env.BOT_TOKEN, 'sendMessage', {
+    await tgSafe(env.BOT_TOKEN, 'sendMessage', {
       chat_id: tid,
       text: `⚠️ فایل ${name} حجمش بیش از حد مجاز تلگرام است (${humanSize(buf.byteLength)}).\nاز کانال رسمی دانلود نمایید.`,
     });
@@ -420,7 +502,7 @@ async function doHelpPlatform(env, platform) {
         '۱. از دکمهٔ دانلود زیر، فایل APK یونیورسال را بگیرید و نصب کنید (در صورت هشدار، «نصب از منبع ناشناس» را تایید کنید).\n' +
         '۲. برنامه را باز کنید و در تب «لایسنس»، کد خود را وارد نمایید.\n' +
         '۳. دکمهٔ اتصال را بزنید؛ در اولین اتصال، تایید VPN سیستم را قبول کنید.\n\n' +
-        '💡 کد ندارید؟ از خانه، «🎁 تست رایگان» را بزنید یا لایسنس بخرید.',
+        GUIDE_NO_CODE,
       parse_mode: 'Markdown',
       reply_markup: { inline_keyboard: withHome([...rows, ...back]) },
     };
@@ -436,7 +518,7 @@ async function doHelpPlatform(env, platform) {
         '۱. از دکمهٔ دانلود زیر، فایل Installer را بگیرید و اجرا کنید.\n' +
         '۲. برنامه را باز کنید و در بخش لایسنس، کد خود را وارد نمایید.\n' +
         '۳. دکمهٔ اتصال را بزنید؛ در صورت پرسش ویندوز، دسترسی شبکه را تایید کنید.\n\n' +
-        '💡 کد ندارید؟ از خانه، «🎁 تست رایگان» را بزنید یا لایسنس بخرید.',
+        GUIDE_NO_CODE,
       parse_mode: 'Markdown',
       reply_markup: { inline_keyboard: withHome([...rows, ...back]) },
     };
@@ -469,7 +551,7 @@ const FAQ_ANSWERS = {
 async function doSupport(env) {
   const sup = await getSetting(env, 'supportId', '@Voidrau');
   return {
-    text: `🆘 *پشتیبانی VoidrauVPN*\n\nیکی از سوال‌های متداول را انتخاب کنید، یا مستقیم به پشتیبانی پیام بدهید:\n👤 ${sup}`,
+    text: `🆘 *پشتیبانی VoidrauVPN*\n\nیکی از سوال‌های متداول را انتخاب کنید، یا مستقیم به پشتیبانی پیام بدهید:\n👤 ${escMd(sup)}`,
     parse_mode: 'Markdown',
     reply_markup: {
       inline_keyboard: withHome([
@@ -586,11 +668,49 @@ async function runExpiryReminders(env) {
     idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
     if (!Array.isArray(idx)) idx = [];
   } catch (_) {}
-  let sent = 0;
-  for (const u of idx.slice(0, 300)) {
-    if (await maybeSendExpiryReminder(env, u)) sent++;
+  // M7: scan the whole index (no 300 cap) in bounded parallel batches
+  // instead of one slow sequential pass.
+  const results = await mapLimit(idx, 25, (u) => maybeSendExpiryReminder(env, u));
+  return results.filter(Boolean).length;
+}
+
+// M7: broadcast to every user in bounded parallel batches. Runs in the
+// background (ctx.waitUntil) so a long list cannot time out the webhook.
+async function runBroadcast(env, adminTid, bc, list) {
+  let n = 0;
+  let fail = 0;
+  const batchSize = 15;
+  for (let i = 0; i < list.length; i += batchSize) {
+    const batch = list.slice(i, i + batchSize);
+    await Promise.all(
+      batch.map(async (u) => {
+        try {
+          let r;
+          if (bc.kind === 'photo') {
+            r = await tg(env.BOT_TOKEN, 'sendPhoto', {
+              chat_id: u,
+              photo: bc.fileId,
+              caption: bc.caption || '',
+            });
+          } else if (bc.kind === 'doc') {
+            r = await tg(env.BOT_TOKEN, 'sendDocument', {
+              chat_id: u,
+              document: bc.fileId,
+              caption: bc.caption || '',
+            });
+          } else {
+            r = await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: u, text: bc.text });
+          }
+          if (r && r.ok) n++;
+          else fail++;
+        } catch (_) {
+          fail++;
+        }
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  return sent;
+  return { n, fail };
 }
 
 // ── v2.0: gift / check-in / leaderboard ─────────────────────────────────
@@ -614,10 +734,21 @@ async function doGiftHome(env, tid) {
 async function doCheckin(env, tid) {
   const today = tehranDate();
   const yesterday = tehranYesterday();
-  const last = (await env.LICENSES.get(`checkin:${tid}:last`)) || '';
-  const prevStreak = parseInt((await env.LICENSES.get(`checkin:${tid}:streak`)) || '0');
-  const prevPoints = parseInt((await env.LICENSES.get(`checkin:${tid}:points`)) || '0');
-  const r = checkinNext(last, prevStreak, prevPoints, today, yesterday);
+  // M2: the whole check-in state lives in ONE key (checkin:{tid}) now, so a
+  // double-tap cannot award two days: both taps read the same old state and
+  // write the same new state, and the unique claim below lets the loser
+  // detect it was second. Legacy per-field keys are read once and migrated.
+  let state = null;
+  try {
+    state = JSON.parse((await env.LICENSES.get(`checkin:${tid}`)) || 'null');
+  } catch (_) {}
+  if (!state || typeof state !== 'object') {
+    const last = (await env.LICENSES.get(`checkin:${tid}:last`)) || '';
+    const streak = parseInt((await env.LICENSES.get(`checkin:${tid}:streak`)) || '0');
+    const points = parseInt((await env.LICENSES.get(`checkin:${tid}:points`)) || '0');
+    state = { last, streak: Number.isFinite(streak) ? streak : 0, points: Number.isFinite(points) ? points : 0 };
+  }
+  const r = checkinNext(state.last || '', state.streak || 0, state.points || 0, today, yesterday);
   if (r.already) {
     return {
       text: `✅ چک‌این امروز را قبلاً انجام داده‌اید.\n\n🔥 استریک فعلی: *${r.streak} روز*\n⭐ امتیاز: *${r.points} از ۷* (هر ۷ امتیاز = ۱ روز اعتبار)\n\nفردا دوباره سر بزنید!`,
@@ -625,9 +756,19 @@ async function doCheckin(env, tid) {
       reply_markup: { inline_keyboard: homeRow() },
     };
   }
-  await env.LICENSES.put(`checkin:${tid}:last`, today);
-  await env.LICENSES.put(`checkin:${tid}:streak`, String(r.streak));
-  await env.LICENSES.put(`checkin:${tid}:points`, String(r.points));
+  const claim = crypto.randomUUID();
+  await env.LICENSES.put(`checkin:${tid}`, JSON.stringify({ last: today, streak: r.streak, points: r.points, claim }));
+  // If another concurrent tap overwrote our claim, it already recorded this
+  // day — do not award the bonus twice; report the recorded state instead.
+  let back = null;
+  try { back = JSON.parse((await env.LICENSES.get(`checkin:${tid}`)) || 'null'); } catch (_) {}
+  if (!back || back.claim !== claim) {
+    return {
+      text: `✅ چک‌این امروز ثبت شد.\n\n🔥 استریک فعلی: *${r.streak} روز*\n⭐ امتیاز: *${r.points} از ۷* (هر ۷ امتیاز = ۱ روز اعتبار)`,
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: homeRow() },
+    };
+  }
   const statKey = `stat:checkins:${today}`;
   await env.LICENSES.put(statKey, String(parseInt((await env.LICENSES.get(statKey)) || '0') + 1));
   let bonusText = '';
@@ -643,15 +784,28 @@ async function doCheckin(env, tid) {
 }
 
 async function doLeaderboard(env, tid) {
-  let idx = [];
+  // M7: cached for 5 minutes (top:cache) and scanned in bounded parallel
+  // batches over the whole index — the old sequential scan of up to 300
+  // users could outrun the webhook timeout, and every tap re-scanned.
+  let rows = null;
   try {
-    idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
-    if (!Array.isArray(idx)) idx = [];
+    const cached = JSON.parse((await env.LICENSES.get('top:cache')) || 'null');
+    if (cached && Array.isArray(cached.rows) && Date.now() - (cached.at || 0) < 300000) rows = cached.rows;
   } catch (_) {}
-  const rows = [];
-  for (const u of idx.slice(0, 300)) {
-    const joins = parseInt((await env.LICENSES.get(`refjoin:${u}`)) || '0');
-    if (joins > 0) rows.push({ tid: u, joins });
+  if (!rows) {
+    let idx = [];
+    try {
+      idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
+      if (!Array.isArray(idx)) idx = [];
+    } catch (_) {}
+    const found = await mapLimit(idx, 25, async (u) => {
+      const joins = parseInt((await env.LICENSES.get(`refjoin:${u}`)) || '0');
+      return joins > 0 ? { tid: u, joins } : null;
+    });
+    rows = found.filter(Boolean);
+    try {
+      await env.LICENSES.put('top:cache', JSON.stringify({ at: Date.now(), rows }), { expirationTtl: 300 });
+    } catch (_) {}
   }
   const { top, rank } = leaderboardRank(rows, tid);
   const medals = ['🥇', '🥈', '🥉'];
@@ -679,9 +833,9 @@ async function doLeaderboard(env, tid) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     try {
-      return await handleHttp(request, env);
+      return await handleHttp(request, env, ctx);
     } catch (e) {
       try {
         await env.LICENSES.put('lastError', 'fetch: ' + String(e && e.stack || e).slice(0, 400));
@@ -696,20 +850,27 @@ export default {
   // default export — the Workers runtime only calls scheduled() from here;
   // a standalone `export async function scheduled` would be ignored.
   async scheduled(event, env, ctx) {
-    try {
-      const sent = await runExpiryReminders(env);
+    // M7: run the reminder scan in the background so the cron invocation
+    // itself returns immediately instead of holding the whole scan.
+    const run = (async () => {
       try {
-        await env.LICENSES.put('lastReminders', JSON.stringify({ at: new Date().toISOString(), sent }));
-      } catch (_) {}
-    } catch (e) {
-      try {
-        await env.LICENSES.put('lastError', 'scheduled: ' + String(e && e.stack || e).slice(0, 400));
-      } catch (_) {}
-    }
+        const sent = await runExpiryReminders(env);
+        try {
+          await env.LICENSES.put('lastReminders', JSON.stringify({ at: new Date().toISOString(), sent }));
+        } catch (_) {}
+      } catch (e) {
+        try {
+          await env.LICENSES.put('lastError', 'scheduled: ' + String(e && e.stack || e).slice(0, 400));
+        } catch (_) {}
+      }
+    })();
+    if (event && typeof event.waitUntil === 'function') event.waitUntil(run);
+    else if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(run);
+    else await run;
   },
 };
 
-async function handleHttp(request, env) {
+async function handleHttp(request, env, ctx) {
   const url = new URL(request.url);
 
   // ── HTTP API ──────────────────────────────────────────────────────────
@@ -717,12 +878,15 @@ async function handleHttp(request, env) {
     const key = (url.searchParams.get('key') || '').trim();
     if (!key) return json({ ok: false, error: 'missing-key' }, 400);
     const lic = await getLic(env, key);
+    // L1: errors carry real HTTP statuses now (revoked 403, invalid 404)
+    // instead of 200 for every outcome, so the app cannot mistake a dead
+    // licence for a valid one by checking the status code alone.
     if (!lic || !lic.expiresAt || lic.plan === 'revoked') {
-      return json({ ok: false, error: lic?.plan === 'revoked' ? 'revoked' : 'invalid' }, 200);
+      return json({ ok: false, error: lic?.plan === 'revoked' ? 'revoked' : 'invalid' }, lic?.plan === 'revoked' ? 403 : 404);
     }
     const now = Math.floor(Date.now() / 1000);
     if (lic.expiresAt <= now) {
-      return json({ ok: false, error: 'expired', expiresAt: lic.expiresAt, serverTime: now }, 200);
+      return json({ ok: false, error: 'expired', expiresAt: lic.expiresAt, serverTime: now }, 410);
     }
     return json({
       ok: true,
@@ -754,11 +918,8 @@ async function handleHttp(request, env) {
 
     const used2 = await env.LICENSES.get(`trial:${tid}`);
     if (used2) return json({ ok: false, error: 'trial-used' }, 200);
-    const claim = crypto.randomUUID();
-    await env.LICENSES.put(`trial:${tid}`, claim);
-    const check = await env.LICENSES.get(`trial:${tid}`);
-    if (check !== claim) return json({ ok: false, error: 'trial-used' }, 200);
 
+    // Paid licence first: return it WITHOUT burning the trial claim.
     const existing = await userKey(env, tid);
     const exLic = existing ? await getLic(env, existing) : null;
     const now = Math.floor(Date.now() / 1000);
@@ -772,9 +933,21 @@ async function handleHttp(request, env) {
         isPaid: true,
       });
     }
+
+    // M5: claim the trial BEFORE minting, then verify the claim survived.
+    // KV has no compare-and-swap, so two truly simultaneous POSTs can still
+    // both pass — the window is now one claim round-trip instead of the
+    // whole mint, and the pre-mint re-check below closes it further.
+    const claim = crypto.randomUUID();
+    await env.LICENSES.put(`trial:${tid}`, claim);
+    const check = await env.LICENSES.get(`trial:${tid}`);
+    if (check !== claim) return json({ ok: false, error: 'trial-used' }, 200);
+
     const TD = await trialDaysOf(env);
-    const key = await mintKey(env, tid, TD, 'trial');
-    await extend(env, key, TD);
+    if ((await env.LICENSES.get(`trial:${tid}`)) !== claim) {
+      return json({ ok: false, error: 'trial-used' }, 200);
+    }
+    const key = await issueKey(env, tid, TD, 'trial');
     return json({
       ok: true,
       key,
@@ -788,7 +961,10 @@ async function handleHttp(request, env) {
 
   // ── Telegram webhook ─────────────────────────────────────────────────
   if (url.pathname === '/webhook' && request.method === 'POST') {
-    const whs = await env.LICENSES.get('set:whsecret');
+    // C2 hardening: prefer a fixed secret from env (WEBHOOK_SECRET, set as a
+    // Cloudflare secret) so the check survives even if the KV value is ever
+    // lost; fall back to the random KV secret registered by /setup.
+    const whs = env.WEBHOOK_SECRET || (await env.LICENSES.get('set:whsecret'));
     const hdr = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
     if (whs && hdr !== whs) return new Response('forbidden', { status: 403 });
     const upd = await request.json();
@@ -811,7 +987,7 @@ async function handleHttp(request, env) {
 
     const steps = ['recv'];
     try {
-      await handle(upd, env, steps);
+      await handle(upd, env, steps, ctx);
       steps.push('done');
     } catch (e) {
       steps.push('ERROR: ' + String(e && e.stack || e).slice(0, 300));
@@ -827,12 +1003,25 @@ async function handleHttp(request, env) {
 
   if (url.pathname === '/' || url.pathname === '/setup') {
     const self = `${url.protocol}//${url.host}/webhook`;
-    let whs = await env.LICENSES.get('set:whsecret');
+    // C2: the admin must run /setup once after the v2.0.1 deploy so Telegram
+    // registers the webhook WITH this secret_token (the live webhook was
+    // registered 2026-10-20, before any secret existed). Until then the
+    // secret check above accepts everything.
+    let whs = env.WEBHOOK_SECRET || (await env.LICENSES.get('set:whsecret'));
     if (!whs) {
       whs = crypto.randomUUID().replace(/-/g, '');
       await env.LICENSES.put('set:whsecret', whs);
     }
-    const set = await tg(
+    // L2: the /diag key is a fresh random secret, never the (public) ADMIN_ID.
+    let diagKey = await env.LICENSES.get('set:diagkey');
+    if (!diagKey) {
+      diagKey = crypto.randomUUID().replace(/-/g, '');
+      await env.LICENSES.put('set:diagkey', diagKey);
+    }
+    try {
+      await env.LICENSES.put('set:workerhost', url.host);
+    } catch (_) {}
+    const set = await tgSafe(
       env.BOT_TOKEN || '',
       'setWebhook',
       {
@@ -843,12 +1032,12 @@ async function handleHttp(request, env) {
       },
       env
     );
-    const me0 = await tg(env.BOT_TOKEN || '', 'getMe', {}, env);
+    const me0 = await tgSafe(env.BOT_TOKEN || '', 'getMe', {}, env);
     if (me0 && me0.ok && me0.result?.username) {
       await env.LICENSES.put('set:botusername', me0.result.username);
     }
     // v2.0: register the bot menu commands (/start, /help, /id).
-    await tg(env.BOT_TOKEN || '', 'setMyCommands', {
+    await tgSafe(env.BOT_TOKEN || '', 'setMyCommands', {
       commands: [
         { command: 'start', description: 'شروع و بازگشت به خانه' },
         { command: 'help', description: 'راهنمای استفاده' },
@@ -858,13 +1047,13 @@ async function handleHttp(request, env) {
     if (env.LICENSES) {
       await env.LICENSES.put(
         'lastSetup',
-        JSON.stringify({ at: new Date().toISOString(), ok: set.ok, error: set.description || null })
+        JSON.stringify({ at: new Date().toISOString(), ok: !!set?.ok, error: set?.description || null })
       );
     }
     if (url.pathname === '/') {
       return new Response(
         `VoidrauVPN license bot — alive & operational.\nWebhook: ${
-          set.ok ? 'SET ✓' : 'FAILED: ' + (set.description || '?')
+          set?.ok ? 'SET ✓' : 'FAILED: ' + (set?.description || '?')
         }`
       );
     }
@@ -872,18 +1061,27 @@ async function handleHttp(request, env) {
   }
 
   if (url.pathname === '/diag') {
-    if (String(url.searchParams.get('a') || '') !== String(env.ADMIN_ID || '')) {
-      return json({ ok: false, error: 'forbidden — /diag?a=<ADMIN_ID>' }, 403);
+    // L2: ADMIN_ID is public (it sits in wrangler.toml in the public repo),
+    // so it can no longer be the only gate. /diag now also needs the random
+    // diag key stored in KV (set:diagkey); the admin gets the full URL from
+    // the bot with /diagkey, never from chat or the repo.
+    const diagKey = await env.LICENSES.get('set:diagkey');
+    if (
+      String(url.searchParams.get('a') || '') !== String(env.ADMIN_ID || '') ||
+      !diagKey ||
+      String(url.searchParams.get('k') || '') !== diagKey
+    ) {
+      return json({ ok: false, error: 'forbidden' }, 403);
     }
-    const me = await tg(env.BOT_TOKEN || '', 'getMe', {});
-    const hook = await tg(env.BOT_TOKEN || '', 'getWebhookInfo', {});
+    const me = await tgSafe(env.BOT_TOKEN || '', 'getMe', {});
+    const hook = await tgSafe(env.BOT_TOKEN || '', 'getWebhookInfo', {});
     const lastError = await env.LICENSES.get('lastError');
     const lastUpdate = await env.LICENSES.get('lastUpdate');
     const lastSentId = await env.LICENSES.get('lastSentId');
     const lastSetup = await env.LICENSES.get('lastSetup');
     const lastSteps = await env.LICENSES.get('lastSteps');
     const users = await env.LICENSES.get('stat:users');
-    const pending = await env.LICENSES.get('stat:pending');
+    const pending = await countPending(env);
     return json({
       lastSteps,
       lastSetup: lastSetup ? JSON.parse(lastSetup) : null,
@@ -902,7 +1100,7 @@ async function handleHttp(request, env) {
   return json({ ok: false, error: 'not-found' }, 404);
 }
 
-async function handle(upd, env, steps) {
+async function handle(upd, env, steps, ctx) {
   const token = env.BOT_TOKEN;
   const msg = upd.message;
   const cb = upd.callback_query;
@@ -912,11 +1110,13 @@ async function handle(upd, env, steps) {
     const tid = cb.from.id;
     let out = null;
 
-    if (String(tid) !== String(env.ADMIN_ID) && !(await checkJoined(env, tid))) {
-      out = joinPrompt(await getSetting(env, 'forceChannel', ''));
+    const gate = await joinGatePrompt(env, tid);
+    if (gate) {
+      out = gate;
     } else if (cb.data === 'recheck') {
-      if (!(await checkJoined(env, tid))) {
-        out = joinPrompt(await getSetting(env, 'forceChannel', ''));
+      const gate2 = await joinGatePrompt(env, tid);
+      if (gate2) {
+        out = gate2;
       } else {
         const pendingStart = await env.LICENSES.get(`startpending:${tid}`);
         if (pendingStart) await env.LICENSES.delete(`startpending:${tid}`);
@@ -943,8 +1143,7 @@ async function handle(upd, env, steps) {
         out = { text: '❌ تعداد روز نامعتبر در دکمهٔ تایید.' };
       } else {
         await env.LICENSES.delete(`receipt:${target}`);
-        const curPending = Math.max(0, parseInt((await env.LICENSES.get('stat:pending')) || '1') - 1);
-        await env.LICENSES.put('stat:pending', String(curPending));
+        await env.LICENSES.put('stat:pending', String(await countPending(env)));
         await setReceiptStatus(env, target, 'approved', null);
 
         let k = await userKey(env, target);
@@ -953,14 +1152,12 @@ async function handle(upd, env, steps) {
           await extend(env, k, days);
           await upgradePlan(env, k, 'paid');
         } else {
-          k = await mintKey(env, target, days, 'paid');
-          await extend(env, k, days);
+          k = await issueKey(env, target, days, 'paid');
         }
-        while ((await takeCredit(env, target)) === 1) {
-          await extend(env, k, 1);
-        }
+        // M4: one bounded extend for all stored credit (see applyCredit).
+        await applyCredit(env, k, target);
         const updatedLic = await getLic(env, k);
-        await tg(
+        await tgSafe(
           env.BOT_TOKEN,
           'sendMessage',
           {
@@ -977,7 +1174,7 @@ async function handle(upd, env, steps) {
           steps
         );
         if (cb.message?.chat) {
-          await tg(
+          await tgSafe(
             env.BOT_TOKEN,
             'editMessageReplyMarkup',
             {
@@ -994,11 +1191,10 @@ async function handle(upd, env, steps) {
     } else if (cb.data.startsWith('rej:') && String(tid) === String(env.ADMIN_ID)) {
       const ru = cb.data.slice(4);
       await env.LICENSES.delete(`receipt:${ru}`);
-      const curPending = Math.max(0, parseInt((await env.LICENSES.get('stat:pending')) || '1') - 1);
-      await env.LICENSES.put('stat:pending', String(curPending));
+      await env.LICENSES.put('stat:pending', String(await countPending(env)));
       await setReceiptStatus(env, ru, 'rejected', null);
 
-      await tg(
+      await tgSafe(
         env.BOT_TOKEN,
         'sendMessage',
         {
@@ -1012,7 +1208,7 @@ async function handle(upd, env, steps) {
         steps
       );
       if (cb.message?.chat) {
-        await tg(
+        await tgSafe(
           env.BOT_TOKEN,
           'editMessageReplyMarkup',
           {
@@ -1038,25 +1234,19 @@ async function handle(upd, env, steps) {
       if (!f) {
         out = await doDownloads(env, tid);
       } else {
-        await tg(token, 'answerCallbackQuery', { callback_query_id: cb.id, text: '⏳ در حال ارسال فایل...' });
+        await tgSafe(token, 'answerCallbackQuery', { callback_query_id: cb.id, text: '⏳ در حال ارسال فایل...' });
         cb._answered = true;
         try {
           await sendReleaseFile(env, tid, f.url, f.name);
-          await tg(token, 'sendMessage', {
-            chat_id: tid,
-            text: '✅ فایل برنامه با موفقیت ارسال شد 👆\n🤖 اندروید: فایل را باز کرده و نصب کنید.\n🪟 ویندوز: فایل نصبی را اجرا فرمایید.',
-          });
+          await sendReply(env, tid, {text: '✅ فایل برنامه با موفقیت ارسال شد 👆\n🤖 اندروید: فایل را باز کرده و نصب کنید.\n🪟 ویندوز: فایل نصبی را اجرا فرمایید.',});
         } catch (e) {
-          await tg(token, 'sendMessage', {
-            chat_id: tid,
-            text: `❌ ارسال فایل ناموفق بود: ${e.message}\nلطفاً دوباره امتحان کنید.`,
+          await sendReply(env, tid, {text: `❌ ارسال فایل ناموفق بود: ${e.message}\nلطفاً دوباره امتحان کنید.`,
             reply_markup: {
               inline_keyboard: withHome([
                 [{ text: '🔄 تلاش دوباره', callback_data: `file:${idx}` }],
                 [{ text: '📜 لیست فایل‌ها', callback_data: 'dl' }],
               ]),
-            },
-          });
+            },});
         }
         out = null;
       }
@@ -1087,23 +1277,29 @@ async function handle(upd, env, steps) {
           await env.LICENSES.delete(`gift:${tid}`);
           out = { text: err === 'over-credit' ? '❌ اعتبار ذخیرهٔ شما کمتر از مقدار هدیه است.' : '❌ درخواست هدیه نامعتبر است.', reply_markup: { inline_keyboard: homeRow() } };
         } else {
+          // M3: re-read the credit right before deducting — if another
+          // concurrent gift changed it, abort instead of overspending.
+          const creditNow = parseInt((await env.LICENSES.get(`credit:${tid}`)) || '0');
+          if (creditNow !== credit) {
+            await env.LICENSES.delete(`gift:${tid}`);
+            out = { text: '⚠️ اعتبار ذخیرهٔ شما تغییر کرده است — لطفاً هدیه را از نو شروع کنید.', reply_markup: { inline_keyboard: homeRow() } };
+          } else {
           await env.LICENSES.put(`credit:${tid}`, String(credit - g.days));
           let fk = await userKey(env, g.friend);
           let fl = fk ? await getLic(env, fk) : null;
           if (fl && fl.expiresAt) {
             await extend(env, fk, g.days);
           } else {
-            fk = await mintKey(env, g.friend, g.days, 'paid');
-            await extend(env, fk, g.days);
+            fk = await issueKey(env, g.friend, g.days, 'paid');
           }
           const flic = await getLic(env, fk);
           const gl = parseInt((await env.LICENSES.get(`giftlog:${tid}`)) || '0');
           await env.LICENSES.put(`giftlog:${tid}`, String(gl + 1));
           await env.LICENSES.delete(`gift:${tid}`);
           const senderName = (await env.LICENSES.get(`name:${tid}`)) || 'یک دوست';
-          await tg(env.BOT_TOKEN, 'sendMessage', {
+          await tgSafe(env.BOT_TOKEN, 'sendMessage', {
             chat_id: g.friend,
-            text: `🎁 *هدیه دریافت کردید!*\n\n${senderName} تعداد *${g.days} روز* لایسنس به شما هدیه داد.\n\n🔑 کد لایسنس شما:\n\`${fk}\`\n\n📅 تاریخ انقضا: *${formatJalali(flic?.expiresAt)}*\n\nکد را در برنامه (تب لایسنس) وارد کنید.`,
+            text: `🎁 *هدیه دریافت کردید!*\n\n${escMd(senderName)} تعداد *${g.days} روز* لایسنس به شما هدیه داد.\n\n🔑 کد لایسنس شما:\n\`${fk}\`\n\n📅 تاریخ انقضا: *${formatJalali(flic?.expiresAt)}*\n\nکد را در برنامه (تب لایسنس) وارد کنید.`,
             parse_mode: 'Markdown',
             reply_markup: { inline_keyboard: [[{ text: '🏠 خانه', callback_data: 'home' }]] },
           }, env, steps);
@@ -1112,6 +1308,7 @@ async function handle(upd, env, steps) {
             parse_mode: 'Markdown',
             reply_markup: { inline_keyboard: homeRow() },
           };
+          }
         }
       }
     } else if (cb.data === 'gift:no') {
@@ -1210,41 +1407,24 @@ async function handle(upd, env, steps) {
           out = { text: '⚠️ پیام همگانی یافت نشد — لطفاً از نو ارسال کنید.' };
         } else {
           const list = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
-          let n = 0;
-          let fail = 0;
-          const targetUsers = list.slice(0, 300);
-          const batchSize = 15;
-          for (let i = 0; i < targetUsers.length; i += batchSize) {
-            const batch = targetUsers.slice(i, i + batchSize);
-            await Promise.all(
-              batch.map(async (u) => {
-                try {
-                  let r;
-                  if (bc.kind === 'photo') {
-                    r = await tg(env.BOT_TOKEN, 'sendPhoto', {
-                      chat_id: u,
-                      photo: bc.fileId,
-                      caption: bc.caption || '',
-                    });
-                  } else if (bc.kind === 'doc') {
-                    r = await tg(env.BOT_TOKEN, 'sendDocument', {
-                      chat_id: u,
-                      document: bc.fileId,
-                      caption: bc.caption || '',
-                    });
-                  } else {
-                    r = await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: u, text: bc.text });
-                  }
-                  if (r && r.ok) n++;
-                  else fail++;
-                } catch (_) {
-                  fail++;
-                }
-              })
-            );
-            await new Promise((resolve) => setTimeout(resolve, 200));
+          // M7: send to the WHOLE list (no 300 cap) in the background via
+          // ctx.waitUntil — the old code stopped at 300 users and still
+          // reported success. The admin gets a completion summary here.
+          const job = (async () => {
+            const res = await runBroadcast(env, tid, bc, list);
+            await tgSafe(env.BOT_TOKEN, 'sendMessage', {
+              chat_id: tid,
+              text: `📣 ارسال همگانی تمام شد: به ${res.n} کاربر رسید${res.fail ? `، ${res.fail} پیام ناموفق` : ''} (از مجموع ${list.length} کاربر).`,
+            }, env);
+            return res;
+          })();
+          if (ctx && typeof ctx.waitUntil === 'function') {
+            ctx.waitUntil(job);
+            out = { text: `📣 ارسال همگانی به ${list.length} کاربر آغاز شد؛ نتیجهٔ نهایی همین‌جا اعلام می‌شود.` };
+          } else {
+            const res = await job;
+            out = { text: `📣 ارسال به ${res.n} کاربر انجام شد${res.fail ? ` (${res.fail} پیام ناموفق)` : ''}.` };
           }
-          out = { text: `📣 ارسال به ${n} کاربر انجام شد${fail ? ` (${fail} پیام ناموفق)` : ''}.` };
         }
       } else if (a === 'stats') {
         out = await buildStatsMessage(env);
@@ -1253,8 +1433,8 @@ async function handle(upd, env, steps) {
       out = { text: 'این دکمه منقضی شده است — لطفاً با /start از نو آغاز کنید.' };
     }
 
-    if (out) await tg(token, 'sendMessage', { chat_id: tid, ...out }, env, steps);
-    if (!cb._answered) await tg(token, 'answerCallbackQuery', { callback_query_id: cb.id }, env, steps);
+    if (out) await sendReply(env, tid, out, steps);
+    if (!cb._answered) await tgSafe(token, 'answerCallbackQuery', { callback_query_id: cb.id }, env, steps);
     return;
   }
 
@@ -1271,7 +1451,7 @@ async function handle(upd, env, steps) {
     const mode = await env.LICENSES.get(`admMode:${tid}`);
     if (mode && text.trim() === '/cancel') {
       await env.LICENSES.delete(`admMode:${tid}`);
-      await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ عملیات لغو شد.' }, env, steps);
+      await sendReply(env, tid, {text: '❌ عملیات لغو شد.'}, steps);
       return;
     }
     if (mode === 'broadcast' && !text.startsWith('/') && (text || mediaAdmin)) {
@@ -1289,29 +1469,20 @@ async function handle(upd, env, steps) {
         })
       );
       await env.LICENSES.put(`admMode:${tid}`, 'bcconfirm');
-      await tg(
-        env.BOT_TOKEN,
-        'sendMessage',
-        {
-          chat_id: tid,
-          text: '📋 پیش‌نمایش پیام همگانی آماده شد. آیا مایلید به همهٔ کاربران ارسال شود؟',
+      await sendReply(env, tid, {text: '📋 پیش‌نمایش پیام همگانی آماده شد. آیا مایلید به همهٔ کاربران ارسال شود؟',
           reply_markup: {
             inline_keyboard: [
               [{ text: '✅ بله، ارسال کن', callback_data: 'ad:bcsend' }],
               [{ text: '❌ لغو', callback_data: 'ad:cancelmode' }],
             ],
-          },
-        },
-        env,
-        steps
-      );
+          },}, steps);
       return;
     }
     if (mode && !text.startsWith('/')) {
       await env.LICENSES.delete(`admMode:${tid}`);
       if (mediaAdmin) {
         await env.LICENSES.put(`admMode:${tid}`, mode);
-        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: 'برای این بخش باید متن ارسال کنید.' }, env, steps);
+        await sendReply(env, tid, {text: 'برای این بخش باید متن ارسال کنید.'}, steps);
         return;
       }
       if (mode === 'plans') {
@@ -1331,48 +1502,30 @@ async function handle(upd, env, steps) {
         }
         const ids = rows.map((r) => r.id);
         if (new Set(ids).size !== ids.length) {
-          await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ شناسهٔ تکراری در پلن‌ها وجود دارد.' }, env, steps);
+          await sendReply(env, tid, {text: '❌ شناسهٔ تکراری در پلن‌ها وجود دارد.'}, steps);
           return;
         }
         if (bad.length) {
           await env.LICENSES.put(`admMode:${tid}`, mode);
-          await tg(
-            env.BOT_TOKEN,
-            'sendMessage',
-            {
-              chat_id: tid,
-              text: `❌ خطاهای یافت‌شده در پلن‌ها:\n${bad.join('\n')}\n\nلطفاً لیست کامل را اصلاح و مجدداً ارسال کنید.`,
-              reply_markup: { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'ad:cancelmode' }]] },
-            },
-            env,
-            steps
-          );
+          await sendReply(env, tid, {text: `❌ خطاهای یافت‌شده در پلن‌ها:\n${bad.join('\n')}\n\nلطفاً لیست کامل را اصلاح و مجدداً ارسال کنید.`,
+              reply_markup: { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'ad:cancelmode' }]] },}, steps);
           return;
         }
         if (!rows.length) {
           await env.LICENSES.put(`admMode:${tid}`, mode);
-          await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ هیچ پلن معتبری دریافت نشد.' }, env, steps);
+          await sendReply(env, tid, {text: '❌ هیچ پلن معتبری دریافت نشد.'}, steps);
           return;
         }
         await env.LICENSES.put('setting:plans', JSON.stringify(rows));
-        await tg(
-          env.BOT_TOKEN,
-          'sendMessage',
-          {
-            chat_id: tid,
-            text: `✅ تعداد ${rows.length} پلن با موفقیت ثبت شد:\n${rows
+        await sendReply(env, tid, {text: `✅ تعداد ${rows.length} پلن با موفقیت ثبت شد:\n${rows
               .map((r) => `• ${r.label} (${r.days} روز)`)
-              .join('\n')}`,
-          },
-          env,
-          steps
-        );
+              .join('\n')}`,}, steps);
       } else {
         let val = text.trim();
         if (mode === 'forceChannel') {
           if (!val || val === 'خالی' || val === '-') {
             await setSetting(env, mode, '');
-            await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '✅ جوین اجباری غیرفعال شد.' }, env, steps);
+            await sendReply(env, tid, {text: '✅ جوین اجباری غیرفعال شد.'}, steps);
             return;
           }
           const mch = val.match(/(?:t\.me\/|@)([A-Za-z0-9_]+)/);
@@ -1381,34 +1534,22 @@ async function handle(upd, env, steps) {
             // numeric id ok
           } else {
             await env.LICENSES.put(`admMode:${tid}`, mode);
-            await tg(
-              env.BOT_TOKEN,
-              'sendMessage',
-              { chat_id: tid, text: '❌ آیدی کانال نامعتبر است (مثال: @mychannel یا -100123456).' },
-              env,
-              steps
-            );
+            await sendReply(env, tid, {text: '❌ آیدی کانال نامعتبر است (مثال: @mychannel یا -100123456).'}, steps);
             return;
           }
         }
         if (mode === 'trialDays') {
           if (!/^\d+$/.test(val) || parseInt(val) < 1 || parseInt(val) > 365) {
             await env.LICENSES.put(`admMode:${tid}`, mode);
-            await tg(
-              env.BOT_TOKEN,
-              'sendMessage',
-              { chat_id: tid, text: '❌ عدد نامعتبر است (۱ تا ۳۶۵).' },
-              env,
-              steps
-            );
+            await sendReply(env, tid, {text: '❌ عدد نامعتبر است (۱ تا ۳۶۵).'}, steps);
             return;
           }
           await env.LICENSES.put('setting:trialDays', val);
-          await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ مدت تست رایگان = ${val} روز تنظیم شد.` }, env, steps);
+          await sendReply(env, tid, {text: `✅ مدت تست رایگان = ${val} روز تنظیم شد.`}, steps);
           return;
         }
         await setSetting(env, mode, val);
-        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ تنظیم شد: ${val}` }, env, steps);
+        await sendReply(env, tid, {text: `✅ تنظیم شد: ${val}`}, steps);
       }
       return;
     }
@@ -1422,13 +1563,15 @@ async function handle(upd, env, steps) {
       const target = sup.slice(6);
       if (/^\d{3,}$/.test(target)) {
         await env.LICENSES.delete(`supMode:${tid}`);
-        await tg(env.BOT_TOKEN, 'sendMessage', {
+        // H1+H2: escape the reply text (a stray * or _ used to 400 the
+        // send) and tell the admin honestly if it did not arrive.
+        const sent = await tgSafe(env.BOT_TOKEN, 'sendMessage', {
           chat_id: target,
-          text: `💬 *پاسخ پشتیبانی:*\n\n${text}`,
+          text: `💬 *پاسخ پشتیبانی:*\n\n${escMd(text)}`,
           parse_mode: 'Markdown',
           reply_markup: { inline_keyboard: [[{ text: '🏠 خانه', callback_data: 'home' }]] },
         }, env, steps);
-        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ پاسخ شما به کاربر \`${target}\` ارسال شد.`, parse_mode: 'Markdown' }, env, steps);
+        await sendReply(env, tid, {text: sent ? `✅ پاسخ شما به کاربر \`${target}\` ارسال شد.` : `⚠️ ارسال پاسخ به کاربر \`${target}\` ناموفق بود (شاید ربات را بلاک کرده باشد).`, parse_mode: 'Markdown'}, steps);
         return;
       }
       await env.LICENSES.delete(`supMode:${tid}`);
@@ -1439,13 +1582,19 @@ async function handle(upd, env, steps) {
     if (sup === '1') {
       await env.LICENSES.delete(`supMode:${tid}`);
       const senderName = (await env.LICENSES.get(`name:${tid}`)) || 'کاربر';
-      await tg(env.BOT_TOKEN, 'sendMessage', {
+      // H1+H2: escape the user's name/text and tell the user honestly if
+      // the forward failed, instead of showing "sent" for a lost message.
+      const fwd = await tgSafe(env.BOT_TOKEN, 'sendMessage', {
         chat_id: env.ADMIN_ID,
-        text: `🆘 *پیام پشتیبانی جدید*\n\n👤 از: ${senderName} (\`${tid}\`)\n\n${text}`,
+        text: `🆘 *پیام پشتیبانی جدید*\n\n👤 از: ${escMd(senderName)} (\`${tid}\`)\n\n${escMd(text)}`,
         parse_mode: 'Markdown',
         reply_markup: { inline_keyboard: [[{ text: '✍️ پاسخ به این کاربر', callback_data: `suprep:${tid}` }]] },
       }, env, steps);
-      await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '✅ پیام شما به پشتیبانی ارسال شد. پاسخ در همین‌جا برایتان می‌آید.', reply_markup: { inline_keyboard: homeRow() } }, env, steps);
+      if (!fwd) {
+        await sendReply(env, tid, {text: '⚠️ ارسال پیام به پشتیبانی ناموفق بود. لطفاً دوباره تلاش کنید.', reply_markup: { inline_keyboard: homeRow() }}, steps);
+        return;
+      }
+      await sendReply(env, tid, {text: '✅ پیام شما به پشتیبانی ارسال شد. پاسخ در همین‌جا برایتان می‌آید.', reply_markup: { inline_keyboard: homeRow() }}, steps);
       return;
     }
     let g = null;
@@ -1456,16 +1605,16 @@ async function handle(upd, env, steps) {
       if (g.stage === 'awaitId') {
         const err = giftValidate(tid, text.trim(), 1, 1);
         if (err === 'bad-id') {
-          await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ آیدی عددی نامعتبر است. فقط عدد بفرستید (مثال: 123456789).', reply_markup: { inline_keyboard: homeRow() } }, env, steps);
+          await sendReply(env, tid, {text: '❌ آیدی عددی نامعتبر است. فقط عدد بفرستید (مثال: 123456789).', reply_markup: { inline_keyboard: homeRow() }}, steps);
           return;
         }
         if (err === 'self') {
-          await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ نمی‌توانید به خودتان هدیه بدهید. آیدی عددی دوست خود را بفرستید.', reply_markup: { inline_keyboard: homeRow() } }, env, steps);
+          await sendReply(env, tid, {text: '❌ نمی‌توانید به خودتان هدیه بدهید. آیدی عددی دوست خود را بفرستید.', reply_markup: { inline_keyboard: homeRow() }}, steps);
           return;
         }
         await env.LICENSES.put(`gift:${tid}`, JSON.stringify({ stage: 'awaitDays', friend: text.trim() }));
         const credit = parseInt((await env.LICENSES.get(`credit:${tid}`)) || '0');
-        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ گیرنده ثبت شد: \`${text.trim()}\`\n\nچند روز هدیه می‌دهید؟ (اعتبار شما: *${credit} روز* — عدد بفرستید)`, parse_mode: 'Markdown', reply_markup: { inline_keyboard: homeRow() } }, env, steps);
+        await sendReply(env, tid, {text: `✅ گیرنده ثبت شد: \`${text.trim()}\`\n\nچند روز هدیه می‌دهید؟ (اعتبار شما: *${credit} روز* — عدد بفرستید)`, parse_mode: 'Markdown', reply_markup: { inline_keyboard: homeRow() }}, steps);
         return;
       }
       if (g.stage === 'awaitDays') {
@@ -1473,39 +1622,67 @@ async function handle(upd, env, steps) {
         const days = parseInt(text.trim(), 10);
         const err = giftValidate(tid, g.friend, text.trim(), credit);
         if (err === 'bad-days' || err === 'over-credit') {
-          await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: err === 'over-credit' ? `❌ مقدار هدیه بیشتر از اعتبار شماست (${credit} روز). عدد کوچک‌تری بفرستید.` : '❌ عدد نامعتبر است. تعداد روز را فقط با عدد بفرستید (مثال: 7).', reply_markup: { inline_keyboard: homeRow() } }, env, steps);
+          await sendReply(env, tid, {text: err === 'over-credit' ? `❌ مقدار هدیه بیشتر از اعتبار شماست (${credit} روز). عدد کوچک‌تری بفرستید.` : '❌ عدد نامعتبر است. تعداد روز را فقط با عدد بفرستید (مثال: 7).', reply_markup: { inline_keyboard: homeRow() }}, steps);
           return;
         }
         await env.LICENSES.put(`gift:${tid}`, JSON.stringify({ stage: 'confirm', friend: g.friend, days }));
-        await tg(env.BOT_TOKEN, 'sendMessage', {
-          chat_id: tid,
-          text: `🎁 *تایید هدیه*\n\n${days} روز لایسنس به کاربر \`${g.friend}\` هدیه داده می‌شود.\n💳 اعتبار باقی‌مانده پس از هدیه: *${credit - days} روز*\n\nمطمئن هستید؟`,
+        await sendReply(env, tid, {text: `🎁 *تایید هدیه*\n\n${days} روز لایسنس به کاربر \`${g.friend}\` هدیه داده می‌شود.\n💳 اعتبار باقی‌مانده پس از هدیه: *${credit - days} روز*\n\nمطمئن هستید؟`,
           parse_mode: 'Markdown',
-          reply_markup: { inline_keyboard: [[{ text: '✅ بله، ارسال کن', callback_data: 'gift:yes' }, { text: '❌ لغو', callback_data: 'gift:no' }]] },
-        }, env, steps);
+          reply_markup: { inline_keyboard: [[{ text: '✅ بله، ارسال کن', callback_data: 'gift:yes' }, { text: '❌ لغو', callback_data: 'gift:no' }]] },}, steps);
         return;
       }
     }
   }
 
+// Keep userIndex complete: a user can reach the receipt flow without ever
+// pressing /start (buy menu via callback), and the admin scans (pending
+// count, leaderboard, reminders) only see indexed users. L5 depends on it.
+async function ensureIndexed(env, tid) {
+  let idx = [];
+  try {
+    idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
+    if (!Array.isArray(idx)) idx = [];
+  } catch (_) {
+    idx = [];
+  }
+  if (!idx.some((id) => String(id) === String(tid))) {
+    idx.push(tid);
+    await env.LICENSES.put('userIndex', JSON.stringify(idx));
+    await env.LICENSES.put('stat:users', String(idx.length));
+  }
+}
+
   // ── Receipt intake ──────────────────────────────────────────────────
   const media2 = msg.photo ? 'photo' : msg.document ? 'doc' : null;
   if (media2) {
+    // L4: a photo is a receipt ONLY when the user is in a purchase flow —
+    // a plan was picked in the last 24h, or the caption says receipt/payment.
+    // Any other photo (e.g. an error screenshot for support) is no longer
+    // counted as a pending receipt and no longer overwrites a real one.
+    const caption = (msg.caption || '').trim();
+    const receiptWords = /(رسید|فیش|پرداخت|واریز|receipt)/i.test(caption);
+    const planAt = parseInt((await env.LICENSES.get(`lastPlanAt:${tid}`)) || '0');
+    const inPurchaseFlow = Date.now() - planAt < 24 * 3600 * 1000;
+    if (!receiptWords && !inPurchaseFlow) {
+      await sendReply(env, tid, {text: '📷 این عکس به‌عنوان رسید پرداخت ثبت نشد.\n\nاگر می‌خواهید خرید کنید، از خانه «🛒 خرید / تمدید» را بزنید، پلن را انتخاب کنید و بعد عکس رسید را همین‌جا بفرستید. اگر عکس را برای پشتیبانی فرستاده‌اید، از «🆘 پشتیبانی» پیام بدهید.',
+          reply_markup: { inline_keyboard: withHome([[{ text: '🛒 خرید لایسنس', callback_data: 'buy' }]]) },}, steps);
+      return;
+    }
+    await ensureIndexed(env, tid);
     const fid = media2 === 'photo' ? msg.photo[msg.photo.length - 1].file_id : msg.document.file_id;
     const selectedPlanId = await getSetting(env, `lastPlan:${tid}`, 'm1');
     const plans = await plansOf(env);
     const chosen = plans.find((p) => p.id === selectedPlanId) || plans[0];
+    const hadReceipt = await env.LICENSES.get(`receipt:${tid}`);
 
     await env.LICENSES.put(
       `receipt:${tid}`,
       JSON.stringify({ fileId: fid, kind: media2, planId: selectedPlanId, at: Date.now() })
     );
     await setReceiptStatus(env, tid, 'pending', selectedPlanId);
+    await env.LICENSES.put('stat:pending', String(await countPending(env)));
 
-    const curP = parseInt((await env.LICENSES.get('stat:pending')) || '0');
-    await env.LICENSES.put('stat:pending', String(curP + 1));
-
-    const cap = `🧾 رسید جدید از کاربر \`${tid}\`\n📦 پلن انتخابی: *${chosen.label}* (${chosen.days} روز)\n\nپلن مورد نظر را برای تایید انتخاب کنید:`;
+    const cap = `🧾 رسید جدید از کاربر \`${tid}\`${hadReceipt ? ' (جایگزین رسید قبلی)' : ''}\n📦 پلن انتخابی: *${escMd(chosen.label)}* (${chosen.days} روز)\n\nپلن مورد نظر را برای تایید انتخاب کنید:`;
     const approveRows = plans.map((p) => [
       { text: (p.id === chosen.id ? '⭐️ ' : '') + `تایید ${p.label}`, callback_data: `okr:${tid}:${p.days}` },
     ]);
@@ -1513,7 +1690,7 @@ async function handle(upd, env, steps) {
 
     const fwd =
       media2 === 'photo'
-        ? await tg(
+        ? await tgSafe(
             env.BOT_TOKEN,
             'sendPhoto',
             {
@@ -1526,7 +1703,7 @@ async function handle(upd, env, steps) {
             env,
             steps
           )
-        : await tg(
+        : await tgSafe(
             env.BOT_TOKEN,
             'sendDocument',
             {
@@ -1541,45 +1718,35 @@ async function handle(upd, env, steps) {
           );
 
     if (!fwd || !fwd.ok) {
-      await tg(
-        env.BOT_TOKEN,
-        'sendMessage',
-        {
-          chat_id: tid,
-          text: '⚠️ ارسال رسید به ادمین با خطا مواجه شد. لطفاً دوباره تلاش نمایید یا با پشتیبانی تماس بگیرید.',
-        },
-        env,
-        steps
-      );
+      await sendReply(env, tid, {text: '⚠️ ارسال رسید به ادمین با خطا مواجه شد. لطفاً دوباره تلاش نمایید یا با پشتیبانی تماس بگیرید.',}, steps);
       return;
     }
-    await tg(
-      env.BOT_TOKEN,
-      'sendMessage',
-      {
-        chat_id: tid,
-        text: '✅ رسید پرداخت شما دریافت شد و به مدیریت ارسال گردید.\nبه محض تایید، کد لایسنس اختصاصی همین‌جا برایتان ارسال خواهد شد.',
-      },
-      env,
-      steps
-    );
+    await sendReply(env, tid, {text: '✅ رسید پرداخت شما دریافت شد و به مدیریت ارسال گردید.\nبه محض تایید، کد لایسنس اختصاصی همین‌جا برایتان ارسال خواهد شد.',}, steps);
     return;
   }
 
   // ── Admin Commands ──────────────────────────────────────────────────
   if (String(tid) === String(env.ADMIN_ID)) {
+    if (text === '/diagkey') {
+      // L2: the /diag URL (with its random key) is delivered only here, to
+      // the admin's own Telegram chat — never in the public repo or chat.
+      const diagKey = (await env.LICENSES.get('set:diagkey')) || '';
+      const host = (await env.LICENSES.get('set:workerhost')) || 'voidrau.massagetoanishtayin.workers.dev';
+      await sendReply(env, tid, {text: diagKey ? `🔐 لینک عیب‌یابی (فقط برای شما):\nhttps://${host}/diag?a=${env.ADMIN_ID}&k=${diagKey}\n\nاین لینک را با کسی به اشتراک نگذارید.` : '⚠️ کلید عیب‌یابی هنوز ساخته نشده است — اول یک‌بار /setup را در مرورگر باز کنید.'}, steps);
+      return;
+    }
     if (text === '/panel') {
-      await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, ...(await adminPanel(env, tid)) }, env, steps);
+      await sendReply(env, tid, (await adminPanel(env, tid)), steps);
       return;
     }
     if (text === '/stats') {
-      await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, ...(await buildStatsMessage(env)) }, env, steps);
+      await sendReply(env, tid, (await buildStatsMessage(env)), steps);
       return;
     }
     if (text.startsWith('/find')) {
       const q = (text.split(/\s+/)[1] || '').trim();
       if (!q) {
-        await tg(token, 'sendMessage', { chat_id: tid, text: 'فرمت: /find <آیدی عددی یا کد لایسنس>' }, env);
+        await sendReply(env, tid, {text: 'فرمت: /find <آیدی عددی یا کد لایسنس>'});
         return;
       }
       let targetTid = q;
@@ -1594,7 +1761,7 @@ async function handle(upd, env, steps) {
         lic = key ? await getLic(env, key) : null;
       }
       if (!lic && !key) {
-        await tg(token, 'sendMessage', { chat_id: tid, text: `❌ موردی برای «${q}» یافت نشد.` }, env);
+        await sendReply(env, tid, {text: `❌ موردی برای «${q}» یافت نشد.`});
         return;
       }
       const now = Math.floor(Date.now() / 1000);
@@ -1611,13 +1778,13 @@ async function handle(upd, env, steps) {
         `📅 تاریخ انقضا: *${lic?.expiresAt ? formatJalali(lic.expiresAt) : '—'}*\n` +
         `👥 تعداد دعوت‌ها: ${joins} نفر\n` +
         `🎁 اعتبار هدیه ذخیره: ${credit} روز`;
-      await tg(token, 'sendMessage', { chat_id: tid, text: info, parse_mode: 'Markdown' }, env);
+      await sendReply(env, tid, {text: info, parse_mode: 'Markdown'});
       return;
     }
     if (text.startsWith('/revoke')) {
       const q = (text.split(/\s+/)[1] || '').trim();
       if (!q) {
-        await tg(token, 'sendMessage', { chat_id: tid, text: 'فرمت: /revoke <آیدی عددی یا کد لایسنس>' }, env);
+        await sendReply(env, tid, {text: 'فرمت: /revoke <آیدی عددی یا کد لایسنس>'});
         return;
       }
       let targetTid = q;
@@ -1632,28 +1799,23 @@ async function handle(upd, env, steps) {
         lic = key ? await getLic(env, key) : null;
       }
       if (!lic || !key) {
-        await tg(token, 'sendMessage', { chat_id: tid, text: `❌ لایسنسی برای «${q}» یافت نشد.` }, env);
+        await sendReply(env, tid, {text: `❌ لایسنسی برای «${q}» یافت نشد.`});
         return;
       }
       lic.expiresAt = 0;
       lic.plan = 'revoked';
       await putLic(env, key, lic);
       if (targetTid) {
-        await tg(token, 'sendMessage', { chat_id: targetTid, text: '⚠️ لایسنس شما توسط مدیریت باطل شد.' }, env);
+        await tgSafe(token, 'sendMessage', { chat_id: targetTid, text: '⚠️ لایسنس شما توسط مدیریت باطل شد.' }, env);
       }
-      await tg(
-        token,
-        'sendMessage',
-        { chat_id: tid, text: `🚫 لایسنس \`${key}\` باطل گردید.`, parse_mode: 'Markdown' },
-        env
-      );
+      await sendReply(env, tid, {text: `🚫 لایسنس \`${key}\` باطل گردید.`, parse_mode: 'Markdown'});
       return;
     }
     if (text.startsWith('/adddays')) {
       const [, targetS, daysS] = text.split(/\s+/);
       const days = parseInt(daysS || '0');
       if (!targetS || !Number.isFinite(days) || days < 1) {
-        await tg(token, 'sendMessage', { chat_id: tid, text: 'فرمت: /adddays <آیدی یا کد> <تعداد روز>' }, env);
+        await sendReply(env, tid, {text: 'فرمت: /adddays <آیدی یا کد> <تعداد روز>'});
         return;
       }
       let targetTid = targetS;
@@ -1668,23 +1830,15 @@ async function handle(upd, env, steps) {
         lic = key ? await getLic(env, key) : null;
       }
       if (!lic || !key) {
-        await tg(token, 'sendMessage', { chat_id: tid, text: `❌ لایسنسی برای «${targetS}» یافت نشد.` }, env);
+        await sendReply(env, tid, {text: `❌ لایسنسی برای «${targetS}» یافت نشد.`});
         return;
       }
       await extend(env, key, days);
       const updated = await getLic(env, key);
-      await tg(
-        token,
-        'sendMessage',
-        {
-          chat_id: tid,
-          text: `✅ تعداد ${days} روز به لایسنس \`${key}\` اضافه شد.\n📅 تاریخ انقضای جدید: *${formatJalali(updated?.expiresAt)}*`,
-          parse_mode: 'Markdown',
-        },
-        env
-      );
+      await sendReply(env, tid, {text: `✅ تعداد ${days} روز به لایسنس \`${key}\` اضافه شد.\n📅 تاریخ انقضای جدید: *${formatJalali(updated?.expiresAt)}*`,
+          parse_mode: 'Markdown',});
       if (targetTid) {
-        await tg(
+        await tgSafe(
           token,
           'sendMessage',
           {
@@ -1702,22 +1856,13 @@ async function handle(upd, env, steps) {
       const days = parseInt(daysS || '30');
       const target = tidS ? parseInt(tidS) : tid;
       if (!Number.isFinite(days) || days < 1 || days > 3650 || !Number.isFinite(target)) {
-        await tg(token, 'sendMessage', { chat_id: tid, text: 'فرمت: /gen <روز> [آیدی عددی]' }, env);
+        await sendReply(env, tid, {text: 'فرمت: /gen <روز> [آیدی عددی]'});
         return;
       }
-      const key = await mintKey(env, target, days, 'paid');
-      await extend(env, key, days);
+      const key = await issueKey(env, target, days, 'paid');
       const lic = await getLic(env, key);
-      await tg(
-        token,
-        'sendMessage',
-        {
-          chat_id: tid,
-          text: `🔑 لایسنس با موفقیت ساخته شد:\n\`${key}\`\n\nبرای کاربر: \`${target}\`\nمدت: ${days} روز\nانقضا: ${formatJalali(lic?.expiresAt)}`,
-          parse_mode: 'Markdown',
-        },
-        env
-      );
+      await sendReply(env, tid, {text: `🔑 لایسنس با موفقیت ساخته شد:\n\`${key}\`\n\nبرای کاربر: \`${target}\`\nمدت: ${days} روز\nانقضا: ${formatJalali(lic?.expiresAt)}`,
+          parse_mode: 'Markdown',});
       return;
     }
     if (text.startsWith('/ok')) {
@@ -1725,7 +1870,7 @@ async function handle(upd, env, steps) {
       const target = parseInt(tidS);
       const days = parseInt(daysS || '30');
       if (!/^\d{3,}$/.test(tidS || '') || !Number.isFinite(days) || days < 1 || days > 3650) {
-        await tg(token, 'sendMessage', { chat_id: tid, text: 'فرمت: /ok <آیدی عددی> <روز>' }, env);
+        await sendReply(env, tid, {text: 'فرمت: /ok <آیدی عددی> <روز>'});
         return;
       }
       let key = await userKey(env, target);
@@ -1734,29 +1879,17 @@ async function handle(upd, env, steps) {
         await extend(env, key, days);
         await upgradePlan(env, key, 'paid');
       } else {
-        key = await mintKey(env, target, days, 'paid');
-        await extend(env, key, days);
+        key = await issueKey(env, target, days, 'paid');
       }
-      while ((await takeCredit(env, target)) === 1) {
-        await extend(env, key, 1);
-      }
+      await applyCredit(env, key, target);
       await env.LICENSES.delete(`receipt:${target}`);
       await setReceiptStatus(env, target, 'approved', null);
-      const curP = Math.max(0, parseInt((await env.LICENSES.get('stat:pending')) || '1') - 1);
-      await env.LICENSES.put('stat:pending', String(curP));
+      await env.LICENSES.put('stat:pending', String(await countPending(env)));
 
       const updated = await getLic(env, key);
-      await tg(
-        token,
-        'sendMessage',
-        {
-          chat_id: tid,
-          text: `✅ پرداخت تایید شد — ${days} روز برای \`${target}\`\n\`${key}\``,
-          parse_mode: 'Markdown',
-        },
-        env
-      );
-      await tg(
+      await sendReply(env, tid, {text: `✅ پرداخت تایید شد — ${days} روز برای \`${target}\`\n\`${key}\``,
+          parse_mode: 'Markdown',});
+      await tgSafe(
         token,
         'sendMessage',
         {
@@ -1775,26 +1908,18 @@ async function handle(upd, env, steps) {
     if (text.startsWith('/fix')) {
       const target = (text.split(/\s+/)[1] || '').trim();
       if (!target) {
-        await tg(token, 'sendMessage', { chat_id: tid, text: 'فرمت: /fix <آیدی کاربر>' }, env);
+        await sendReply(env, tid, {text: 'فرمت: /fix <آیدی کاربر>'});
         return;
       }
       const k = await userKey(env, target);
       if (!k) {
-        await tg(token, 'sendMessage', { chat_id: tid, text: `کاربر ${target} لایسنسی ندارد.` }, env);
+        await sendReply(env, tid, {text: `کاربر ${target} لایسنسی ندارد.`});
         return;
       }
       await upgradePlan(env, k, 'paid');
       const l = await getLic(env, k);
-      await tg(
-        token,
-        'sendMessage',
-        {
-          chat_id: tid,
-          text: `🔧 پلن کاربر ${target} به پولی تغییر یافت.\n\`${k}\`\nانقضا: ${formatJalali(l?.expiresAt)}`,
-          parse_mode: 'Markdown',
-        },
-        env
-      );
+      await sendReply(env, tid, {text: `🔧 پلن کاربر ${target} به پولی تغییر یافت.\n\`${k}\`\nانقضا: ${formatJalali(l?.expiresAt)}`,
+          parse_mode: 'Markdown',});
       return;
     }
   }
@@ -1803,24 +1928,25 @@ async function handle(upd, env, steps) {
   if (text.startsWith('/start')) {
     steps.push('start-branch');
     const payload = text.split(/\s+/)[1] || '';
-    if (String(tid) !== String(env.ADMIN_ID) && !(await checkJoined(env, tid))) {
+    const gate = await joinGatePrompt(env, tid);
+    if (gate) {
       steps.push('join-gate');
       // Preserve supported deep links through the channel-join gate. Otherwise
       // Telegram's one-shot /start payload is lost when users tap "recheck".
       if (/^(trial|buy|ref|ref_\d{3,})$/.test(payload) && payload !== `ref_${tid}`) {
         await env.LICENSES.put(`startpending:${tid}`, payload, { expirationTtl: 86400 });
       }
-      await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, ...joinPrompt(await getSetting(env, 'forceChannel', '')) }, env, steps);
+      await sendReply(env, tid, gate, steps);
       return;
     }
 
     const response = await startPayloadAction(env, msg.from, payload, steps);
-    await tg(token, 'sendMessage', { chat_id: tid, ...response }, env, steps);
+    await sendReply(env, tid, response, steps);
     return;
   }
 
   if (text === '/id') {
-    await tg(token, 'sendMessage', { chat_id: tid, text: `آیدی عددی شما:\n\`${tid}\``, parse_mode: 'Markdown' }, env);
+    await sendReply(env, tid, {text: `آیدی عددی شما:\n\`${tid}\``, parse_mode: 'Markdown'});
     return;
   }
 
@@ -1836,24 +1962,16 @@ async function handle(upd, env, steps) {
         `• \`/adddays <آیدی یا کد> <روز>\` — افزودن روز به لایسنس موجود\n` +
         `• \`/revoke <آیدی یا کد>\` — لغو و باطل کردن لایسنس\n` +
         `• \`/fix <آیدی>\` — ارتقای پلن کاربر به پولی\n` +
-        `• \`/id\` — نمایش آیدی عددی`;
-      await tg(token, 'sendMessage', { chat_id: tid, text: adminHelp, parse_mode: 'Markdown' }, env);
+        `• \`/id\` — نمایش آیدی عددی\n` +
+        `• \`/diagkey\` — لینک عیب‌یابی ربات (فقط ادمین)`;
+      await sendReply(env, tid, {text: adminHelp, parse_mode: 'Markdown'});
       return;
     }
-    await tg(token, 'sendMessage', { chat_id: tid, ...(await doHelp()) }, env);
+    await sendReply(env, tid, (await doHelp()));
     return;
   }
 
-  await tg(
-    token,
-    'sendMessage',
-    {
-      chat_id: tid,
-      text: '🤔 متوجه دستور نشدم. لطفاً از دکمه‌های منو یا دستور /start استفاده فرمایید.',
-    },
-    env,
-    steps
-  );
+  await sendReply(env, tid, {text: '🤔 متوجه دستور نشدم. لطفاً از دکمه‌های منو یا دستور /start استفاده فرمایید.',}, steps);
 }
 
 // ── Commerce & Admin Panel Helpers ────────────────────────────────────
@@ -1865,20 +1983,43 @@ async function setSetting(env, k, v) {
   await env.LICENSES.put(`set:${k}`, v);
 }
 
+// M6: returns { joined, error }. On a getChatMember failure the gate now
+// FAILS CLOSED (joined:false, error:true) instead of silently letting
+// everyone through — a misconfigured forceChannel used to disable the gate
+// without anyone noticing. The failure is recorded in lastError and shown
+// in /panel.
 async function checkJoined(env, tid) {
   const ch = (await getSetting(env, 'forceChannel', '')).trim();
-  if (!ch) return true;
-  const r = await tg(env.BOT_TOKEN, 'getChatMember', { chat_id: ch, user_id: tid }, env);
+  if (!ch) return { joined: true, error: false };
+  const r = await tgSafe(env.BOT_TOKEN, 'getChatMember', { chat_id: ch, user_id: tid }, env);
   if (!r || !r.ok) {
     try {
       await env.LICENSES.put('lastError', `force-join: getChatMember ${ch}: ${r?.description || 'unknown'}`);
     } catch (_) {}
-    return true;
+    return { joined: false, error: true };
   }
   const m = r.result || {};
   const st = m.status || 'left';
-  if (st === 'restricted') return m.is_member === true;
-  return ['member', 'administrator', 'creator'].includes(st);
+  if (st === 'restricted') return { joined: m.is_member === true, error: false };
+  return { joined: ['member', 'administrator', 'creator'].includes(st), error: false };
+}
+
+function joinCheckFailedPrompt() {
+  return {
+    text: '⚠️ بررسی عضویت در کانال ممکن نشد.\n\nممکن است تنظیم کانال موقتاً مشکل داشته باشد. لطفاً چند دقیقه دیگر دوباره تلاش کنید:',
+    reply_markup: {
+      inline_keyboard: [[{ text: '🔄 تلاش دوباره', callback_data: 'recheck' }]],
+    },
+  };
+}
+
+// Returns the join-gate prompt when the user must (re)join, or null when
+// they may proceed. `error` distinguishes "not a member" from "check failed".
+async function joinGatePrompt(env, tid) {
+  if (String(tid) === String(env.ADMIN_ID)) return null;
+  const j = await checkJoined(env, tid);
+  if (j.joined) return null;
+  return j.error ? joinCheckFailedPrompt() : joinPrompt(await getSetting(env, 'forceChannel', ''));
 }
 
 function joinPrompt(ch) {
@@ -1899,7 +2040,7 @@ async function buyMenuFull(env) {
   const card = await getSetting(env, 'cardNumber', 'تنظیم نشده — از /panel تنظیم کنید');
   const buyText = await getSetting(env, 'buyText', '🛒 *خرید لایسنس VoidrauVPN*');
   return {
-    text: `${buyText}\n\n💳 شماره کارت جهت واریز:\n\`${card}\`\n\nلطفاً پلن مورد نظر را انتخاب و پس از واریز، عکس رسید را در همین چت ارسال نمایید:`,
+    text: `${escMd(buyText)}\n\n💳 شماره کارت جهت واریز:\n\`${escMd(card)}\`\n\nلطفاً پلن مورد نظر را انتخاب و پس از واریز، عکس رسید را در همین چت ارسال نمایید:`,
     parse_mode: 'Markdown',
     reply_markup: {
       inline_keyboard: withHome((await plansOf(env)).map((p) => [{ text: p.label, callback_data: `plan:${p.id}` }])),
@@ -1914,20 +2055,26 @@ async function askMode(env, tid, prompt, mode) {
 async function adminLiveStats(env) {
   const idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
   const now = Math.floor(Date.now() / 1000);
+  // M7: bounded parallel scan over the whole index (was sequential, 300 cap).
+  const per = await mapLimit(idx, 25, async (u) => {
+    const k = await env.LICENSES.get(`user:${u}`);
+    if (!k) return null;
+    const l = await getLic(env, k);
+    if (l && l.expiresAt && l.expiresAt > now && l.plan !== 'revoked') {
+      return { trial: l.plan === 'trial', expiring: Math.ceil((l.expiresAt - now) / 86400) <= 3 };
+    }
+    return null;
+  });
   let active = 0;
   let trial = 0;
   let paid = 0;
   let expiring = 0;
-  for (const u of idx.slice(0, 300)) {
-    const k = await env.LICENSES.get(`user:${u}`);
-    if (!k) continue;
-    const l = await getLic(env, k);
-    if (l && l.expiresAt && l.expiresAt > now && l.plan !== 'revoked') {
-      active++;
-      if (l.plan === 'trial') trial++;
-      else paid++;
-      if (Math.ceil((l.expiresAt - now) / 86400) <= 3) expiring++;
-    }
+  for (const p of per) {
+    if (!p) continue;
+    active++;
+    if (p.trial) trial++;
+    else paid++;
+    if (p.expiring) expiring++;
   }
   const checkinsToday = parseInt((await env.LICENSES.get(`stat:checkins:${tehranDate()}`)) || '0');
   return { users: idx.length, active, trial, paid, expiring, checkinsToday };
@@ -1936,15 +2083,17 @@ async function adminLiveStats(env) {
 async function expiringList(env) {
   const idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
   const now = Math.floor(Date.now() / 1000);
-  const rows = [];
-  for (const u of idx.slice(0, 300)) {
+  // M7: bounded parallel scan over the whole index (was sequential, 300 cap).
+  const found = await mapLimit(idx, 25, async (u) => {
     const k = await env.LICENSES.get(`user:${u}`);
-    if (!k) continue;
+    if (!k) return null;
     const l = await getLic(env, k);
-    if (!l || !l.expiresAt || l.plan === 'revoked') continue;
+    if (!l || !l.expiresAt || l.plan === 'revoked') return null;
     const daysLeft = Math.ceil((l.expiresAt - now) / 86400);
-    if (daysLeft >= 0 && daysLeft <= 3) rows.push({ u, daysLeft, plan: l.plan, exp: l.expiresAt });
-  }
+    if (daysLeft < 0 || daysLeft > 3) return null;
+    return { u, daysLeft, plan: l.plan, exp: l.expiresAt };
+  });
+  const rows = found.filter(Boolean);
   rows.sort((a, b) => a.daysLeft - b.daysLeft);
   if (!rows.length) {
     return { text: '⏰ هیچ لایسنسی در ۳ روز آینده منقضی نمی‌شود.', reply_markup: { inline_keyboard: homeRow() } };
@@ -1959,22 +2108,28 @@ async function expiringList(env) {
 
 async function buildStatsMessage(env) {
   const users = parseInt((await env.LICENSES.get('stat:users')) || '0');
-  const pending = parseInt((await env.LICENSES.get('stat:pending')) || '0');
+  const pending = await countPending(env);
   const idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
   const now = Math.floor(Date.now() / 1000);
   let active = 0;
   let trial = 0;
   let paid = 0;
 
-  for (const u of idx.slice(-60)) {
+  // M7: bounded parallel scan of the 60-user sample.
+  const sample = await mapLimit(idx.slice(-60), 25, async (u) => {
     const k = await env.LICENSES.get(`user:${u}`);
-    if (!k) continue;
+    if (!k) return null;
     const l = await getLic(env, k);
     if (l && l.expiresAt && l.expiresAt > now && l.plan !== 'revoked') {
-      active++;
-      if (l.plan === 'trial') trial++;
-      else paid++;
+      return l.plan === 'trial' ? 'trial' : 'paid';
     }
+    return null;
+  });
+  for (const p of sample) {
+    if (!p) continue;
+    active++;
+    if (p === 'trial') trial++;
+    else paid++;
   }
 
   const live = await adminLiveStats(env);
@@ -2002,7 +2157,8 @@ async function adminPanel(env, tid) {
   const sup = await getSetting(env, 'supportId', '@Voidrau');
   const trialDays = String(await trialDaysOf(env));
   const users = parseInt((await env.LICENSES.get('stat:users')) || '0');
-  const pending = parseInt((await env.LICENSES.get('stat:pending')) || '0');
+  const pending = await countPending(env);
+  const lastErr = await env.LICENSES.get('lastError');
   const live = await adminLiveStats(env);
 
   return {
@@ -2013,11 +2169,12 @@ async function adminPanel(env, tid) {
       `⏰ در آستانهٔ انقضا (≤۳ روز): *${live.expiring}*\n` +
       `✅ چک‌این امروز: *${live.checkinsToday}*\n` +
       `🧾 رسید در انتظار: *${pending}*\n` +
-      `💳 کارت: \`${card}\`\n` +
-      `🛒 متن خرید: ${buy}\n` +
-      `📢 کانال اجباری: ${ch}\n` +
+      `💳 کارت: \`${escMd(card)}\`\n` +
+      `🛒 متن خرید: ${escMd(buy)}\n` +
+      `📢 کانال اجباری: ${escMd(ch)}\n` +
       `🎁 روز تست: ${trialDays} روز\n` +
-      `🆘 پشتیبانی: ${sup}`,
+      `🆘 پشتیبانی: ${escMd(sup)}` +
+      (lastErr ? `\n⚠️ آخرین خطا: ${escMd(String(lastErr).slice(0, 120))}` : ''),
     parse_mode: 'Markdown',
     reply_markup: {
       inline_keyboard: withHome([
@@ -2035,23 +2192,38 @@ async function adminPanel(env, tid) {
 
 async function pendingList(env, tid) {
   const idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
-  const rows = [];
-  let n = 0;
-  for (const u of idx) {
+  // L3: plansOf() is read once, not twice per row. L5: the count comes from
+  // this same scan (see countPending), not from the drifting stat:pending.
+  const plans = await plansOf(env);
+  const found = await mapLimit(idx, 25, async (u) => {
     const raw = await env.LICENSES.get(`receipt:${u}`);
-    if (!raw) continue;
+    if (!raw) return null;
     const planId = await getSetting(env, `lastPlan:${u}`, 'm1');
-    const p = (await plansOf(env)).find((x) => x.id === planId) || (await plansOf(env))[0];
-    rows.push([
+    const p = plans.find((x) => x.id === planId) || plans[0];
+    return [
       { text: `🧾 کاربر ${u} — ${p.label}`, callback_data: `okr:${u}:${p.days}` },
       { text: '❌', callback_data: `rej:${u}` },
-    ]);
-    n++;
-  }
+    ];
+  });
+  const rows = found.filter(Boolean);
+  const n = rows.length;
   return {
     text: n ? `🧾 تعداد ${n} رسید در انتظار تایید وجود دارد:` : '🧾 هیچ رسیدی در انتظار تایید نیست.',
     reply_markup: rows.length ? { inline_keyboard: withHome(rows) } : { inline_keyboard: homeRow() },
   };
+}
+
+// L5: the pending-receipt count is computed from the real receipt:* keys,
+// never from the separate stat:pending counter that could drift after
+// concurrent approvals or manual deletions.
+async function countPending(env) {
+  let idx = [];
+  try {
+    idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
+    if (!Array.isArray(idx)) idx = [];
+  } catch (_) {}
+  const found = await mapLimit(idx, 25, async (u) => ((await env.LICENSES.get(`receipt:${u}`)) ? 1 : 0));
+  return found.reduce((a, b) => a + b, 0);
 }
 
 async function recentUsers(env) {
@@ -2059,7 +2231,7 @@ async function recentUsers(env) {
   const last = idx.slice(-15).reverse();
   let t = `👥 *آخرین کاربران (${idx.length} کل):*\n\n`;
   const now = Math.floor(Date.now() / 1000);
-  for (const u of last) {
+  const lines = await mapLimit(last, 25, async (u) => {
     const k = await env.LICENSES.get(`user:${u}`);
     let s = 'بدون لایسنس';
     if (k) {
@@ -2070,19 +2242,19 @@ async function recentUsers(env) {
           : 'منقضی/باطل';
       }
     }
-    t += `• \`${u}\` — ${s}\n`;
-  }
+    return `• \`${u}\` — ${s}\n`;
+  });
+  t += lines.join('');
   return { text: t, parse_mode: 'Markdown', reply_markup: { inline_keyboard: homeRow() } };
 }
 
 async function exportBackup(env, tid) {
   const idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
-  const out = [];
-  for (const u of idx.slice(0, 250)) {
+  const out = await mapLimit(idx.slice(0, 250), 25, async (u) => {
     const k = await env.LICENSES.get(`user:${u}`);
     const l = k ? await getLic(env, k) : null;
-    out.push({ id: u, key: k || null, plan: l?.plan || null, expiresAt: l?.expiresAt || null });
-  }
+    return { id: u, key: k || null, plan: l?.plan || null, expiresAt: l?.expiresAt || null };
+  });
   const body = JSON.stringify(out, null, 2);
   const fd = new FormData();
   fd.append('chat_id', String(tid));
@@ -2124,13 +2296,34 @@ async function doTrial(env, tid) {
       reply_markup: { inline_keyboard: withHome([[{ text: '🛒 خرید لایسنس', callback_data: 'buy' }]]) },
     };
   }
-  const TD = await trialDaysOf(env);
-  const key = await mintKey(env, tid, TD, 'trial');
-  await extend(env, key, TD);
-  await env.LICENSES.put(`trial:${tid}`, '1');
-  while ((await takeCredit(env, tid)) === 1) {
-    await extend(env, key, 1);
+  // M1: no trial marker yet — first show an active paid licence instead of
+  // burning the trial on top of it, then claim the trial (unique value,
+  // verified) BEFORE minting anything. The old code minted the key and only
+  // then marked the trial used, so two simultaneous taps both minted a
+  // working key. KV has no compare-and-swap; the claim+verify narrows the
+  // race to one round-trip.
+  const key0 = await userKey(env, tid);
+  const lic0 = key0 ? await getLic(env, key0) : null;
+  const now0 = Math.floor(Date.now() / 1000);
+  if (lic0 && lic0.expiresAt && lic0.expiresAt > now0 && lic0.plan !== 'trial' && lic0.plan !== 'revoked') {
+    return {
+      text:
+        `🎁 لایسنس شما هم‌اکنون فعال است:\n\`${key0}\`\n\n` +
+        `⏳ زمان باقی‌مانده: *${formatDuration(lic0.expiresAt - now0)}*\n` +
+        `📅 تاریخ انقضا: *${formatJalali(lic0.expiresAt)}*\n\n` +
+        `کد را در برنامه (تب لایسنس) وارد کنید.`,
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: homeRow() },
+    };
   }
+  const claim = crypto.randomUUID();
+  await env.LICENSES.put(`trial:${tid}`, claim);
+  if ((await env.LICENSES.get(`trial:${tid}`)) !== claim) {
+    return { text: '⏳ تست رایگان شما همین حالا فعال شد — از «🔑 کد لایسنس من» کد را ببینید.', reply_markup: { inline_keyboard: homeRow() } };
+  }
+  const TD = await trialDaysOf(env);
+  const key = await issueKey(env, tid, TD, 'trial');
+  await applyCredit(env, key, tid);
   const lic = await getLic(env, key);
   return {
     text:
@@ -2150,11 +2343,12 @@ async function doPlan(env, tid, planId) {
   const p = (await plansOf(env)).find((x) => x.id === planId);
   if (!p) return { text: 'پلن نامعتبر.' };
   await setSetting(env, `lastPlan:${tid}`, p.id);
+  await env.LICENSES.put(`lastPlanAt:${tid}`, String(Date.now()));
   const card = await getSetting(env, 'cardNumber', 'تنظیم نشده');
   return {
     text:
-      `🛒 *پلن انتخابی:* ${p.label}\n\n` +
-      `💳 لطفاً مبلغ را به شماره کارت زیر واریز کنید:\n\`${card}\`\n\n` +
+      `🛒 *پلن انتخابی:* ${escMd(p.label)}\n\n` +
+      `💳 لطفاً مبلغ را به شماره کارت زیر واریز کنید:\n\`${escMd(card)}\`\n\n` +
       `سپس تصویر فیش یا اسکرین‌شات رسید را همین‌جا ارسال کنید تا تایید شود.`,
     parse_mode: 'Markdown',
     reply_markup: { inline_keyboard: homeRow() },
@@ -2202,15 +2396,22 @@ async function recordReferralJoin(env, inviteeId, referrerId, steps) {
   const invitee = String(inviteeId);
   const referrer = String(referrerId);
   if (!/^\d{3,}$/.test(referrer) || referrer === invitee) return false;
+  // M3: claim this invitee with a unique value and verify it survived —
+  // two simultaneous joins from the same link used to both count. (KV has
+  // no atomic increment, so two joins from DIFFERENT invitees in the same
+  // instant can still lose one increment; the per-invitee dedup — the
+  // correctness-critical part — is fixed.)
   if (await env.LICENSES.get(`refseen:${invitee}`)) return false;
+  const claim = crypto.randomUUID();
+  await env.LICENSES.put(`refseen:${invitee}`, claim);
+  if ((await env.LICENSES.get(`refseen:${invitee}`)) !== claim) return false;
 
-  await env.LICENSES.put(`refseen:${invitee}`, '1');
   const previous = parseInt((await env.LICENSES.get(`refjoin:${referrer}`)) || '0', 10);
   const joins = (Number.isFinite(previous) ? previous : 0) + 1;
   await env.LICENSES.put(`refjoin:${referrer}`, String(joins));
   if (joins % REFERRAL_REWARD_JOINS === 0) {
     await addCredit(env, referrer, REFERRAL_REWARD_DAYS);
-    await tg(
+    await tgSafe(
       env.BOT_TOKEN,
       'sendMessage',
       {
@@ -2230,16 +2431,19 @@ async function doReferral(env, tid) {
   const joins = parseInt((await env.LICENSES.get(`refjoin:${tid}`)) || '0');
   const credit = (await env.LICENSES.get(`credit:${tid}`)) || '0';
   const needed = REFERRAL_REWARD_JOINS - (joins % REFERRAL_REWARD_JOINS);
+  // C1: the old message used parse_mode Markdown and the link always
+  // contains ref_<id> — the underscore opens an italic entity Telegram can
+  // never close, so EVERY invite failed with HTTP 400. Plain text keeps the
+  // link tappable (Telegram auto-links t.me URLs) with no parse risk.
   return {
     text:
-      `👥 *سیستم دعوت دوستان (کسب اشتراک رایگان)*\n\n` +
-      `با ارسال لینک اختصاصی به دوستانتان، به ازای هر *${REFERRAL_REWARD_JOINS} نفر*، *${REFERRAL_REWARD_DAYS} روز لایسنس رایگان* دریافت می‌کنید!\n\n` +
-      `🔗 *لینک دعوت شما:*\nhttps://t.me/${botUser}?start=ref_${tid}\n\n` +
-      `📊 *گزارش دعوت‌ها:*\n` +
-      `• تعداد افراد عضو شده: *${joins} نفر*\n` +
+      `👥 سیستم دعوت دوستان (کسب اشتراک رایگان)\n\n` +
+      `با ارسال لینک اختصاصی به دوستانتان، به ازای هر ${REFERRAL_REWARD_JOINS} نفر، ${REFERRAL_REWARD_DAYS} روز لایسنس رایگان دریافت می‌کنید!\n\n` +
+      `🔗 لینک دعوت شما:\nhttps://t.me/${botUser}?start=ref_${tid}\n\n` +
+      `📊 گزارش دعوت‌ها:\n` +
+      `• تعداد افراد عضو شده: ${joins} نفر\n` +
       `• ${needed === REFERRAL_REWARD_JOINS ? 'دعوت بعدی شروع دور جدید پاداش' : `${needed} نفر مانده تا پاداش بعدی`}\n` +
-      `• اعتبار ذخیره هدیه: *${credit} روز*`,
-    parse_mode: 'Markdown',
+      `• اعتبار ذخیره هدیه: ${credit} روز`,
     reply_markup: { inline_keyboard: withHome([[{ text: '🏆 لیدربورد دعوت', callback_data: 'top' }]]) },
   };
 }
