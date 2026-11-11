@@ -2,6 +2,9 @@ name = "voidrau"
 main = "license-worker.js"
 compatibility_date = "2026-10-13"
 
+[triggers]
+crons = ["0 5 * * *"]
+
 [[kv_namespaces]]
 binding = "LICENSES"
 id = "c2af2f0d59cd4547b6d91ae106d52952"
