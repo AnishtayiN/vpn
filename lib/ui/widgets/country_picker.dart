@@ -22,6 +22,7 @@ class CountryPickerRow extends StatelessWidget {
     required this.onChanged,
     this.fa = false,
     this.offer = _offer,
+    this.enabled = true,
   });
 
   /// Currently chosen ISO-3166 alpha-2 codes (any case).
@@ -31,6 +32,10 @@ class CountryPickerRow extends StatelessWidget {
   /// Render the country names in Persian.
   final bool fa;
   final List<String> offer;
+
+  /// False greys the chips out (inactive-engine settings): no tap changes
+  /// anything while the rule does not apply.
+  final bool enabled;
 
   /// Realistic VPN exit countries first: these are the pools gateways actually
   /// live in, so the list stays short enough to scan on a phone.
@@ -60,16 +65,18 @@ class CountryPickerRow extends StatelessWidget {
                   style: const TextStyle(fontSize: 12),
                 ),
                 showCheckmark: false,
-                onSelected: (_) {
-                  final next = List<String>.from(selected);
-                  final up = code.toUpperCase();
-                  if (next.contains(up)) {
-                    next.remove(up);
-                  } else {
-                    next.add(up);
-                  }
-                  onChanged(next);
-                },
+                onSelected: enabled
+                    ? (_) {
+                        final next = List<String>.from(selected);
+                        final up = code.toUpperCase();
+                        if (next.contains(up)) {
+                          next.remove(up);
+                        } else {
+                          next.add(up);
+                        }
+                        onChanged(next);
+                      }
+                    : null,
               ),
             ),
         ],

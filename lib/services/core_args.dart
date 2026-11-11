@@ -17,7 +17,8 @@ import 'split.dart';
 ///
 /// That is a statement about the *names*, not about what the 2.4.0 binary
 /// bundles: the only version-scoped evidence in this repository that Psiphon
-/// and Tor ship inside the core is for 2.3.0 (`ChainMode` in settings.dart).
+/// and Tor ship inside the core is for 2.3.0 (`SecondHop` / `StandaloneMode`
+/// in settings.dart).
 /// No `aether --help` output, 2.4.0 changelog or on-device run in this repo
 /// confirms them in 2.4.0, so the standalone Psiphon-only / Tor-only modes
 /// are treated as verified on 2.3.0 only ([standaloneHopVerified]) and the UI
@@ -93,41 +94,48 @@ class CoreLaunch {
   /// Destinations refused outright.
   static List<String> blockRules(VpnSettings s) => s.routeBlock;
 
-  /// Whether a chain mode needs Tor's pluggable transports next to the binary.
-  static bool isTor(ChainMode c) =>
-      c == ChainMode.tor || c == ChainMode.torReverse || c == ChainMode.torOnly;
+  /// Whether the effective hop needs Tor's pluggable transports next to the
+  /// binary. The effective family is the standalone mode when one is chosen
+  /// (it wins over any second hop — a standalone connection has nothing
+  /// underneath to carry a second hop through), otherwise the second hop.
+  static bool isTor(VpnSettings s) =>
+      s.standaloneMode == StandaloneMode.torOnly ||
+      (s.standaloneMode == StandaloneMode.standard &&
+          (s.secondHop == SecondHop.tor ||
+              s.secondHop == SecondHop.torReverse));
 
-  static bool isPsiphon(ChainMode c) =>
-      c == ChainMode.psiphon ||
-      c == ChainMode.psiphonReverse ||
-      c == ChainMode.psiphonOnly;
+  static bool isPsiphon(VpnSettings s) =>
+      s.standaloneMode == StandaloneMode.psiphonOnly ||
+      (s.standaloneMode == StandaloneMode.standard &&
+          (s.secondHop == SecondHop.psiphon ||
+              s.secondHop == SecondHop.psiphonReverse));
 
   /// True for the standalone top-level modes: plain Psiphon or plain Tor on
   /// the proxy port, with no WARP underneath.
-  static bool isStandalone(ChainMode c) =>
-      c == ChainMode.psiphonOnly || c == ChainMode.torOnly;
+  static bool isStandalone(VpnSettings s) => s.isStandaloneHop;
 
   /// Whether the standalone Psiphon-only / Tor-only modes are verified to
   /// exist in the bundled core. The only version-scoped evidence in this
-  /// repository is for Aether 2.3.0 (see the ChainMode docs in settings.dart),
-  /// so this is true on the legacy build only. On 2.4.0 the modes stay
-  /// selectable — that is how they get tested on a real device — but the UI
-  /// must show the unverified note and never claim they work there.
+  /// repository is for Aether 2.3.0 (see the `SecondHop` docs in
+  /// settings.dart), so this is true on the legacy build only. On 2.4.0 the
+  /// modes stay selectable — that is how they get tested on a real device —
+  /// but the UI must show the unverified note and never claim they work there.
   static bool get standaloneHopVerified => coreVersion.startsWith('2.3.');
 
-  static String? _chainToken(ChainMode c) {
-    switch (c) {
-      case ChainMode.off:
+  /// Core token for the effective hop: `chain` / `reverse` for a second hop,
+  /// `only` for a standalone mode (which wins over any second hop), null
+  /// when neither is set.
+  static String? _chainToken(VpnSettings s) {
+    if (s.isStandaloneHop) return 'only';
+    switch (s.secondHop) {
+      case SecondHop.off:
         return null;
-      case ChainMode.psiphon:
-      case ChainMode.tor:
+      case SecondHop.psiphon:
+      case SecondHop.tor:
         return 'chain';
-      case ChainMode.psiphonReverse:
-      case ChainMode.torReverse:
+      case SecondHop.psiphonReverse:
+      case SecondHop.torReverse:
         return 'reverse';
-      case ChainMode.psiphonOnly:
-      case ChainMode.torOnly:
-        return 'only';
     }
   }
 
@@ -146,6 +154,7 @@ class CoreLaunch {
     /// write is the most common "spins forever" cause on Windows).
     required String configPath,
     String? tmpDir,
+
     /// Directory the core may use for Tor state and its own files. Defaults to
     /// the config file's directory.
     String? stateDir,
@@ -228,8 +237,8 @@ class CoreLaunch {
     }
 
     // ── split tunneling by destination (works on every platform) ─────────
-    final direct =
-        SplitRules.coreDirectEntries(settings, windows: windowsMode ?? Platform.isWindows);
+    final direct = SplitRules.coreDirectEntries(settings,
+        windows: windowsMode ?? Platform.isWindows);
     final block = SplitRules.normalize(blockRules(settings));
     if (direct.isNotEmpty) env['AETHER_ROUTE_DIRECT'] = direct.join(',');
     if (block.isNotEmpty) env['AETHER_ROUTE_BLOCK'] = block.join(',');
@@ -238,12 +247,12 @@ class CoreLaunch {
     if (settings.httpProxy) env['AETHER_HTTP_PROXY'] = settings.httpBind;
 
     // ── second hop: Psiphon / Tor inside the core ─────────────────────────
-    final hop = _chainToken(settings.chain);
+    final hop = _chainToken(settings);
     if (hop != null) {
       // Both chains serve their own proxy on the same default port; pin it two
       // above ours so it can never collide with the extra HTTP listener.
       final chainBind = '127.0.0.1:${settings.hopPort}';
-      if (isPsiphon(settings.chain)) {
+      if (isPsiphon(settings)) {
         env['AETHER_PSIPHON'] = hop;
         env['AETHER_PSIPHON_BIND'] = chainBind;
         final region = settings.psiphonRegion.trim().toUpperCase();
@@ -269,8 +278,7 @@ class CoreLaunch {
       final slash = dir.lastIndexOf(RegExp(r'[/\\]'));
       if (slash > 0) {
         env['AETHER_TOR_DIR'] = '${dir.substring(0, slash)}/aether-tor';
-        env['AETHER_PSIPHON_DIR'] =
-            '${dir.substring(0, slash)}/aether-psiphon';
+        env['AETHER_PSIPHON_DIR'] = '${dir.substring(0, slash)}/aether-psiphon';
       }
     }
 
@@ -311,7 +319,7 @@ class CoreLaunch {
     // to escalate through: walking the five-rung ladder would just re-dial
     // the same only-mode core five times. One rung, the effective protocol
     // (Smart still resolves to MASQUE — the env still needs AETHER_PROTOCOL).
-    if (isStandalone(settings.chain)) return [_effective(settings, null)];
+    if (isStandalone(settings)) return [_effective(settings, null)];
     if (settings.protocol != Protocol.smart) {
       return [settings.protocol];
     }

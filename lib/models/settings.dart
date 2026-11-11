@@ -67,13 +67,14 @@ enum PerfProfile {
 /// Psiphon"/"through Tor" is the difference between a working connection and a
 /// dead one — and it is a checkbox here instead of a second app.
 ///
-/// The `*Only` values are also the standalone top-level modes: plain Psiphon
-/// (or plain Tor) on the same proxy port, with no WARP at all. Whether the
-/// 2.4.0 core still ships them is NOT verified in this repository — the only
-/// version-scoped statement here is the 2.3.0 one above, so the standalone-hop
-/// check in core_args.dart treats the standalone modes as verified on 2.3.0
-/// only, and the UI must say so instead of claiming they work on 2.4.0.
-enum ChainMode {
+/// This is only the *second* hop: it always rides on top of a protocol
+/// (WARP underneath). Plain Psiphon/Tor with no WARP at all is the separate
+/// [StandaloneMode]. Whether the 2.4.0 core still ships them is NOT verified
+/// in this repository — the only version-scoped statement here is the 2.3.0
+/// one above, so the standalone-hop check in core_args.dart treats the
+/// standalone modes as verified on 2.3.0 only, and the UI must say so instead
+/// of claiming they work on 2.4.0.
+enum SecondHop {
   /// No second hop.
   off,
 
@@ -83,14 +84,24 @@ enum ChainMode {
   /// The tunnel is dialled *through* Psiphon, so the network never sees WARP.
   psiphonReverse,
 
-  /// Plain Psiphon on the same proxy port — no WARP at all.
-  psiphonOnly,
-
   /// Tor carries the tunnel.
   tor,
 
   /// The tunnel is dialled through Tor.
   torReverse,
+}
+
+/// A top-level mode with no WARP underneath: plain Psiphon or plain Tor on
+/// the same proxy port. Independent of [SecondHop] — the two are separate
+/// selectors in the UI writing separate fields — and when a standalone mode
+/// is chosen it wins over any second hop (see CoreLaunch: a standalone
+/// connection has nothing underneath to carry a second hop through).
+enum StandaloneMode {
+  /// Normal: the chosen protocol, plus whatever [SecondHop] is set.
+  standard,
+
+  /// Plain Psiphon on the same proxy port — no WARP at all.
+  psiphonOnly,
 
   /// Plain Tor on the same proxy port.
   torOnly,
@@ -197,7 +208,8 @@ class VpnSettings {
     this.perfTxKb = 0,
     this.quicV2 = true,
     this.ech = false,
-    this.chain = ChainMode.off,
+    this.secondHop = SecondHop.off,
+    this.standaloneMode = StandaloneMode.standard,
     this.psiphonRegion = '',
     this.psiphonCdn = false,
     this.hopHttp = false,
@@ -225,8 +237,8 @@ class VpnSettings {
     this.warpEndpoints = const [],
     this.serverlessFragment = true,
     this.serverlessNoise = true,
-    this.chainProxies = const [],
-    this.chainExitId = '',
+    this.xrayChainProxies = const [],
+    this.xrayChainExitId = '',
   });
 
   ConnectionMode mode;
@@ -310,14 +322,21 @@ class VpnSettings {
   /// Fetch an Encrypted Client Hello config and hide the SNI (`AETHER_ECH`).
   bool ech;
 
-  /// Second hop carrying the tunnel (Psiphon / Tor), see [ChainMode].
-  ChainMode chain;
+  /// Second hop carrying the tunnel (Psiphon / Tor), see [SecondHop].
+  SecondHop secondHop;
+
+  /// Top-level standalone mode (plain Psiphon/Tor, no WARP), see
+  /// [StandaloneMode]. Independent of [secondHop]: the two are separate
+  /// selectors writing separate fields.
+  StandaloneMode standaloneMode;
 
   /// True when the connection is a standalone Psiphon-only or Tor-only mode
   /// (plain Psiphon/Tor on the proxy port, no WARP) rather than a protocol
-  /// with a second hop. See [ChainMode] for the 2.4.0 verification caveat.
-  bool get isStandaloneHop =>
-      chain == ChainMode.psiphonOnly || chain == ChainMode.torOnly;
+  /// with a second hop. See [SecondHop] for the 2.4.0 verification caveat.
+  bool get isStandaloneHop => standaloneMode != StandaloneMode.standard;
+
+  /// True when a second hop carries the tunnel.
+  bool get hasSecondHop => secondHop != SecondHop.off;
 
   /// Country the Psiphon exit should be in, e.g. `DE`. Empty = any.
   String psiphonRegion;
@@ -406,24 +425,26 @@ class VpnSettings {
   /// Serverless: send UDP noise packets (QUIC-shaped).
   bool serverlessNoise;
 
-  /// Chain proxies the user entered (share links), in list order.
-  List<ChainProxy> chainProxies;
+  /// Xray chain proxies the user entered (share links), in list order.
+  /// Renamed from the old `chainProxies`: these belong to Xray only and
+  /// have nothing to do with the Aether second hop ([SecondHop]).
+  List<ChainProxy> xrayChainProxies;
 
-  /// Id of the chain proxy used as the exit, or '' for "first usable".
-  String chainExitId;
+  /// Id of the Xray chain proxy used as the exit, or '' for "first usable".
+  String xrayChainExitId;
 
-  /// The chain proxy chosen as the exit for [mode], or the first one the
+  /// The Xray chain proxy chosen as the exit for [mode], or the first one the
   /// mode can carry. UDP-only proxies (WireGuard / Hysteria2) can only ride
   /// on WARP — the Worker relays TCP only. Serverless is direct by
   /// definition and never takes a chain exit, so it always returns null.
-  ChainProxy? chainExitFor(XrayMode mode) {
+  ChainProxy? xrayChainExitFor(XrayMode mode) {
     if (mode == XrayMode.serverless) return null;
-    final usable = chainProxies
+    final usable = xrayChainProxies
         .where((c) => !ChainProxy.isUdpLink(c.link) || mode == XrayMode.warp)
         .toList();
     if (usable.isEmpty) return null;
     for (final c in usable) {
-      if (c.id == chainExitId) return c;
+      if (c.id == xrayChainExitId) return c;
     }
     return usable.first;
   }
@@ -558,7 +579,8 @@ class VpnSettings {
         'perfTxKb': perfTxKb,
         'quicV2': quicV2,
         'ech': ech,
-        'chain': chain.name,
+        'secondHop': secondHop.name,
+        'standaloneMode': standaloneMode.name,
         'psiphonRegion': psiphonRegion,
         'psiphonCdn': psiphonCdn,
         'hopHttp': hopHttp,
@@ -585,8 +607,8 @@ class VpnSettings {
         'warpEndpoints': warpEndpoints,
         'serverlessFragment': serverlessFragment,
         'serverlessNoise': serverlessNoise,
-        'chainProxies': chainProxies.map((c) => c.toJson()).toList(),
-        'chainExitId': chainExitId,
+        'xrayChainProxies': xrayChainProxies.map((c) => c.toJson()).toList(),
+        'xrayChainExitId': xrayChainExitId,
       };
 
   /// Normalises a stored country list: upper-case ISO-3166 alpha-2 codes only,
@@ -629,13 +651,48 @@ class VpnSettings {
 
     int num(String key, int fallback) => _int(json[key], fallback);
 
+    // MIGRATION (old single `chain` value): builds before the split stored
+    // one `chain` name covering both concepts. Map it onto the two new
+    // fields so an existing user's saved mode survives the upgrade:
+    // psiphon/tor (+reverse) -> second hop, psiphonOnly/torOnly ->
+    // standalone mode, off -> both off/standard. New keys, when present,
+    // always win over the legacy value.
+    var legacyHop = SecondHop.off;
+    var legacyStandalone = StandaloneMode.standard;
+    final legacyChain = json['chain']?.toString();
+    if (legacyChain == 'psiphon') {
+      legacyHop = SecondHop.psiphon;
+    } else if (legacyChain == 'psiphonReverse') {
+      legacyHop = SecondHop.psiphonReverse;
+    } else if (legacyChain == 'tor') {
+      legacyHop = SecondHop.tor;
+    } else if (legacyChain == 'torReverse') {
+      legacyHop = SecondHop.torReverse;
+    } else if (legacyChain == 'psiphonOnly') {
+      legacyStandalone = StandaloneMode.psiphonOnly;
+    } else if (legacyChain == 'torOnly') {
+      legacyStandalone = StandaloneMode.torOnly;
+    }
+    final secondHop = json.containsKey('secondHop')
+        ? parse(SecondHop.values, 'secondHop', SecondHop.off)
+        : legacyHop;
+    final standaloneMode = json.containsKey('standaloneMode')
+        ? parse(
+            StandaloneMode.values, 'standaloneMode', StandaloneMode.standard)
+        : legacyStandalone;
+    // MIGRATION (old Xray proxy keys): `chainProxies` / `chainExitId` were
+    // renamed to `xrayChainProxies` / `xrayChainExitId`; read the old keys
+    // when the new ones are absent so saved proxies survive.
+    final xrayChainProxiesJson =
+        json['xrayChainProxies'] ?? json['chainProxies'];
+    final xrayChainExitIdJson = json['xrayChainExitId'] ?? json['chainExitId'];
+
     return VpnSettings(
       mode: parse(ConnectionMode.values, 'mode', ConnectionMode.vpn),
       protocol: parse(Protocol.values, 'protocol', Protocol.smart),
       scan: parse(ScanMode.values, 'scan', ScanMode.turbo),
       ipVersion: parse(IpVersion.values, 'ipVersion', IpVersion.dual),
-      transport:
-          parse(MasqueTransport.values, 'transport', MasqueTransport.h3),
+      transport: parse(MasqueTransport.values, 'transport', MasqueTransport.h3),
       obfuscation: json['obfuscation']?.toString() ?? 'auto',
       endpoint: json['endpoint']?.toString() ?? '',
       quickReconnect: json['quickReconnect'] != false,
@@ -669,7 +726,8 @@ class VpnSettings {
       perfTxKb: num('perfTxKb', 0),
       quicV2: json['quicV2'] != false,
       ech: json['ech'] == true,
-      chain: parse(ChainMode.values, 'chain', ChainMode.off),
+      secondHop: secondHop,
+      standaloneMode: standaloneMode,
       psiphonRegion: json['psiphonRegion']?.toString() ?? '',
       psiphonCdn: json['psiphonCdn'] == true,
       // `psiphonHttp` is what an older build stored for the same switch.
@@ -699,10 +757,13 @@ class VpnSettings {
       warpEndpoints: lines(json['warpEndpoints']),
       serverlessFragment: json['serverlessFragment'] != false,
       serverlessNoise: json['serverlessNoise'] != false,
-      chainProxies: (json['chainProxies'] is List
-          ? (json['chainProxies'] as List).map(ChainProxy.parse).whereType<ChainProxy>().toList()
+      xrayChainProxies: (xrayChainProxiesJson is List
+          ? xrayChainProxiesJson
+              .map(ChainProxy.parse)
+              .whereType<ChainProxy>()
+              .toList()
           : const <ChainProxy>[]),
-      chainExitId: json['chainExitId']?.toString() ?? '',
+      xrayChainExitId: xrayChainExitIdJson?.toString() ?? '',
     );
   }
 

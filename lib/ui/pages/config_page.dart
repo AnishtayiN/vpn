@@ -21,6 +21,9 @@ class ConfigPage extends StatelessWidget {
     final c = controller;
     final s = c.s;
     final st = c.settings;
+    // True while Xray is the engine a (re)connect takes: Aether-only
+    // settings below (protocol, exit filter, second hop) are greyed out.
+    final xray = c.useXray;
     // Trial/referral users get a read-only settings page; only paid
     // licenses may change the config (user request).
     final locked = !LicenseService.instance.isPaid;
@@ -54,7 +57,7 @@ class ConfigPage extends StatelessWidget {
         }, (v) {
           st.protocol = Protocol.values.firstWhere((e) => e.name == v);
           c.persist();
-        }, wrap: true),
+        }, wrap: true, enabled: !xray),
         _label(s.scan),
         _dropdown(
           st.scan.name,
@@ -91,7 +94,7 @@ class ConfigPage extends StatelessWidget {
             st.transport =
                 v == 'h2' ? MasqueTransport.h2 : MasqueTransport.h3;
             c.persist();
-          }),
+          }, enabled: !xray),
         ],
         _label(s.ipVersion),
         _seg(st.ipVersion.name, const {
@@ -128,11 +131,12 @@ class ConfigPage extends StatelessWidget {
           // one-tap answer left behind.
           st.exitRulePaused = false;
           c.persist();
-        }, wrap: true),
+        }, wrap: true, enabled: !xray),
         if (st.exitFilter == ExitFilter.preferred) ...[
           _label(s.exitPreferredCountries),
           CountryPickerRow(
             fa: s.isFa,
+            enabled: !xray,
             selected: st.exitPreferred,
             onChanged: (v) {
               st.exitPreferred = v;
@@ -152,6 +156,7 @@ class ConfigPage extends StatelessWidget {
           _label(s.exitBlockedCountries),
           CountryPickerRow(
             fa: s.isFa,
+            enabled: !xray,
             selected: st.exitBlocked,
             onChanged: (v) {
               st.exitBlocked = v;
@@ -162,6 +167,7 @@ class ConfigPage extends StatelessWidget {
           TextFormField(
             initialValue: '${(st.exitAskAfter / 60).round()}',
             keyboardType: TextInputType.number,
+            enabled: !xray,
             onChanged: (v) {
               final m = int.tryParse(v) ?? 3;
               st.exitAskAfter = (m < 1 ? 1 : m) * 60;
@@ -180,10 +186,12 @@ class ConfigPage extends StatelessWidget {
           value: st.coreExitLoc,
           title: Text(s.exitLock),
           subtitle: Text(s.exitLockHelp),
-          onChanged: (v) {
-            st.coreExitLoc = v;
-            c.persist();
-          },
+          onChanged: xray
+              ? null
+              : (v) {
+                  st.coreExitLoc = v;
+                  c.persist();
+                },
         ),
         SwitchListTile(
           value: st.quickReconnect,
@@ -311,43 +319,41 @@ class ConfigPage extends StatelessWidget {
             c.persist();
           },
         ),
-        if (!Platform.isIOS) ...[
+        // Aether-only settings (standalone mode + second hop): greyed out
+        // while Xray is the selected engine — Xray never reads them.
+        if (!Platform.isIOS)
+          _disabledWhen(
+            xray,
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
           // Standalone top-level modes: plain Psiphon or plain Tor on the
           // proxy port, with no WARP underneath. They reuse the existing
-          // ChainMode.psiphonOnly / torOnly and the existing AETHER_PSIPHON* /
-          // AETHER_TOR* env — no new core variables. The region/country
-          // fields below (in the second-hop section) already appear for these
-          // modes, so they are not duplicated here.
+          // standalone env (AETHER_PSIPHON* / AETHER_TOR*) — no new core
+          // variables. The region/country fields below (in the second-hop
+          // section) already appear for these modes, so they are not
+          // duplicated here.
           _label(s.standaloneMode),
           Text(s.standaloneHelp,
               style: const TextStyle(color: VoidrauColors.muted, fontSize: 12)),
           const SizedBox(height: 8),
           _seg(
-            st.chain == ChainMode.psiphonOnly
-                ? 'psiphonOnly'
-                : st.chain == ChainMode.torOnly
-                    ? 'torOnly'
-                    : 'standard',
+            st.standaloneMode.name,
             {
               'standard': s.standaloneStandard,
               'psiphonOnly': s.hopPsiphonOnly,
               'torOnly': s.hopTorOnly,
             },
             (v) {
-              // 'standard' only clears a standalone mode; a chain/reverse
-              // second hop chosen below is left untouched.
-              if (v == 'psiphonOnly') {
-                st.chain = ChainMode.psiphonOnly;
-              } else if (v == 'torOnly') {
-                st.chain = ChainMode.torOnly;
-              } else if (st.isStandaloneHop) {
-                st.chain = ChainMode.off;
-              }
+              // Separate field from the second hop below: 'standard' only
+              // clears the standalone mode; a second hop stays untouched.
+              st.standaloneMode =
+                  StandaloneMode.values.firstWhere((e) => e.name == v);
               c.persist();
             },
             wrap: true,
           ),
-          if (st.chain == ChainMode.torOnly) ...[
+          if (st.standaloneMode == StandaloneMode.torOnly) ...[
             const SizedBox(height: 8),
             Text(s.standaloneTorHeavy,
                 style: const TextStyle(color: VoidrauColors.muted, fontSize: 12)),
@@ -361,20 +367,18 @@ class ConfigPage extends StatelessWidget {
           Text(s.secondHopHelp,
               style: const TextStyle(color: VoidrauColors.muted, fontSize: 12)),
           const SizedBox(height: 8),
-          _seg(st.chain.name, {
+          _seg(st.secondHop.name, {
             'off': s.hopOff,
             'psiphon': s.hopPsiphon,
             'psiphonReverse': s.hopPsiphonReverse,
-            'psiphonOnly': s.hopPsiphonOnly,
             'tor': s.hopTor,
             'torReverse': s.hopTorReverse,
-            'torOnly': s.hopTorOnly,
           }, (v) {
-            st.chain = ChainMode.values.firstWhere((e) => e.name == v);
+            st.secondHop = SecondHop.values.firstWhere((e) => e.name == v);
             c.persist();
           }, wrap: true),
-          if (st.chain != ChainMode.off) ...[
-            if (st.chain.name.startsWith('psiphon')) ...[
+          if (st.secondHop != SecondHop.off || st.isStandaloneHop) ...[
+            if (CoreLaunch.isPsiphon(st)) ...[
               _label(s.hopRegion),
               TextFormField(
                 initialValue: st.psiphonRegion,
@@ -420,7 +424,9 @@ class ConfigPage extends StatelessWidget {
               },
             ),
           ],
-        ],
+              ],
+            ),
+          ),
         SwitchListTile(
           value: st.httpProxy,
           title: Text(s.httpProxy),
@@ -516,6 +522,15 @@ class ConfigPage extends StatelessWidget {
     );
   }
 
+  /// Greys out (and blocks input on) a section whose settings belong to the
+  /// engine that is not active — e.g. the Aether hop settings while Xray
+  /// is selected. The values stay visible; they just cannot be changed
+  /// into a setting that would silently do nothing.
+  Widget _disabledWhen(bool disabled, Widget child) => Opacity(
+        opacity: disabled ? 0.4 : 1,
+        child: AbsorbPointer(absorbing: disabled, child: child),
+      );
+
   Widget _label(String t) => Padding(
         padding: const EdgeInsets.only(top: 18, bottom: 8),
         child: Text(t, style: const TextStyle(color: VoidrauColors.muted, fontSize: 13)),
@@ -526,13 +541,14 @@ class ConfigPage extends StatelessWidget {
     Map<String, String> items,
     ValueChanged<String> onChanged, {
     bool wrap = false,
+    bool enabled = true,
   }) {
     final buttons = items.entries
         .map(
           (e) => ChoiceChip(
             label: Text(e.value, style: const TextStyle(fontSize: 12)),
             selected: value == e.key,
-            onSelected: (_) => onChanged(e.key),
+            onSelected: enabled ? (_) => onChanged(e.key) : null,
           ),
         )
         .toList();

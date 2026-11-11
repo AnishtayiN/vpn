@@ -19,8 +19,10 @@ void main() {
     test('eco asks for the low tier, auto lets the core decide', () {
       expect(env(VpnSettings(perf: PerfProfile.eco))['AETHER_PERF_PROFILE'],
           'low');
-      expect(env(VpnSettings(perf: PerfProfile.auto))
-          .containsKey('AETHER_PERF_PROFILE'), isFalse);
+      expect(
+          env(VpnSettings(perf: PerfProfile.auto))
+              .containsKey('AETHER_PERF_PROFILE'),
+          isFalse);
     });
 
     test('turbo and extreme force the high tier', () {
@@ -143,7 +145,7 @@ void main() {
   group('second hop', () {
     test('psiphon carries the tunnel, with its own bind', () {
       final e = env(VpnSettings(
-        chain: ChainMode.psiphon,
+        secondHop: SecondHop.psiphon,
         psiphonRegion: 'de',
       ));
       expect(e['AETHER_PSIPHON'], 'chain');
@@ -154,13 +156,18 @@ void main() {
     });
 
     test('reverse and only map to the core tokens', () {
-      expect(env(VpnSettings(chain: ChainMode.psiphonReverse))
-          ['AETHER_PSIPHON'], 'reverse');
-      expect(env(VpnSettings(chain: ChainMode.torOnly))['AETHER_TOR'], 'only');
+      expect(
+          env(VpnSettings(secondHop: SecondHop.psiphonReverse))[
+              'AETHER_PSIPHON'],
+          'reverse');
+      expect(
+          env(VpnSettings(standaloneMode: StandaloneMode.torOnly))[
+              'AETHER_TOR'],
+          'only');
     });
 
     test('tor gets its country and its own bind', () {
-      final e = env(VpnSettings(chain: ChainMode.tor, torCountry: 'IR'));
+      final e = env(VpnSettings(secondHop: SecondHop.tor, torCountry: 'IR'));
       expect(e['AETHER_TOR'], 'chain');
       expect(e['AETHER_TOR_COUNTRY'], 'ir');
       expect(e['AETHER_TOR_BIND'], '127.0.0.1:1821');
@@ -168,12 +175,13 @@ void main() {
     });
 
     test('the hop can open its own HTTP listener without collisions', () {
-      final psiphon = env(VpnSettings(chain: ChainMode.psiphon, hopHttp: true));
+      final psiphon =
+          env(VpnSettings(secondHop: SecondHop.psiphon, hopHttp: true));
       // SOCKS5 is 1819, the tunnel's HTTP listener 1820, the hop 1821 and the
       // hop's HTTP listener 1822.
       expect(psiphon['AETHER_PSIPHON_BIND'], '127.0.0.1:1821');
       expect(psiphon['AETHER_PSIPHON_HTTP'], '127.0.0.1:1822');
-      final tor = env(VpnSettings(chain: ChainMode.tor, hopHttp: true));
+      final tor = env(VpnSettings(secondHop: SecondHop.tor, hopHttp: true));
       expect(tor['AETHER_TOR_BIND'], '127.0.0.1:1821');
       expect(tor['AETHER_TOR_HTTP'], '127.0.0.1:1822');
     });
@@ -186,7 +194,7 @@ void main() {
 
     test('standalone psiphon-only sends only, with its region', () {
       final e = env(VpnSettings(
-        chain: ChainMode.psiphonOnly,
+        standaloneMode: StandaloneMode.psiphonOnly,
         psiphonRegion: 'de',
       ));
       expect(e['AETHER_PSIPHON'], 'only');
@@ -196,7 +204,7 @@ void main() {
 
     test('standalone tor-only sends only, with its country', () {
       final e = env(VpnSettings(
-        chain: ChainMode.torOnly,
+        standaloneMode: StandaloneMode.torOnly,
         torCountry: 'IR',
       ));
       expect(e['AETHER_TOR'], 'only');
@@ -205,16 +213,29 @@ void main() {
     });
 
     test('standalone modes are recognised, chain modes are not', () {
-      expect(CoreLaunch.isStandalone(ChainMode.psiphonOnly), isTrue);
-      expect(CoreLaunch.isStandalone(ChainMode.torOnly), isTrue);
-      expect(CoreLaunch.isStandalone(ChainMode.psiphon), isFalse);
-      expect(CoreLaunch.isStandalone(ChainMode.torReverse), isFalse);
-      expect(CoreLaunch.isStandalone(ChainMode.off), isFalse);
-      expect(VpnSettings(chain: ChainMode.torOnly).isStandaloneHop, isTrue);
+      expect(
+          CoreLaunch.isStandalone(
+              VpnSettings(standaloneMode: StandaloneMode.psiphonOnly)),
+          isTrue);
+      expect(
+          CoreLaunch.isStandalone(
+              VpnSettings(standaloneMode: StandaloneMode.torOnly)),
+          isTrue);
+      expect(CoreLaunch.isStandalone(VpnSettings(secondHop: SecondHop.psiphon)),
+          isFalse);
+      expect(
+          CoreLaunch.isStandalone(VpnSettings(secondHop: SecondHop.torReverse)),
+          isFalse);
+      expect(CoreLaunch.isStandalone(VpnSettings()), isFalse);
+      expect(
+          VpnSettings(standaloneMode: StandaloneMode.torOnly).isStandaloneHop,
+          isTrue);
       expect(VpnSettings().isStandaloneHop, isFalse);
     });
 
-    test('standalone modes are verified on 2.3.0 only, not on the 2.4.0 default', () {
+    test(
+        'standalone modes are verified on 2.3.0 only, not on the 2.4.0 default',
+        () {
       // `flutter test` runs without --dart-define, so coreVersion is the
       // 2.4.0 default here; the legacy build injects 2.3.0 and the same
       // getter then returns true.
@@ -225,12 +246,12 @@ void main() {
     test('a standalone mode walks a single ladder rung, not five', () {
       final ladder = CoreLaunch.smartLadder(VpnSettings(
         protocol: Protocol.smart,
-        chain: ChainMode.psiphonOnly,
+        standaloneMode: StandaloneMode.psiphonOnly,
       ));
       expect(ladder, [Protocol.masque]);
       final tor = CoreLaunch.smartLadder(VpnSettings(
         protocol: Protocol.wg,
-        chain: ChainMode.torOnly,
+        standaloneMode: StandaloneMode.torOnly,
       ));
       expect(tor, [Protocol.wg]);
       // A plain Smart Connect (no standalone hop) still walks the full ladder.
@@ -257,21 +278,30 @@ void main() {
     });
 
     test('the inner MTU is only sent when the user overrode it', () {
-      expect(env(VpnSettings(protocol: Protocol.masque))
-          .containsKey('AETHER_MASQUE_MTU'), isFalse);
-      expect(env(VpnSettings(protocol: Protocol.masque, coreMtu: 1400))
-          ['AETHER_MASQUE_MTU'], '1400');
+      expect(
+          env(VpnSettings(protocol: Protocol.masque))
+              .containsKey('AETHER_MASQUE_MTU'),
+          isFalse);
+      expect(
+          env(VpnSettings(protocol: Protocol.masque, coreMtu: 1400))[
+              'AETHER_MASQUE_MTU'],
+          '1400');
       // Out of range values are clamped to what the core accepts.
-      expect(env(VpnSettings(protocol: Protocol.masque, coreMtu: 4000))
-          ['AETHER_MASQUE_MTU'], '1500');
+      expect(
+          env(VpnSettings(protocol: Protocol.masque, coreMtu: 4000))[
+              'AETHER_MASQUE_MTU'],
+          '1500');
       // The device MTU is our own TUN setting, not the core's.
-      expect(env(VpnSettings(protocol: Protocol.masque, tunMtu: 9000))
-          .containsKey('AETHER_MASQUE_MTU'), isFalse);
+      expect(
+          env(VpnSettings(protocol: Protocol.masque, tunMtu: 9000))
+              .containsKey('AETHER_MASQUE_MTU'),
+          isFalse);
     });
   });
 
   group('smart connect escalation', () {
-    final ladder = CoreLaunch.smartLadder(VpnSettings(protocol: Protocol.smart));
+    final ladder =
+        CoreLaunch.smartLadder(VpnSettings(protocol: Protocol.smart));
     // The exit search numbers its rungs globally (`epoch * ladder.length + i`),
     // so the protocol for rung n is the ladder entry n wraps around to.
     VpnSettings variant(int i, {List<Protocol>? l, Protocol? proto}) {
@@ -335,7 +365,8 @@ void main() {
 
   group('stats parsing', () {
     test('the core\'s own line becomes byte counts', () {
-      final stats = CoreStats.parse('[=] up 1.2 MiB down 8.0 MiB uptime 00:01:31');
+      final stats =
+          CoreStats.parse('[=] up 1.2 MiB down 8.0 MiB uptime 00:01:31');
       expect(stats, isNotNull);
       expect(stats!.upBytes, (1.2 * 1024 * 1024).round());
       expect(stats.downBytes, 8 * 1024 * 1024);

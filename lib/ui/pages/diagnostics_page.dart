@@ -161,7 +161,15 @@ class DiagnosticsPage extends StatelessWidget {
                 : SplitRules.summary(c.settings,
                     fa: s.isFa, android: Platform.isAndroid),
           ),
-          _cell(s.secondHop, c.settings.chain.name),
+          _cell(
+            s.secondHop,
+            c.settings.isStandaloneHop
+                ? c.settings.standaloneMode.name +
+                    (c.settings.hasSecondHop
+                        ? ' + ${c.settings.secondHop.name}'
+                        : '')
+                : c.settings.secondHop.name,
+          ),
           _cell(
             s.liveSpeed,
             '${s.download} ${_rate(c.rate.downBytesPerSec)}  ·  '
