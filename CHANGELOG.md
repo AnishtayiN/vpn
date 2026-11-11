@@ -1,5 +1,50 @@
 # CHANGELOG — VoidrauVPN
 
+## Unreleased — v1.5.2: Psiphon/Tor actually work + connection-mode UX
+
+Root cause (see `../bpb-audit/psiphon-tor-diagnosis-fa.md` in the audit notes):
+the app never shipped Aether's `pt/` helper binaries, so Psiphon died at
+startup ("psiphon needs the psiphon-tunnel-core console client") and Tor
+could only use plain bridges. Verified against the real 2.4.0 binary
+(release notes, tarball contents, binary strings, live `aether --help` and
+live runs with/without `pt/`). The Dart wiring (model, env, controller, UI)
+was correct and PR #5 broke nothing.
+
+- `scripts/fetch_cores.sh`: stages `pt/psiphon-tunnel-core` and `pt/lyrebird`
+  from the same sha256-verified tarball — Android per-ABI as
+  `jniLibs/<abi>/libpsiphon.so` / `liblyrebird.so`, Windows as
+  `third_party/windows/pt/*.exe`. A missing helper fails the build instead of
+  shipping modes that can never connect. Cost: ~35 MB per single-ABI APK.
+- Native launchers point the core at the helpers explicitly
+  (`AETHER_PSIPHON_BIN` / `AETHER_TOR_PT`): Android
+  `NimbusVpnService.resolveHelper()` (native library dir, with a
+  `filesDir/pt/` copy fallback), Windows `WindowsEngine.start()` from the exe
+  dir. `release.yml` verifies the helpers on both jobs and copies
+  `third_party/windows` with `-Recurse`.
+- Reverse hops no longer dial WireGuard: `CoreLaunch.smartVariant` rewrites a
+  WireGuard rung to MASQUE over HTTP/2 and `smartLadder` drops the WireGuard
+  rung; the controller now starts (and pins) the variant's protocol, not the
+  raw ladder rung.
+- Psiphon mode defaults to `auto` (was `direct`); `cdn` only when the CDN
+  switch is on.
+- Slow hops get time to start: Android traffic validation is longer for
+  standalone/reverse hops with no core re-roll (there is no gateway to
+  re-roll), the Dart connect budget is 300 s for slow hops, Windows waits
+  240 s for SOCKS and probes longer.
+- Honest errors: `lib/services/core_errors.dart` translates known core
+  failures into Persian, applied on every error path; the Connect page links
+  to Diagnostics on error.
+- UX: one "connection mode" line on the Connect page (engine + mode); the
+  second-hop picker is disabled with a note while a standalone mode is set;
+  the protocol section notes the automatic MASQUE switch for reverse hops;
+  the stale "unverified on 2.4.0" warning is replaced by a slow-start note.
+  Full review in `../bpb-audit/ux-audit-fa.md`.
+- Tests: 190/190 (was 181; +4 core-env, +5 core-errors). `flutter analyze`
+  clean. `flutter build apk` not attempted locally (Gradle daemon blocked);
+  Kotlin compiles on CI and the release runner is the proof.
+- Still NOT tested on a phone: no on-phone Psiphon/Tor connection has been
+  run by the agent — the user must test on his Poco and report back.
+
 ## Unreleased — Xray engine, Phase 1b (scaffold + first slice, Android only)
 
 Second engine beside Aether: Xray-core for Worker/VLESS, WARP and

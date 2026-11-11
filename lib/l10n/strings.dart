@@ -414,8 +414,43 @@ class S {
       ? 'Tor سنگین‌ترین حالت است: مصرف داده و باتری بیشتر و سرعت کمتر — فقط وقتی لازم است از آن استفاده کنید.'
       : 'Tor is the heaviest mode: more data and battery, slower — use it only when needed.';
   String get standaloneUnverified => isFa
-      ? 'بودن Psiphon/Tor در هستهٔ ۲٫۴٫۰ هنوز تأیید نشده است (فقط در ۲٫۳٫۰ تأیید شده). اگر وصل نشد، به حالت معمولی برگردید.'
-      : 'Psiphon/Tor in core 2.4.0 is not verified yet (confirmed only in 2.3.0). If it fails to connect, switch back to Standard.';
+      ? 'بودن Psiphon/Tor در این نسخهٔ هسته هنوز تأیید نشده است. اگر وصل نشد، به حالت معمولی برگردید.'
+      : 'Psiphon/Tor in this core version is not verified yet. If it fails to connect, switch back to Standard.';
+  String get standaloneSlow => isFa
+      ? 'Psiphon و Tor دیر بالا می‌آیند؛ گاهی تا ۳ دقیقه طول می‌کشد. صبر کنید و اگر نشد، به حالت معمولی برگردید.'
+      : 'Psiphon and Tor are slow to start; it can take up to 3 minutes. Wait, and switch back to Standard if it never comes up.';
+  String get hopIgnoredNote => isFa
+      ? 'در حالت مستقل، مسیر دوم نادیده گرفته می‌شود؛ برای استفاده از آن، حالت را روی «معمولی» بگذارید.'
+      : 'In a standalone mode the second hop is ignored; set the mode back to Standard to use it.';
+  String get reverseForcesMasque => isFa
+      ? 'با مسیر معکوس، پروتکل به‌صورت خودکار MASQUE روی HTTP/2 می‌شود؛ WireGuard از داخل Psiphon یا Tor رد نمی‌شود.'
+      : 'With a reverse hop the protocol automatically becomes MASQUE over HTTP/2; WireGuard cannot travel through Psiphon or Tor.';
+  String get showDiagnostics =>
+      isFa ? 'مشاهدهٔ گزارش کامل' : 'Show full diagnostics';
+  String get connectionMode => isFa ? 'حالت اتصال' : 'Connection mode';
+  String connectionModeLine(String engine, String mode) =>
+      isFa ? 'حالت اتصال: $engine — $mode' : 'Connection mode: $engine — $mode';
+  String get errPsiphonMissing => isFa
+      ? 'فایل کمکی Psiphon در برنامه نیست؛ با نصب نسخهٔ جدید درست می‌شود. اگر این خطا را در نسخهٔ ۱٫۵٫۲ یا جدیدتر دیدید، گزارش را بفرستید.'
+      : 'The Psiphon helper file is missing from the app; installing the new version fixes it. If you see this on v1.5.2 or newer, please send the diagnostics.';
+  String get errTorNoTransports => isFa
+      ? 'Tor نتوانست بریج‌های obfs4 را اجرا کند (فایل کمکی Tor نیست)؛ با نصب نسخهٔ جدید درست می‌شود.'
+      : 'Tor could not run its obfs4 bridges (the Tor helper file is missing); installing the new version fixes it.';
+  String get errReverseWg => isFa
+      ? 'مسیر معکوس با WireGuard کار نمی‌کند؛ پروتکل به MASQUE برگردانده شد. دوباره وصل شوید.'
+      : 'A reverse hop cannot use WireGuard; the protocol was switched back to MASQUE. Connect again.';
+  String get errSocksTimeout => isFa
+      ? 'هسته بالا نیامد؛ شبکه را عوض کنید یا حالت را تغییر دهید و دوباره تلاش کنید.'
+      : 'The tunnel core did not come up; try another network or mode and connect again.';
+  String get errNoTraffic => isFa
+      ? 'تونل باز شد ولی ترافیکی عبور نکرد؛ گیت‌وی جواب نمی‌دهد. حالت یا شبکه را عوض کنید.'
+      : 'The tunnel opened but carried no traffic; the gateway is not answering. Try another mode or network.';
+  String get errHopSlow => isFa
+      ? 'Psiphon/Tor در زمان مقرر بالا نیامد؛ شاید در این شبکه مسدود است. حالت معمولی یا شبکهٔ دیگر را امتحان کنید.'
+      : 'Psiphon/Tor did not come up in time; it may be blocked on this network. Try Standard mode or another network.';
+  String get errCoreExited => isFa
+      ? 'هسته ناگهان خاموش شد. گزارش کامل را در بخش عیب‌یابی ببینید.'
+      : 'The tunnel core stopped unexpectedly. See the full log in Diagnostics.';
   String get hopRegion => isFa ? 'کشور خروجی Psiphon' : 'Psiphon exit country';
   String get hopRegionHelp => isFa
       ? 'مثلاً DE یا US — خالی یعنی خودش انتخاب کند'

@@ -156,6 +156,29 @@ class NimbusVpnService : VpnService() {
             env["AETHER_CONFIG"] = File(filesDir, "aether.toml").absolutePath
             env["AETHER_SOCKS"] = "127.0.0.1:$socksPort"
             env["TMPDIR"] = cacheDir.absolutePath
+            // Psiphon/Tor helper binaries: the release stages them as
+            // libpsiphon.so / liblyrebird.so in the native library dir
+            // (fetch_cores.sh). The core cannot find them on its own — it
+            // looks next to its binary, in ./pt, or on PATH — so point at
+            // them explicitly. Without psiphon-tunnel-core Psiphon dies at
+            // startup ("psiphon needs the psiphon-tunnel-core console
+            // client"); without lyrebird Tor can only use plain bridges.
+            resolveHelper("libpsiphon.so")?.let {
+                env["AETHER_PSIPHON_BIN"] = it
+            }
+            resolveHelper("liblyrebird.so")?.let {
+                env["AETHER_TOR_PT"] = "obfs4=$it"
+                env["AETHER_TOR_PT_DIR"] = File(it).parent ?: ""
+            }
+            // Psiphon/Tor are slow starters (Psiphon up to 180 s, Tor's
+            // bootstrap plus bridges a minute or two). The plain validation
+            // gives up after ~30 s and then re-rolls the core — for a
+            // standalone or reverse hop there is no gateway to re-roll, and
+            // restarting only resets the bootstrap clock.
+            val slowHop = env["AETHER_PSIPHON"] == "only" ||
+                env["AETHER_TOR"] == "only" ||
+                env["AETHER_PSIPHON"] == "reverse" ||
+                env["AETHER_TOR"] == "reverse"
             // Persist before any failure path so QS tile / boot auto-connect
             // reuse the last request.
             persistLast(extras, envLines)
@@ -180,7 +203,18 @@ class NimbusVpnService : VpnService() {
             }
 
             publishPhase("securing", "Verifying the tunnel")
-            if (!validateTrafficReady(session, attempts = 2)) {
+            if (!validateTrafficReady(
+                    session,
+                    attempts = if (slowHop) 10 else 2,
+                    readTimeoutMs = if (slowHop) 15_000 else 8_000,
+                )) {
+                if (slowHop) {
+                    // No gateway to re-roll here: the hop itself is still
+                    // bootstrapping, and restarting it only resets its clock.
+                    throw IllegalStateException(
+                        "Psiphon/Tor did not come up in time — it may be blocked on this network",
+                    )
+                }
                 // The gateway answered but carries no traffic: re-roll the
                 // endpoint in place once (core restart only, TUN stays).
                 sendLog("Gateway cannot carry traffic; re-rolling endpoint")
@@ -257,6 +291,36 @@ class NimbusVpnService : VpnService() {
     // ------------------------------------------------------------------
     // Core process management
     // ------------------------------------------------------------------
+
+    /**
+     * Absolute path of a staged Psiphon/Tor helper binary, or null when this
+     * install does not have it. Prefers the copy in the native library dir
+     * (extracted with the APK); when that copy cannot be executed from its
+     * install location, copies it into our private dir and runs it from
+     * there instead.
+     */
+    private fun resolveHelper(name: String): String? {
+        val lib = File(applicationInfo.nativeLibraryDir, name)
+        if (lib.isFile) {
+            try {
+                lib.setExecutable(true)
+            } catch (_: Exception) {
+            }
+            if (lib.canExecute()) return lib.absolutePath
+            try {
+                val dest = File(File(filesDir, "pt"), name)
+                dest.parentFile?.mkdirs()
+                if (!dest.isFile || dest.length() != lib.length()) {
+                    lib.copyTo(dest, overwrite = true)
+                }
+                dest.setExecutable(true)
+                if (dest.canExecute()) return dest.absolutePath
+            } catch (_: Exception) {
+            }
+        }
+        sendLog("helper binary $name is not available on this install")
+        return null
+    }
 
     private fun startCore(bin: File, env: Map<String, String>): Process {
         val builder = ProcessBuilder(bin.absolutePath)
@@ -394,6 +458,14 @@ class NimbusVpnService : VpnService() {
             if (h3GatewayUnavailable) return false
             val process = core
             if (process != null && !process.isAlive) {
+                // Give the log reader a moment to capture the core's own
+                // error line before composing the message, or the user only
+                // ever sees the bare exit code.
+                try {
+                    Thread.sleep(300)
+                } catch (_: InterruptedException) {
+                    return false
+                }
                 lastCoreError = "Tunnel core exited (${process.exitValueSafely()})" +
                     lastCoreError.let { if (it.isEmpty()) "" else ": $it" }
                 return false
@@ -719,11 +791,15 @@ class NimbusVpnService : VpnService() {
     // Proven data plane: "connected" only after real traffic
     // ------------------------------------------------------------------
 
-    private fun validateTrafficReady(session: Long, attempts: Int): Boolean {
+    private fun validateTrafficReady(
+        session: Long,
+        attempts: Int,
+        readTimeoutMs: Int = 8_000,
+    ): Boolean {
         for (attempt in 1..attempts) {
             if (!isCurrent(session)) return false
             for (target in TRAFFIC_TARGETS) {
-                if (httpThroughSocks(target.first, target.second)) return true
+                if (httpThroughSocks(target.first, target.second, readTimeoutMs)) return true
             }
         }
         return false
@@ -734,11 +810,11 @@ class NimbusVpnService : VpnService() {
      * CONNECT means the core resolves inside the tunnel — the exact path HEV
      * forwards for apps.
      */
-    private fun httpThroughSocks(name: String, path: String): Boolean {
+    private fun httpThroughSocks(name: String, path: String, readTimeoutMs: Int = 8_000): Boolean {
         return try {
             Socket().use { socket ->
                 socket.connect(InetSocketAddress("127.0.0.1", socksPort), 4_000)
-                socket.soTimeout = 8_000
+                socket.soTimeout = readTimeoutMs
                 val out = socket.getOutputStream()
                 val input = socket.getInputStream()
                 out.write(byteArrayOf(5, 1, 0))

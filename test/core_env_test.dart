@@ -150,7 +150,7 @@ void main() {
       ));
       expect(e['AETHER_PSIPHON'], 'chain');
       expect(e['AETHER_PSIPHON_REGION'], 'DE');
-      expect(e['AETHER_PSIPHON_MODE'], 'direct');
+      expect(e['AETHER_PSIPHON_MODE'], 'auto');
       expect(e['AETHER_PSIPHON_BIND'], '127.0.0.1:1821');
       expect(e.containsKey('AETHER_TOR'), isFalse);
     });
@@ -234,13 +234,94 @@ void main() {
     });
 
     test(
-        'standalone modes are verified on 2.3.0 only, not on the 2.4.0 default',
+        'standalone modes are verified on 2.4.0 and 2.3.0 (helpers staged)',
         () {
       // `flutter test` runs without --dart-define, so coreVersion is the
       // 2.4.0 default here; the legacy build injects 2.3.0 and the same
-      // getter then returns true.
+      // getter then returns true. Both cores ship Psiphon/Tor (release
+      // notes, tarball pt/, binary strings, live --help) and fetch_cores.sh
+      // stages the pt/ helpers for both, so neither build warns anymore.
       expect(CoreLaunch.coreVersion, '2.4.0');
-      expect(CoreLaunch.standaloneHopVerified, isFalse);
+      expect(CoreLaunch.standaloneHopVerified, isTrue);
+    });
+
+    test('psiphon cdn switch sends cdn, anything else sends auto', () {
+      expect(
+          env(VpnSettings(secondHop: SecondHop.psiphon, psiphonCdn: true))[
+              'AETHER_PSIPHON_MODE'],
+          'cdn');
+      expect(
+          env(VpnSettings(secondHop: SecondHop.psiphon, psiphonCdn: false))[
+              'AETHER_PSIPHON_MODE'],
+          'auto');
+    });
+
+    test('a reverse hop is a slow hop, a chain hop is not', () {
+      expect(
+          CoreLaunch.isSlowHop(
+              VpnSettings(secondHop: SecondHop.psiphonReverse)),
+          isTrue);
+      expect(
+          CoreLaunch.isSlowHop(VpnSettings(secondHop: SecondHop.torReverse)),
+          isTrue);
+      expect(
+          CoreLaunch.isSlowHop(
+              VpnSettings(standaloneMode: StandaloneMode.torOnly)),
+          isTrue);
+      expect(
+          CoreLaunch.isSlowHop(VpnSettings(secondHop: SecondHop.psiphon)),
+          isFalse);
+      expect(CoreLaunch.isSlowHop(VpnSettings()), isFalse);
+    });
+
+    test('a reverse hop rewrites a WireGuard rung to MASQUE over HTTP/2',
+        () {
+      final variant = CoreLaunch.smartVariant(
+        VpnSettings(protocol: Protocol.wg, secondHop: SecondHop.torReverse),
+        index: 0,
+        ladder: const [Protocol.wg],
+        proto: Protocol.wg,
+      );
+      expect(variant.protocol, Protocol.masque);
+      expect(variant.transport, MasqueTransport.h2);
+      // The env the core actually gets must agree with the variant.
+      final e = CoreLaunch.environment(
+        variant,
+        override: variant.protocol,
+        configPath: 'aether.toml',
+      );
+      expect(e['AETHER_PROTOCOL'], 'masque');
+      expect(e['AETHER_MASQUE_HTTP2'], '1');
+      expect(e['AETHER_TOR'], 'reverse');
+    });
+
+    test('a reverse hop drops WireGuard from the Smart ladder', () {
+      final ladder = CoreLaunch.smartLadder(VpnSettings(
+        protocol: Protocol.smart,
+        secondHop: SecondHop.psiphonReverse,
+      ));
+      expect(ladder, [
+        Protocol.masque,
+        Protocol.masque,
+        Protocol.gool,
+        Protocol.mim,
+      ]);
+      expect(
+          CoreLaunch.smartLadder(VpnSettings(
+            protocol: Protocol.wg,
+            secondHop: SecondHop.torReverse,
+          )),
+          [Protocol.masque]);
+      // Without a reverse hop the ladder is unchanged.
+      expect(
+          CoreLaunch.smartLadder(VpnSettings(protocol: Protocol.smart)),
+          [
+            Protocol.masque,
+            Protocol.masque,
+            Protocol.wg,
+            Protocol.gool,
+            Protocol.mim,
+          ]);
     });
 
     test('a standalone mode walks a single ladder rung, not five', () {

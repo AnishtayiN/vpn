@@ -62,18 +62,21 @@ enum PerfProfile {
 
 /// A second hop that carries the tunnel itself.
 ///
-/// Aether 2.3.0 ships Psiphon and Tor inside the core. In a country where WARP
-/// endpoints answer but the handshake is being probed, "the tunnel through
-/// Psiphon"/"through Tor" is the difference between a working connection and a
-/// dead one — and it is a checkbox here instead of a second app.
+/// Aether 2.3.0 and 2.4.0 both ship Psiphon and Tor inside the core, with
+/// their helper binaries (`pt/psiphon-tunnel-core`, `pt/lyrebird`) staged
+/// beside it by `scripts/fetch_cores.sh` — verified from the 2.4.0 release
+/// notes, the tarball contents, the binary's own strings and a live
+/// `aether --help` run (see `CoreLaunch.standaloneHopVerified`). In a
+/// country where WARP endpoints answer but the handshake is being probed,
+/// "the tunnel through Psiphon"/"through Tor" is the difference between a
+/// working connection and a dead one — and it is a checkbox here instead
+/// of a second app.
 ///
 /// This is only the *second* hop: it always rides on top of a protocol
 /// (WARP underneath). Plain Psiphon/Tor with no WARP at all is the separate
-/// [StandaloneMode]. Whether the 2.4.0 core still ships them is NOT verified
-/// in this repository — the only version-scoped statement here is the 2.3.0
-/// one above, so the standalone-hop check in core_args.dart treats the
-/// standalone modes as verified on 2.3.0 only, and the UI must say so instead
-/// of claiming they work on 2.4.0.
+/// [StandaloneMode]. A reverse hop only speaks TCP, so the core runs it over
+/// MASQUE on HTTP/2 and refuses WireGuard — [CoreLaunch.smartVariant]
+/// rewrites that combination instead of sending it.
 enum SecondHop {
   /// No second hop.
   off,

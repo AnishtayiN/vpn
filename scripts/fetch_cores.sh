@@ -96,6 +96,32 @@ stage_aether_android() {
     exit 1
   fi
   echo "staged $jni/libaether.so ($(du -h "$ROOT/android/app/src/main/jniLibs/$jni/libaether.so" | cut -f1))"
+  # Psiphon/Tor helper binaries: the core cannot work without them — Psiphon
+  # dies at startup ("psiphon needs the psiphon-tunnel-core console client")
+  # and Tor can only use plain bridges without lyrebird. They ride in the
+  # same sha256-verified tarball, staged per-ABI as .so files so that
+  # split-per-ABI APKs only carry their own architecture's helpers. The
+  # native service points the core at them with AETHER_PSIPHON_BIN /
+  # AETHER_TOR_PT; a missing helper fails the build instead of shipping an
+  # app whose Psiphon/Tor modes can never connect.
+  local pt_dir
+  pt_dir="$(find "$tmp" -type d -name 'pt' | head -n1)"
+  if [[ -z "$pt_dir" || ! -f "$pt_dir/psiphon-tunnel-core" || ! -f "$pt_dir/lyrebird" ]]; then
+    echo "Error: pt/ helpers missing in $asset — Psiphon/Tor cannot work" >&2
+    tar -tzf "$tmp/$asset" >&2 || true
+    exit 1
+  fi
+  cp "$pt_dir/psiphon-tunnel-core" "$ROOT/android/app/src/main/jniLibs/$jni/libpsiphon.so"
+  cp "$pt_dir/lyrebird" "$ROOT/android/app/src/main/jniLibs/$jni/liblyrebird.so"
+  chmod 755 "$ROOT/android/app/src/main/jniLibs/$jni/libpsiphon.so" \
+    "$ROOT/android/app/src/main/jniLibs/$jni/liblyrebird.so"
+  for helper in libpsiphon.so liblyrebird.so; do
+    if ! head -c 4 "$ROOT/android/app/src/main/jniLibs/$jni/$helper" | grep -q $'\x7fELF'; then
+      echo "Error: $helper from $asset is not an ELF binary" >&2
+      exit 1
+    fi
+  done
+  echo "staged $jni/libpsiphon.so + liblyrebird.so ($(du -sh "$ROOT/android/app/src/main/jniLibs/$jni" | cut -f1) total)"
 }
 
 stage_aether_windows() {
@@ -124,6 +150,20 @@ AETHER_PY
     echo "Error: aether.exe missing after extraction" >&2
     exit 1
   fi
+  # Psiphon/Tor helpers live in pt/ beside aether.exe in the same verified
+  # zip. They are staged as a folder (the Windows engine points the core at
+  # them explicitly, since its working directory is not the exe dir).
+  mkdir -p "$ROOT/third_party/windows/pt"
+  local pt_bin pt_lyre
+  pt_bin="$(find "$tmp" -type f -name 'psiphon-tunnel-core.exe' | head -n1)"
+  pt_lyre="$(find "$tmp" -type f -name 'lyrebird.exe' | head -n1)"
+  if [[ -z "$pt_bin" || -z "$pt_lyre" ]]; then
+    echo "Error: pt/ helpers missing in aether-windows zip — Psiphon/Tor cannot work" >&2
+    exit 1
+  fi
+  cp "$pt_bin" "$ROOT/third_party/windows/pt/psiphon-tunnel-core.exe"
+  cp "$pt_lyre" "$ROOT/third_party/windows/pt/lyrebird.exe"
+  echo "staged windows pt/ helpers"
 }
 
 # Windows TUN bridges. Two rules learned the hard way:
