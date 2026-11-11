@@ -1,4 +1,4 @@
-// VoidrauVPN License Bot + API — Cloudflare Worker (single file).
+// VoidrauVPN License Bot + API — Cloudflare Worker (single file). v2.0.0
 //
 // Deploy: wrangler deploy (or paste in the dashboard). Needs a KV namespace
 // bound as LICENSES and the secret BOT_TOKEN (from @BotFather).
@@ -7,14 +7,21 @@
 //   wrangler secret put BOT_TOKEN
 //   wrangler secret put ADMIN_ID   (your numeric telegram id)
 //
-// Features:
-//   • /start            → main menu (Persian with Jalali dates & copy-on-tap)
+// Features (v2.0):
+//   • /start            → unified Home v2 (rich status card, progress bar,
+//                          licence key copy-on-tap, quick actions)
 //   • تست رایگان        → 24h trial key (once per telegram id)
 //   • خرید لایسنس       → plans, payment details → admin approves or rejects
-//   • دعوت دوستان       → personal referral link; 1 week credit per 3 joins
-//   • کد لایسنس من      → shows key, plan, expiry and remaining time
-//   • دانلود نسخه جدید  → latest GitHub release files sent directly in-chat
-//   • /panel            → interactive admin panel (prices, card, channel, broadcast…)
+//                          (+ receipt status tracking: receiptStatus:{tid})
+//   • 🎁 هدیه دادن      → gift days from stored credit only (credit:{tid})
+//   • ✅ چک‌این روزانه  → 1 point/day (Asia/Tehran), streak; 7 points = 1 credit day
+//   • 👥 دعوت دوستان    → personal referral link; 1 week credit per 3 joins
+//                          + referral leaderboard (top 10, first names only)
+//   • ⏰ یادآوری انقضا  → scheduled() daily + opportunistic check on /start & status
+//   • 🆘 پشتیبانی واقعی → FAQ menu + write-to-support with admin reply mode
+//   • 📖 راهنما         → per-platform guides (Android / Windows / iOS)
+//   • 📥 دانلود         → latest GitHub release files sent directly in-chat
+//   • /panel            → interactive admin panel + live stat cards + expiring list
 //   • /stats            → full statistics report (users, active, pending, revenue)
 //   • /find <id|key>    → search any user or license key details
 //   • /gen <days> [tid] → admin: mint a key
@@ -27,8 +34,10 @@
 // HTTP API (used by the app):
 //   GET  /api/license?key=...   → { ok, plan, expiresAt, serverTime, remainingSeconds, isPaid }
 //   GET  /api/status?key=...    → same shape as /license
-//   GET  /api/health            → { ok, service, time }
+//   GET  /api/health            → { ok, service, time, version }
 //   POST /api/trial             → { ok, key, expiresAt, serverTime }
+
+const BOT_VERSION = '2.0.0';
 
 const DEFAULT_PLANS = [
   { id: 'm1', label: '۱ ماهه — ۱۰۰ هزار تومان', days: 30 },
@@ -89,6 +98,87 @@ function formatDuration(sec) {
   }
   const mins = Math.floor((sec % 3600) / 60);
   return `${hours} ساعت و ${mins} دقیقه`;
+}
+
+// ── v2.0 helpers ────────────────────────────────────────────────────────
+// Calendar date (YYYY-MM-DD) in Asia/Tehran — the single source of truth
+// for daily check-ins and once-a-day expiry reminders.
+function tehranDate(d = new Date()) {
+  try {
+    return d.toLocaleDateString('en-CA', { timeZone: 'Asia/Tehran' });
+  } catch (_) {
+    return d.toISOString().slice(0, 10);
+  }
+}
+
+function tehranYesterday() {
+  return tehranDate(new Date(Date.now() - 86400000));
+}
+
+// Text progress bar: days left vs total plan days (10 cells).
+function progressBar(daysLeft, totalDays) {
+  const total = Math.max(0, totalDays || 0);
+  const left = Math.max(0, daysLeft || 0);
+  const N = 10;
+  const filled = total > 0 ? Math.round((left / total) * N) : 0;
+  const f = Math.max(0, Math.min(N, filled));
+  return '█'.repeat(f) + '░'.repeat(N - f);
+}
+
+// Pure check-in math (also unit-tested in /tmp): given yesterday's stored
+// state and today's date, compute the new streak / points / bonus day.
+function checkinNext(last, streak, points, today, yesterday) {
+  if (last === today) return { already: true, streak, points, bonus: false };
+  const s = last === yesterday ? streak + 1 : 1;
+  let p = points + 1;
+  let bonus = false;
+  if (p >= 7) {
+    p = 0;
+    bonus = true;
+  }
+  return { already: false, streak: s, points: p, bonus };
+}
+
+// Pure gift validation (also unit-tested in /tmp).
+function giftValidate(me, friendId, days, credit) {
+  if (!/^\d{3,}$/.test(String(friendId || '').trim())) return 'bad-id';
+  if (String(friendId).trim() === String(me)) return 'self';
+  const d = parseInt(days, 10);
+  if (!Number.isFinite(d) || d < 1) return 'bad-days';
+  if (d > credit) return 'over-credit';
+  return null;
+}
+
+// Pure leaderboard ranking (also unit-tested in /tmp): sort desc by joins,
+// keep first 10, and find the requesting user's 1-based rank (0 = none).
+function leaderboardRank(rows, me) {
+  const sorted = [...rows].sort((a, b) => b.joins - a.joins || String(a.tid).localeCompare(String(b.tid)));
+  const top = sorted.slice(0, 10);
+  const idx = sorted.findIndex((r) => String(r.tid) === String(me));
+  return { top, rank: idx >= 0 ? idx + 1 : 0, total: sorted.length };
+}
+
+const homeRow = () => [[{ text: '🏠 خانه', callback_data: 'home' }]];
+const withHome = (rows) => [...(rows || []), ...homeRow()];
+
+async function getReleaseFiles(env) {
+  let files = null;
+  try {
+    files = JSON.parse((await env.LICENSES.get('cache:relfiles')) || 'null');
+  } catch (_) {}
+  if (Array.isArray(files) && files.length) return files;
+  files = (await releaseFiles(env)) || [];
+  if (files.length) {
+    await env.LICENSES.put('cache:relfiles', JSON.stringify(files), { expirationTtl: 600 });
+  }
+  return files;
+}
+
+async function setReceiptStatus(env, tid, status, planId) {
+  await env.LICENSES.put(
+    `receiptStatus:${tid}`,
+    JSON.stringify({ status, at: Date.now(), planId: planId || null })
+  );
 }
 
 async function getLic(env, key) {
@@ -171,34 +261,48 @@ async function tg(token, method, body, env, steps) {
   return out;
 }
 
-function mainMenu(from, lic) {
+async function mainMenu(env, from, lic) {
+  const tid = from && from.id;
   const name = from && from.first_name ? from.first_name : '';
   const now = Math.floor(Date.now() / 1000);
   const active = lic && lic.expiresAt && lic.expiresAt > now && lic.plan !== 'revoked';
+  const credit = tid ? parseInt((await env.LICENSES.get(`credit:${tid}`)) || '0') : 0;
+  const joins = tid ? parseInt((await env.LICENSES.get(`refjoin:${tid}`)) || '0') : 0;
   const rows = [
-    [{ text: '🎁 تست رایگان', callback_data: 'trial' }, { text: '🛒 خرید لایسنس', callback_data: 'buy' }],
-    [{ text: '📥 دانلود نسخه جدید برنامه', callback_data: 'dl' }],
-    [{ text: '👥 دعوت دوستان (رفرال)', callback_data: 'ref' }, { text: '🔑 کد لایسنس من', callback_data: 'mykey' }],
-    [{ text: '📊 وضعیت لایسنس', callback_data: 'status' }, { text: '📖 راهنما', callback_data: 'help' }],
+    [{ text: '🛒 خرید / تمدید لایسنس', callback_data: 'buy' }, { text: '🎁 هدیه دادن', callback_data: 'gift' }],
+    [{ text: '✅ چک‌این روزانه', callback_data: 'checkin' }, { text: '👥 دعوت دوستان', callback_data: 'ref' }],
+    [{ text: '🏆 لیدربورد دعوت', callback_data: 'top' }, { text: '📥 دانلود برنامه', callback_data: 'dl' }],
+    [{ text: '🔑 کد لایسنس من', callback_data: 'mykey' }, { text: '📊 وضعیت لایسنس', callback_data: 'status' }],
+    [{ text: '🧾 وضعیت رسید من', callback_data: 'receipt' }, { text: '📖 راهنما', callback_data: 'help' }],
     [{ text: '🆘 پشتیبانی', callback_data: 'support' }],
   ];
+  if (!active) {
+    rows.push([{ text: '🎁 تست رایگان', callback_data: 'trial' }]);
+  }
   const safe = name.replace(/([_*\[`])/g, '\\$1');
   const hi = name ? `سلام ${safe} 👋\n\n` : 'سلام 👋\n\n';
   let body = '';
   if (active) {
     const leftSec = lic.expiresAt - now;
+    const daysLeft = Math.ceil(leftSec / 86400);
+    const totalDays = lic.days || 0;
     const planName = lic.plan === 'paid' ? 'خریداری‌شده ویژه ⭐️' : (lic.plan === 'trial' ? 'تست رایگان موقت 🎁' : 'اختصاصی');
-    body = `✅ لایسنس فعال شما:\n\`${lic.key}\`\n\n` +
+    body = `✅ *لایسنس فعال شما*\n\`${lic.key}\`\n\n` +
       `📦 نوع اشتراک: *${planName}*\n` +
-      `⏳ زمان باقی‌مانده: *${formatDuration(leftSec)}*\n` +
-      `📅 تاریخ انقضا: *${formatJalali(lic.expiresAt)}*\n\n` +
+      `⏳ پیشرفت اشتراک: \`${progressBar(daysLeft, totalDays)}\`${totalDays > 0 ? ` ${daysLeft} از ${totalDays} روز` : ''}\n` +
+      `⏰ زمان باقی‌مانده: *${formatDuration(leftSec)}*\n` +
+      `📅 تاریخ انقضا: *${formatJalali(lic.expiresAt)}*\n` +
+      `🎁 اعتبار ذخیره هدیه: *${credit} روز*\n` +
+      `👥 افراد دعوت‌شده: *${joins} نفر*\n\n` +
       `💡 روی کد لایسنس بالا ضربه بزنید تا کپی شود.`;
   } else {
     body = 'به ربات رسمی VoidrauVPN خوش آمدید!\n\n' +
       '🔐 برای فعال‌سازی و اتصال امن:\n' +
       '• تست رایگان ۲۴ ساعته بگیرید یا لایسنس بخرید\n' +
       '• کد دریافتی را در برنامه (تب لایسنس) وارد کنید\n' +
-      '• آخرین نسخه برنامه را از بخش «📥 دانلود» دریافت نمایید';
+      '• آخرین نسخه برنامه را از بخش «📥 دانلود» دریافت نمایید' +
+      (credit > 0 ? `\n\n🎁 اعتبار ذخیره هدیه شما: *${credit} روز*` : '') +
+      (joins > 0 ? `\n👥 افراد دعوت‌شده: *${joins} نفر*` : '');
   }
   return { text: hi + body, parse_mode: 'Markdown', reply_markup: { inline_keyboard: rows } };
 }
@@ -235,22 +339,13 @@ const DL_FILES_KEY = 'dlfiles';
 const dlLabel = (n) => n.replace(/^VoidrauVPN-/, '').replace(/\.apk$|\.exe$|\.zip$/i, '');
 
 async function doDownloads(env, tid) {
-  let files = null;
-  try {
-    files = JSON.parse((await env.LICENSES.get('cache:relfiles')) || 'null');
-  } catch (_) {}
-  if (!Array.isArray(files) || !files.length) {
-    files = (await releaseFiles(env)) || [];
-    if (files.length) {
-      await env.LICENSES.put('cache:relfiles', JSON.stringify(files), { expirationTtl: 600 });
-    }
-  }
+  const files = await getReleaseFiles(env);
   const apk = files.filter((f) => f.name.toLowerCase().endsWith('.apk'));
   const exe = files.filter((f) => f.name.toLowerCase().endsWith('.exe'));
   const other = files.filter((f) => f.name.toLowerCase().endsWith('.zip'));
   const pick = [...apk, ...exe, ...other].slice(0, 8);
   if (!pick.length) {
-    return { text: '⚠️ فعلاً فایلی برای ارسال پیدا نشد. لطفاً چند دقیقه بعد امتحان کنید یا از کانال رسمی دانلود نمایید.' };
+    return { text: '⚠️ فعلاً فایلی برای ارسال پیدا نشد. لطفاً چند دقیقه بعد امتحان کنید یا از کانال رسمی دانلود نمایید.', reply_markup: { inline_keyboard: homeRow() } };
   }
   await env.LICENSES.put(`${DL_FILES_KEY}:${tid}`, JSON.stringify(pick), { expirationTtl: 3600 });
   const rows = pick.map((f, i) => [
@@ -261,7 +356,7 @@ async function doDownloads(env, tid) {
     text: `📥 آخرین نسخه موجود: *${tag}*\nفایل مورد نظر برای دستگاه خود را انتخاب نمایید تا مستقیماً برایتان ارسال شود:`,
     parse_mode: 'Markdown',
     reply_markup: {
-      inline_keyboard: [...rows, [{ text: '🔄 بروزرسانی لیست فایل‌ها', callback_data: 'dlrefresh' }]],
+      inline_keyboard: withHome([...rows, [{ text: '🔄 بروزرسانی لیست فایل‌ها', callback_data: 'dlrefresh' }]]),
     },
   };
 }
@@ -300,47 +395,286 @@ async function sendReleaseFile(env, tid, url, name) {
 
 async function doHelp() {
   return {
-    text: '📖 *راهنمای استفاده از VoidrauVPN*\n\n' +
-      '1️⃣ *تست رایگان:* روی دکمه «🎁 تست رایگان» بزنید تا کد هدیه برایتان ساخته شود.\n' +
-      '2️⃣ *فعال‌سازی:* برنامه را باز کرده و در بخش لایسنس، کد را وارد نمایید.\n' +
-      '3️⃣ *اتصال:* دکمه مرکزی را لمس کنید تا سریع‌ترین مسیر رمزگذاری‌شده فعال شود.\n\n' +
-      '🛒 *خرید اشتراک:* پلن مورد نظر را انتخاب کرده و مبلغ را واریز نمایید. سپس عکس رسید را در همین ربات ارسال کنید تا تایید شود.\n\n' +
-      '👥 *اشتراک هدیه با رفرال:* لینک دعوت خود را برای دوستان بفرستید؛ هر ۳ نفر = ۷ روز اشتراک رایگان!\n\n' +
-      '📥 *دانلود برنامه:* همیشه فایل‌های بروزرسانی اندروید و ویندوز را از دکمه «📥 دانلود» دریافت کنید.',
+    text: '📖 *راهنمای استفاده از VoidrauVPN*\n\nپلتفرم خود را انتخاب کنید تا مراحل مخصوص همان دستگاه را ببینید:',
     parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: withHome([
+        [{ text: '🤖 اندروید', callback_data: 'help:android' }, { text: '🪟 ویندوز', callback_data: 'help:windows' }],
+        [{ text: '🍎 آیفون / iOS', callback_data: 'help:ios' }],
+      ]),
+    },
   };
 }
+
+async function doHelpPlatform(env, platform) {
+  const files = await getReleaseFiles(env);
+  const back = [[{ text: '⬅️ بازگشت به راهنما', callback_data: 'help' }]];
+  if (platform === 'android') {
+    const apk = files.find((f) => /universal/i.test(f.name) && f.name.toLowerCase().endsWith('.apk'))
+      || files.find((f) => f.name.toLowerCase().endsWith('.apk'));
+    const rows = [];
+    if (apk) rows.push([{ text: `📥 دانلود نسخه اندروید (${apk.tag || ''} — ${humanSize(apk.size)})`, url: apk.url }]);
+    rows.push([{ text: '📥 همهٔ فایل‌های دانلود', callback_data: 'dl' }]);
+    return {
+      text: '🤖 *راهنمای اندروید*\n\n' +
+        '۱. از دکمهٔ دانلود زیر، فایل APK یونیورسال را بگیرید و نصب کنید (در صورت هشدار، «نصب از منبع ناشناس» را تایید کنید).\n' +
+        '۲. برنامه را باز کنید و در تب «لایسنس»، کد خود را وارد نمایید.\n' +
+        '۳. دکمهٔ اتصال را بزنید؛ در اولین اتصال، تایید VPN سیستم را قبول کنید.\n\n' +
+        '💡 کد ندارید؟ از خانه، «🎁 تست رایگان» را بزنید یا لایسنس بخرید.',
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: withHome([...rows, ...back]) },
+    };
+  }
+  if (platform === 'windows') {
+    const exe = files.find((f) => /installer/i.test(f.name) && f.name.toLowerCase().endsWith('.exe'))
+      || files.find((f) => f.name.toLowerCase().endsWith('.exe'));
+    const rows = [];
+    if (exe) rows.push([{ text: `📥 دانلود نسخه ویندوز (${exe.tag || ''} — ${humanSize(exe.size)})`, url: exe.url }]);
+    rows.push([{ text: '📥 همهٔ فایل‌های دانلود', callback_data: 'dl' }]);
+    return {
+      text: '🪟 *راهنمای ویندوز*\n\n' +
+        '۱. از دکمهٔ دانلود زیر، فایل Installer را بگیرید و اجرا کنید.\n' +
+        '۲. برنامه را باز کنید و در بخش لایسنس، کد خود را وارد نمایید.\n' +
+        '۳. دکمهٔ اتصال را بزنید؛ در صورت پرسش ویندوز، دسترسی شبکه را تایید کنید.\n\n' +
+        '💡 کد ندارید؟ از خانه، «🎁 تست رایگان» را بزنید یا لایسنس بخرید.',
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: withHome([...rows, ...back]) },
+    };
+  }
+  // iOS — no download link is claimed: activation steps only + support.
+  return {
+    text: '🍎 *راهنمای آیفون / iOS*\n\n' +
+      '۱. برنامهٔ VoidrauVPN را روی آیفون خود باز کنید.\n' +
+      '۲. در بخش لایسنس، کد خود را وارد نمایید.\n' +
+      '۳. دکمهٔ اتصال را بزنید و در صورت پرسش، افزودن پیکربندی VPN را تایید کنید.\n\n' +
+      '📲 برای دریافت لینک نصب نسخهٔ iOS، لطفاً به پشتیبانی پیام بدهید — لینک نصب از آن‌جا در اختیارتان قرار می‌گیرد.',
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: withHome([
+        [{ text: '🆘 تماس با پشتیبانی', callback_data: 'support' }],
+        ...back,
+      ]),
+    },
+  };
+}
+
+const FAQ_ANSWERS = {
+  activation: '🔑 *فعال‌سازی لایسنس*\n\n۱. کد لایسنس خود را از «🔑 کد لایسنس من» در خانه کپی کنید.\n۲. برنامهٔ VoidrauVPN را باز کنید و در تب «لایسنس»، کد را پیست نمایید.\n۳. پس از تایید کد، دکمهٔ اتصال را بزنید.\n\nاگر کد قبول نشد، مطمئن شوید کد را کامل و بدون فاصلهٔ اضافه وارد کرده‌اید.',
+  connecting: '📡 *وصل نشدن به VPN*\n\n• مطمئن شوید لایسنس شما فعال و منقضی نشده است (از «📊 وضعیت لایسنس» ببینید).\n• اتصال اینترنت خود را بررسی کنید و یک‌بار برنامه را ببندید و دوباره باز کنید.\n• حالت اتصال دیگری را امتحان کنید (مثلاً Psiphon یا Tor) و آخرین نسخهٔ برنامه را از «📥 دانلود» بگیرید.\n• اگر باز هم وصل نشد، اسکرین‌شات خطا را برای پشتیبانی بفرستید.',
+  expired: '⏰ *انقضای لایسنس*\n\nاگر لایسنس شما منقضی شده است:\n• از خانه «🛒 خرید / تمدید» را بزنید و پلن تازه بخرید.\n• یا با «✅ چک‌این روزانه» و «👥 دعوت دوستان» اعتبار رایگان جمع کنید؛ اعتبار ذخیره به‌صورت خودکار به لایسنس بعدی شما اضافه می‌شود.',
+  key: '🔑 *فراموش کردن کد لایسنس*\n\nنگران نباشید — کد شما همین‌جا ذخیره است. از خانه دکمهٔ «🔑 کد لایسنس من» را بزنید تا کد، نوع پلن و تاریخ انقضا را ببینید و با یک ضربه کپی کنید.',
+  refund: '💳 *بازگشت وجه*\n\nبازگشت وجه پس از بررسی توسط پشتیبانی انجام می‌شود. لطفاً از بخش «تماس با پشتیبانی» پیام بدهید و شمارهٔ پیگیری پرداخت، تاریخ و مبلغ واریز را بنویسید تا بررسی شود.',
+};
 
 async function doSupport(env) {
   const sup = await getSetting(env, 'supportId', '@Voidrau');
   return {
-    text: `🆘 *پشتیبانی VoidrauVPN*\n\nبرای ارتباط با پشتیبانی، پیگیری پرداخت و رفع هرگونه مشکل:\n👤 ${sup}\n\nلطفاً در پیام خود، آیدی عددی و عکس رسید یا اسکرین‌شات ارور را ارسال نمایید.`,
+    text: `🆘 *پشتیبانی VoidrauVPN*\n\nیکی از سوال‌های متداول را انتخاب کنید، یا مستقیم به پشتیبانی پیام بدهید:\n👤 ${sup}`,
     parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: withHome([
+        [{ text: '🔑 فعال‌سازی لایسنس', callback_data: 'faq:activation' }],
+        [{ text: '📡 وصل نشدن به VPN', callback_data: 'faq:connecting' }],
+        [{ text: '⏰ انقضای لایسنس', callback_data: 'faq:expired' }],
+        [{ text: '🔑 فراموش کردن کد', callback_data: 'faq:key' }],
+        [{ text: '💳 بازگشت وجه', callback_data: 'faq:refund' }],
+        [{ text: '✍️ تماس با پشتیبانی (نوشتن پیام)', callback_data: 'sup' }],
+      ]),
+    },
+  };
+}
+
+function faqPayload(key) {
+  const a = FAQ_ANSWERS[key];
+  if (!a) return null;
+  return {
+    text: a,
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: withHome([[{ text: '⬅️ بازگشت به پشتیبانی', callback_data: 'support' }]]),
+    },
+  };
+}
+
+async function doReceiptStatus(env, tid) {
+  let st = null;
+  try {
+    st = JSON.parse((await env.LICENSES.get(`receiptStatus:${tid}`)) || 'null');
+  } catch (_) {}
+  const hasReceipt = await env.LICENSES.get(`receipt:${tid}`);
+  if (!st && hasReceipt) st = { status: 'pending', at: Date.now(), planId: null };
+  if (!st) {
+    return {
+      text: '🧾 هیچ رسیدی از شما ثبت نشده است.\nبرای خرید، از خانه «🛒 خرید / تمدید» را بزنید و پس از واریز، عکس رسید را همین‌جا ارسال کنید.',
+      reply_markup: { inline_keyboard: withHome([[{ text: '🛒 خرید لایسنس', callback_data: 'buy' }]]) },
+    };
+  }
+  const label = st.status === 'approved' ? 'تایید شد ✅' : st.status === 'rejected' ? 'رد شد ❌' : 'در انتظار بررسی ⏳';
+  return {
+    text: `🧾 *وضعیت رسید شما*\n\n🚦 وضعیت: *${label}*\n` +
+      (st.planId ? `📦 پلن: ${st.planId}\n` : '') +
+      (st.at ? `📅 زمان ثبت: *${formatJalali(Math.floor(st.at / 1000))}*\n` : '') +
+      (st.status === 'pending' ? '\nرسید شما به مدیریت ارسال شده است؛ به محض بررسی، نتیجه همین‌جا اعلام می‌شود.' : '') +
+      (st.status === 'rejected' ? '\nرسید تایید نشد. لطفاً تصویر واضح‌تری بفرستید یا با پشتیبانی تماس بگیرید.' : ''),
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: homeRow() },
   };
 }
 
 async function doStatus(env, tid) {
   const key = await userKey(env, tid);
-  if (!key) return { text: '📊 هیچ لایسنسی ثبت نکرده‌اید — با «🎁 تست رایگان» شروع کنید.' };
+  if (!key) return { text: '📊 هیچ لایسنسی ثبت نکرده‌اید — با «🎁 تست رایگان» شروع کنید.', reply_markup: { inline_keyboard: homeRow() } };
   const lic = await getLic(env, key);
   if (!lic || !lic.expiresAt || lic.plan === 'revoked') {
-    return { text: '📊 لایسنس شما نامعتبر یا باطل شده است.' };
+    return { text: '📊 لایسنس شما نامعتبر یا باطل شده است.', reply_markup: { inline_keyboard: homeRow() } };
   }
+  // Opportunistic expiry reminder (also runs from scheduled() when cron is live).
+  await maybeSendExpiryReminder(env, tid);
   const now = Math.floor(Date.now() / 1000);
   const active = lic.expiresAt > now;
   const joins = parseInt((await env.LICENSES.get(`refjoin:${tid}`)) || '0');
   const credit = parseInt((await env.LICENSES.get(`credit:${tid}`)) || '0');
   const planLabel = lic.plan === 'paid' ? 'خریداری‌شده ویژه ⭐️' : (lic.plan === 'trial' ? 'تست رایگان 🎁' : lic.plan);
+  const daysLeft = Math.max(0, Math.ceil((lic.expiresAt - now) / 86400));
   return {
     text: `📊 *گزارش وضعیت حساب کاربری*\n\n` +
       `🔑 کد لایسنس:\n\`${key}\`\n\n` +
       `📦 نوع اشتراک: ${planLabel}\n` +
       `🚦 وضعیت: ${active ? 'فعال ✅' : 'منقضی شده ❌'}\n` +
+      `⏳ پیشرفت اشتراک: \`${progressBar(daysLeft, lic.days || 0)}\`${(lic.days || 0) > 0 ? ` ${daysLeft} از ${lic.days} روز` : ''}\n` +
       `⏳ اعتبار زمانی: *${formatDuration(lic.expiresAt - now)}*\n` +
       `📅 تاریخ انقضا: *${formatJalali(lic.expiresAt)}*\n` +
       `👥 افراد دعوت‌شده: ${joins} نفر\n` +
       `🎁 اعتبار ذخیره هدیه: ${credit} روز`,
     parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: homeRow() },
+  };
+}
+
+// ── v2.0: expiry reminders ─────────────────────────────────────────────
+// One reminder per user per Tehran calendar day, for licences expiring
+// within 3 days. Runs from scheduled() (cron) and opportunistically on
+// /start and licence-status views, so it works with or without cron.
+async function maybeSendExpiryReminder(env, tid) {
+  try {
+    const key = await userKey(env, tid);
+    if (!key) return false;
+    const lic = await getLic(env, key);
+    if (!lic || !lic.expiresAt || lic.plan === 'revoked') return false;
+    const now = Math.floor(Date.now() / 1000);
+    const daysLeft = Math.ceil((lic.expiresAt - now) / 86400);
+    if (daysLeft < 0 || daysLeft > 3) return false;
+    const today = tehranDate();
+    if (await env.LICENSES.get(`remind:${tid}:${today}`)) return false;
+    await env.LICENSES.put(`remind:${tid}:${today}`, '1');
+    const when = daysLeft === 0 ? 'امروز' : `تا ${daysLeft} روز دیگر`;
+    await tg(env.BOT_TOKEN, 'sendMessage', {
+      chat_id: tid,
+      text: `⏰ *یادآوری انقضا*\n\nلایسنس شما ${when} منقضی می‌شود.\n📅 تاریخ انقضا: *${formatJalali(lic.expiresAt)}*\n\nبرای تمدید، از خانه «🛒 خرید / تمدید» را بزنید.`,
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: [[{ text: '🛒 خرید / تمدید', callback_data: 'buy' }], [{ text: '🏠 خانه', callback_data: 'home' }]] },
+    });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function runExpiryReminders(env) {
+  let idx = [];
+  try {
+    idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
+    if (!Array.isArray(idx)) idx = [];
+  } catch (_) {}
+  let sent = 0;
+  for (const u of idx.slice(0, 300)) {
+    if (await maybeSendExpiryReminder(env, u)) sent++;
+  }
+  return sent;
+}
+
+// ── v2.0: gift / check-in / leaderboard ─────────────────────────────────
+async function doGiftHome(env, tid) {
+  const credit = parseInt((await env.LICENSES.get(`credit:${tid}`)) || '0');
+  if (credit <= 0) {
+    return {
+      text: '🎁 *هدیه دادن لایسنس*\n\nاعتبار ذخیرهٔ شما ۰ روز است.\nهدیه فقط از «اعتبار ذخیره» داده می‌شود، نه از زمان لایسنس فعال شما.\n\nاعتبار را می‌توانید با دعوت دوستان (هر ۳ دعوت = ۷ روز)، چک‌این روزانه (هر ۷ امتیاز = ۱ روز) یا خرید به دست بیاورید.',
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: withHome([[{ text: '🛒 خرید لایسنس', callback_data: 'buy' }], [{ text: '👥 دعوت دوستان', callback_data: 'ref' }]]) },
+    };
+  }
+  await env.LICENSES.put(`gift:${tid}`, JSON.stringify({ stage: 'awaitId' }));
+  return {
+    text: `🎁 *هدیه دادن لایسنس*\n\n🎁 اعتبار ذخیرهٔ شما: *${credit} روز*\n\nآیدی عددی دوست خود را بفرستید (دوست شما می‌تواند با دستور /id در ربات، آیدی‌اش را ببیند):`,
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: homeRow() },
+  };
+}
+
+async function doCheckin(env, tid) {
+  const today = tehranDate();
+  const yesterday = tehranYesterday();
+  const last = (await env.LICENSES.get(`checkin:${tid}:last`)) || '';
+  const prevStreak = parseInt((await env.LICENSES.get(`checkin:${tid}:streak`)) || '0');
+  const prevPoints = parseInt((await env.LICENSES.get(`checkin:${tid}:points`)) || '0');
+  const r = checkinNext(last, prevStreak, prevPoints, today, yesterday);
+  if (r.already) {
+    return {
+      text: `✅ چک‌این امروز را قبلاً انجام داده‌اید.\n\n🔥 استریک فعلی: *${r.streak} روز*\n⭐ امتیاز: *${r.points} از ۷* (هر ۷ امتیاز = ۱ روز اعتبار)\n\nفردا دوباره سر بزنید!`,
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: homeRow() },
+    };
+  }
+  await env.LICENSES.put(`checkin:${tid}:last`, today);
+  await env.LICENSES.put(`checkin:${tid}:streak`, String(r.streak));
+  await env.LICENSES.put(`checkin:${tid}:points`, String(r.points));
+  const statKey = `stat:checkins:${today}`;
+  await env.LICENSES.put(statKey, String(parseInt((await env.LICENSES.get(statKey)) || '0') + 1));
+  let bonusText = '';
+  if (r.bonus) {
+    await addCredit(env, tid, 1);
+    bonusText = `\n\n🎉 *تبریک! ۷ امتیاز کامل شد و ۱ روز اعتبار به حساب شما اضافه شد.*`;
+  }
+  return {
+    text: `✅ *چک‌این روزانه ثبت شد!*\n\n🔥 استریک فعلی: *${r.streak} روز*\n⭐ امتیاز: *${r.points} از ۷* (هر ۷ امتیاز = ۱ روز اعتبار)${bonusText}`,
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: homeRow() },
+  };
+}
+
+async function doLeaderboard(env, tid) {
+  let idx = [];
+  try {
+    idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
+    if (!Array.isArray(idx)) idx = [];
+  } catch (_) {}
+  const rows = [];
+  for (const u of idx.slice(0, 300)) {
+    const joins = parseInt((await env.LICENSES.get(`refjoin:${u}`)) || '0');
+    if (joins > 0) rows.push({ tid: u, joins });
+  }
+  const { top, rank } = leaderboardRank(rows, tid);
+  const medals = ['🥇', '🥈', '🥉'];
+  let t = '🏆 *لیدربورد دعوت دوستان*\n\n';
+  if (!top.length) {
+    t += 'هنوز کسی دعوتی ثبت نکرده است — اولین نفر باشید!\nاز «👥 دعوت دوستان» لینک خود را بگیرید و بفرستید.';
+  } else {
+    for (let i = 0; i < top.length; i++) {
+      const nm = (await env.LICENSES.get(`name:${top[i].tid}`)) || 'کاربر';
+      const safe = String(nm).replace(/([_*\[`])/g, '\\$1');
+      t += `${medals[i] || `${i + 1}.`} ${safe} — *${top[i].joins} دعوت*\n`;
+    }
+    if (rank > 10) {
+      const myJoins = parseInt((await env.LICENSES.get(`refjoin:${tid}`)) || '0');
+      t += `\n➖ رتبهٔ شما: *${rank}* (${myJoins} دعوت)`;
+    } else if (rank > 0) {
+      t += `\n🎉 شما در رتبهٔ *${rank}* هستید!`;
+    }
+  }
+  return {
+    text: t,
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: withHome([[{ text: '👥 دعوت دوستان', callback_data: 'ref' }]]) },
   };
 }
 
@@ -353,6 +687,24 @@ export default {
         await env.LICENSES.put('lastError', 'fetch: ' + String(e && e.stack || e).slice(0, 400));
       } catch (_) {}
       return new Response('⚠️ Worker error — check /diag', { status: 500 });
+    }
+  },
+
+  // v2.0: daily cron (05:00 UTC) — expiry reminders. Works alongside the
+  // opportunistic checks on /start and status views, so reminders still fire
+  // if the cron trigger is not enabled. NOTE: this MUST live inside the
+  // default export — the Workers runtime only calls scheduled() from here;
+  // a standalone `export async function scheduled` would be ignored.
+  async scheduled(event, env, ctx) {
+    try {
+      const sent = await runExpiryReminders(env);
+      try {
+        await env.LICENSES.put('lastReminders', JSON.stringify({ at: new Date().toISOString(), sent }));
+      } catch (_) {}
+    } catch (e) {
+      try {
+        await env.LICENSES.put('lastError', 'scheduled: ' + String(e && e.stack || e).slice(0, 400));
+      } catch (_) {}
     }
   },
 };
@@ -386,7 +738,7 @@ async function handleHttp(request, env) {
   }
 
   if (url.pathname === '/api/health') {
-    return json({ ok: true, service: 'VoidrauVPN License API', time: Math.floor(Date.now() / 1000) });
+    return json({ ok: true, service: 'VoidrauVPN License API', time: Math.floor(Date.now() / 1000), version: BOT_VERSION });
   }
 
   if (url.pathname === '/api/trial' && request.method === 'POST') {
@@ -495,6 +847,14 @@ async function handleHttp(request, env) {
     if (me0 && me0.ok && me0.result?.username) {
       await env.LICENSES.put('set:botusername', me0.result.username);
     }
+    // v2.0: register the bot menu commands (/start, /help, /id).
+    await tg(env.BOT_TOKEN || '', 'setMyCommands', {
+      commands: [
+        { command: 'start', description: 'شروع و بازگشت به خانه' },
+        { command: 'help', description: 'راهنمای استفاده' },
+        { command: 'id', description: 'آیدی عددی من' },
+      ],
+    }, env);
     if (env.LICENSES) {
       await env.LICENSES.put(
         'lastSetup',
@@ -585,6 +945,7 @@ async function handle(upd, env, steps) {
         await env.LICENSES.delete(`receipt:${target}`);
         const curPending = Math.max(0, parseInt((await env.LICENSES.get('stat:pending')) || '1') - 1);
         await env.LICENSES.put('stat:pending', String(curPending));
+        await setReceiptStatus(env, target, 'approved', null);
 
         let k = await userKey(env, target);
         let l = k ? await getLic(env, k) : null;
@@ -635,6 +996,7 @@ async function handle(upd, env, steps) {
       await env.LICENSES.delete(`receipt:${ru}`);
       const curPending = Math.max(0, parseInt((await env.LICENSES.get('stat:pending')) || '1') - 1);
       await env.LICENSES.put('stat:pending', String(curPending));
+      await setReceiptStatus(env, ru, 'rejected', null);
 
       await tg(
         env.BOT_TOKEN,
@@ -689,10 +1051,10 @@ async function handle(upd, env, steps) {
             chat_id: tid,
             text: `❌ ارسال فایل ناموفق بود: ${e.message}\nلطفاً دوباره امتحان کنید.`,
             reply_markup: {
-              inline_keyboard: [
+              inline_keyboard: withHome([
                 [{ text: '🔄 تلاش دوباره', callback_data: `file:${idx}` }],
                 [{ text: '📜 لیست فایل‌ها', callback_data: 'dl' }],
-              ],
+              ]),
             },
           });
         }
@@ -704,10 +1066,103 @@ async function handle(upd, env, steps) {
       out = await doSupport(env);
     } else if (cb.data === 'status') {
       out = await doStatus(env, tid);
+    } else if (cb.data === 'home') {
+      await env.LICENSES.delete(`gift:${tid}`);
+      await env.LICENSES.delete(`supMode:${tid}`);
+      const k0 = await userKey(env, tid);
+      out = await mainMenu(env, cb.from, k0 ? await getLic(env, k0) : null);
+    } else if (cb.data === 'gift') {
+      out = await doGiftHome(env, tid);
+    } else if (cb.data === 'gift:yes') {
+      let g = null;
+      try {
+        g = JSON.parse((await env.LICENSES.get(`gift:${tid}`)) || 'null');
+      } catch (_) {}
+      if (!g || g.stage !== 'confirm' || !g.friend || !g.days) {
+        out = { text: '⚠️ درخواست هدیه منقضی شده است — از خانه دوباره شروع کنید.', reply_markup: { inline_keyboard: homeRow() } };
+      } else {
+        const credit = parseInt((await env.LICENSES.get(`credit:${tid}`)) || '0');
+        const err = giftValidate(tid, g.friend, g.days, credit);
+        if (err) {
+          await env.LICENSES.delete(`gift:${tid}`);
+          out = { text: err === 'over-credit' ? '❌ اعتبار ذخیرهٔ شما کمتر از مقدار هدیه است.' : '❌ درخواست هدیه نامعتبر است.', reply_markup: { inline_keyboard: homeRow() } };
+        } else {
+          await env.LICENSES.put(`credit:${tid}`, String(credit - g.days));
+          let fk = await userKey(env, g.friend);
+          let fl = fk ? await getLic(env, fk) : null;
+          if (fl && fl.expiresAt) {
+            await extend(env, fk, g.days);
+          } else {
+            fk = await mintKey(env, g.friend, g.days, 'paid');
+            await extend(env, fk, g.days);
+          }
+          const flic = await getLic(env, fk);
+          const gl = parseInt((await env.LICENSES.get(`giftlog:${tid}`)) || '0');
+          await env.LICENSES.put(`giftlog:${tid}`, String(gl + 1));
+          await env.LICENSES.delete(`gift:${tid}`);
+          const senderName = (await env.LICENSES.get(`name:${tid}`)) || 'یک دوست';
+          await tg(env.BOT_TOKEN, 'sendMessage', {
+            chat_id: g.friend,
+            text: `🎁 *هدیه دریافت کردید!*\n\n${senderName} تعداد *${g.days} روز* لایسنس به شما هدیه داد.\n\n🔑 کد لایسنس شما:\n\`${fk}\`\n\n📅 تاریخ انقضا: *${formatJalali(flic?.expiresAt)}*\n\nکد را در برنامه (تب لایسنس) وارد کنید.`,
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: [[{ text: '🏠 خانه', callback_data: 'home' }]] },
+          }, env, steps);
+          out = {
+            text: `✅ هدیه با موفقیت ارسال شد!\n\n🎁 ${g.days} روز لایسنس به کاربر \`${g.friend}\` هدیه داده شد.\n💳 اعتبار باقی‌ماندهٔ شما: *${credit - g.days} روز*`,
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: homeRow() },
+          };
+        }
+      }
+    } else if (cb.data === 'gift:no') {
+      await env.LICENSES.delete(`gift:${tid}`);
+      const k0 = await userKey(env, tid);
+      out = await mainMenu(env, cb.from, k0 ? await getLic(env, k0) : null);
+    } else if (cb.data === 'checkin') {
+      out = await doCheckin(env, tid);
+    } else if (cb.data === 'top') {
+      out = await doLeaderboard(env, tid);
+    } else if (cb.data === 'receipt') {
+      out = await doReceiptStatus(env, tid);
+    } else if (cb.data === 'faq') {
+      out = await doSupport(env);
+    } else if (cb.data.startsWith('faq:')) {
+      out = faqPayload(cb.data.slice(4)) || { text: 'سوال نامعتبر است.', reply_markup: { inline_keyboard: homeRow() } };
+    } else if (cb.data === 'sup') {
+      await env.LICENSES.put(`supMode:${tid}`, '1');
+      out = {
+        text: '✍️ *تماس با پشتیبانی*\n\nپیام خود را بنویسید و ارسال کنید (می‌توانید آیدی عددی و شرح مشکل را هم بنویسید). پشتیبانی در همین‌جا پاسخ می‌دهد.\n\nبرای انصراف، دکمهٔ زیر را بزنید:',
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'supcancel' }]] },
+      };
+    } else if (cb.data === 'supcancel') {
+      await env.LICENSES.delete(`supMode:${tid}`);
+      const k0 = await userKey(env, tid);
+      out = await mainMenu(env, cb.from, k0 ? await getLic(env, k0) : null);
+    } else if (cb.data.startsWith('suprep:') && String(tid) === String(env.ADMIN_ID)) {
+      const target = cb.data.slice(7);
+      if (!/^\d{3,}$/.test(target)) {
+        out = { text: '❌ آیدی کاربر نامعتبر است.' };
+      } else {
+        await env.LICENSES.put(`supMode:${tid}`, `reply:${target}`);
+        out = {
+          text: `✍️ در حال پاسخ به کاربر \`${target}\` هستید.\nپیام بعدی شما مستقیم به او ارسال می‌شود.`,
+          parse_mode: 'Markdown',
+          reply_markup: { inline_keyboard: [[{ text: '❌ انصراف', callback_data: 'ad:cancelmode' }]] },
+        };
+      }
+    } else if (cb.data.startsWith('help:')) {
+      const p = cb.data.slice(5);
+      out = ['android', 'windows', 'ios'].includes(p)
+        ? await doHelpPlatform(env, p)
+        : await doHelp();
+    } else if (cb.data === 'ad:expiring' && String(tid) === String(env.ADMIN_ID)) {
+      out = await expiringList(env);
     } else if (cb.data.startsWith('ad:') && String(tid) === String(env.ADMIN_ID)) {
       const a = cb.data.slice(3);
       if (a === 'cancelmode') {
         await env.LICENSES.delete(`admMode:${tid}`);
+        await env.LICENSES.delete(`supMode:${tid}`);
         out = await adminPanel(env, tid);
       } else if (a === 'editbuy') {
         await env.LICENSES.put(`admMode:${tid}`, 'buyText');
@@ -959,6 +1414,80 @@ async function handle(upd, env, steps) {
     }
   }
 
+  // ── v2.0: admin support-reply mode / user support mode / gift flow ──
+  // These text flows run before receipt intake (media) and admin commands.
+  if (String(tid) === String(env.ADMIN_ID) && text && !text.startsWith('/')) {
+    const sup = await env.LICENSES.get(`supMode:${tid}`);
+    if (sup && sup.startsWith('reply:')) {
+      const target = sup.slice(6);
+      if (/^\d{3,}$/.test(target)) {
+        await env.LICENSES.delete(`supMode:${tid}`);
+        await tg(env.BOT_TOKEN, 'sendMessage', {
+          chat_id: target,
+          text: `💬 *پاسخ پشتیبانی:*\n\n${text}`,
+          parse_mode: 'Markdown',
+          reply_markup: { inline_keyboard: [[{ text: '🏠 خانه', callback_data: 'home' }]] },
+        }, env, steps);
+        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ پاسخ شما به کاربر \`${target}\` ارسال شد.`, parse_mode: 'Markdown' }, env, steps);
+        return;
+      }
+      await env.LICENSES.delete(`supMode:${tid}`);
+    }
+  }
+  if (text && !text.startsWith('/')) {
+    const sup = await env.LICENSES.get(`supMode:${tid}`);
+    if (sup === '1') {
+      await env.LICENSES.delete(`supMode:${tid}`);
+      const senderName = (await env.LICENSES.get(`name:${tid}`)) || 'کاربر';
+      await tg(env.BOT_TOKEN, 'sendMessage', {
+        chat_id: env.ADMIN_ID,
+        text: `🆘 *پیام پشتیبانی جدید*\n\n👤 از: ${senderName} (\`${tid}\`)\n\n${text}`,
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: [[{ text: '✍️ پاسخ به این کاربر', callback_data: `suprep:${tid}` }]] },
+      }, env, steps);
+      await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '✅ پیام شما به پشتیبانی ارسال شد. پاسخ در همین‌جا برایتان می‌آید.', reply_markup: { inline_keyboard: homeRow() } }, env, steps);
+      return;
+    }
+    let g = null;
+    try {
+      g = JSON.parse((await env.LICENSES.get(`gift:${tid}`)) || 'null');
+    } catch (_) {}
+    if (g && g.stage) {
+      if (g.stage === 'awaitId') {
+        const err = giftValidate(tid, text.trim(), 1, 1);
+        if (err === 'bad-id') {
+          await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ آیدی عددی نامعتبر است. فقط عدد بفرستید (مثال: 123456789).', reply_markup: { inline_keyboard: homeRow() } }, env, steps);
+          return;
+        }
+        if (err === 'self') {
+          await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: '❌ نمی‌توانید به خودتان هدیه بدهید. آیدی عددی دوست خود را بفرستید.', reply_markup: { inline_keyboard: homeRow() } }, env, steps);
+          return;
+        }
+        await env.LICENSES.put(`gift:${tid}`, JSON.stringify({ stage: 'awaitDays', friend: text.trim() }));
+        const credit = parseInt((await env.LICENSES.get(`credit:${tid}`)) || '0');
+        await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: `✅ گیرنده ثبت شد: \`${text.trim()}\`\n\nچند روز هدیه می‌دهید؟ (اعتبار شما: *${credit} روز* — عدد بفرستید)`, parse_mode: 'Markdown', reply_markup: { inline_keyboard: homeRow() } }, env, steps);
+        return;
+      }
+      if (g.stage === 'awaitDays') {
+        const credit = parseInt((await env.LICENSES.get(`credit:${tid}`)) || '0');
+        const days = parseInt(text.trim(), 10);
+        const err = giftValidate(tid, g.friend, text.trim(), credit);
+        if (err === 'bad-days' || err === 'over-credit') {
+          await tg(env.BOT_TOKEN, 'sendMessage', { chat_id: tid, text: err === 'over-credit' ? `❌ مقدار هدیه بیشتر از اعتبار شماست (${credit} روز). عدد کوچک‌تری بفرستید.` : '❌ عدد نامعتبر است. تعداد روز را فقط با عدد بفرستید (مثال: 7).', reply_markup: { inline_keyboard: homeRow() } }, env, steps);
+          return;
+        }
+        await env.LICENSES.put(`gift:${tid}`, JSON.stringify({ stage: 'confirm', friend: g.friend, days }));
+        await tg(env.BOT_TOKEN, 'sendMessage', {
+          chat_id: tid,
+          text: `🎁 *تایید هدیه*\n\n${days} روز لایسنس به کاربر \`${g.friend}\` هدیه داده می‌شود.\n💳 اعتبار باقی‌مانده پس از هدیه: *${credit - days} روز*\n\nمطمئن هستید؟`,
+          parse_mode: 'Markdown',
+          reply_markup: { inline_keyboard: [[{ text: '✅ بله، ارسال کن', callback_data: 'gift:yes' }, { text: '❌ لغو', callback_data: 'gift:no' }]] },
+        }, env, steps);
+        return;
+      }
+    }
+  }
+
   // ── Receipt intake ──────────────────────────────────────────────────
   const media2 = msg.photo ? 'photo' : msg.document ? 'doc' : null;
   if (media2) {
@@ -971,6 +1500,7 @@ async function handle(upd, env, steps) {
       `receipt:${tid}`,
       JSON.stringify({ fileId: fid, kind: media2, planId: selectedPlanId, at: Date.now() })
     );
+    await setReceiptStatus(env, tid, 'pending', selectedPlanId);
 
     const curP = parseInt((await env.LICENSES.get('stat:pending')) || '0');
     await env.LICENSES.put('stat:pending', String(curP + 1));
@@ -1211,6 +1741,7 @@ async function handle(upd, env, steps) {
         await extend(env, key, 1);
       }
       await env.LICENSES.delete(`receipt:${target}`);
+      await setReceiptStatus(env, target, 'approved', null);
       const curP = Math.max(0, parseInt((await env.LICENSES.get('stat:pending')) || '1') - 1);
       await env.LICENSES.put('stat:pending', String(curP));
 
@@ -1371,13 +1902,59 @@ async function buyMenuFull(env) {
     text: `${buyText}\n\n💳 شماره کارت جهت واریز:\n\`${card}\`\n\nلطفاً پلن مورد نظر را انتخاب و پس از واریز، عکس رسید را در همین چت ارسال نمایید:`,
     parse_mode: 'Markdown',
     reply_markup: {
-      inline_keyboard: (await plansOf(env)).map((p) => [{ text: p.label, callback_data: `plan:${p.id}` }]),
+      inline_keyboard: withHome((await plansOf(env)).map((p) => [{ text: p.label, callback_data: `plan:${p.id}` }])),
     },
   };
 }
 
 async function askMode(env, tid, prompt, mode) {
   return { text: prompt, reply_markup: { inline_keyboard: [[{ text: '❌ لغو', callback_data: 'ad:cancelmode' }]] } };
+}
+
+async function adminLiveStats(env) {
+  const idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
+  const now = Math.floor(Date.now() / 1000);
+  let active = 0;
+  let trial = 0;
+  let paid = 0;
+  let expiring = 0;
+  for (const u of idx.slice(0, 300)) {
+    const k = await env.LICENSES.get(`user:${u}`);
+    if (!k) continue;
+    const l = await getLic(env, k);
+    if (l && l.expiresAt && l.expiresAt > now && l.plan !== 'revoked') {
+      active++;
+      if (l.plan === 'trial') trial++;
+      else paid++;
+      if (Math.ceil((l.expiresAt - now) / 86400) <= 3) expiring++;
+    }
+  }
+  const checkinsToday = parseInt((await env.LICENSES.get(`stat:checkins:${tehranDate()}`)) || '0');
+  return { users: idx.length, active, trial, paid, expiring, checkinsToday };
+}
+
+async function expiringList(env) {
+  const idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
+  const now = Math.floor(Date.now() / 1000);
+  const rows = [];
+  for (const u of idx.slice(0, 300)) {
+    const k = await env.LICENSES.get(`user:${u}`);
+    if (!k) continue;
+    const l = await getLic(env, k);
+    if (!l || !l.expiresAt || l.plan === 'revoked') continue;
+    const daysLeft = Math.ceil((l.expiresAt - now) / 86400);
+    if (daysLeft >= 0 && daysLeft <= 3) rows.push({ u, daysLeft, plan: l.plan, exp: l.expiresAt });
+  }
+  rows.sort((a, b) => a.daysLeft - b.daysLeft);
+  if (!rows.length) {
+    return { text: '⏰ هیچ لایسنسی در ۳ روز آینده منقضی نمی‌شود.', reply_markup: { inline_keyboard: homeRow() } };
+  }
+  let t = `⏰ *لایسنس‌های در آستانهٔ انقضا (${rows.length} نفر):*\n\n`;
+  for (const r of rows.slice(0, 20)) {
+    t += `• \`${r.u}\` — ${r.daysLeft === 0 ? 'امروز' : `${r.daysLeft} روز دیگر`} (${r.plan}، انقضا ${formatJalali(r.exp)})\n`;
+  }
+  if (rows.length > 20) t += `\n…و ${rows.length - 20} نفر دیگر.`;
+  return { text: t, parse_mode: 'Markdown', reply_markup: { inline_keyboard: homeRow() } };
 }
 
 async function buildStatsMessage(env) {
@@ -1400,6 +1977,7 @@ async function buildStatsMessage(env) {
     }
   }
 
+  const live = await adminLiveStats(env);
   return {
     text:
       `📊 *آمار کلی سیستم VoidrauVPN*\n\n` +
@@ -1407,8 +1985,13 @@ async function buildStatsMessage(env) {
       `🧾 رسیدهای در انتظار تایید: *${pending}*\n` +
       `✅ لایسنس‌های فعال (نمونه ۶۰ کاربر اخیر): *${active}*\n` +
       `🎁 لایسنس‌های تستی: *${trial}*\n` +
-      `💰 لایسنس‌های پولی: *${paid}*`,
+      `💰 لایسنس‌های پولی: *${paid}*\n\n` +
+      `📈 *آمار زنده (تا ۳۰۰ کاربر):*\n` +
+      `✅ فعال: *${live.active}* (تستی ${live.trial}، پولی ${live.paid})\n` +
+      `⏰ در آستانهٔ انقضا (≤۳ روز): *${live.expiring}*\n` +
+      `✅ چک‌این امروز: *${live.checkinsToday}*`,
     parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: homeRow() },
   };
 }
 
@@ -1420,11 +2003,15 @@ async function adminPanel(env, tid) {
   const trialDays = String(await trialDaysOf(env));
   const users = parseInt((await env.LICENSES.get('stat:users')) || '0');
   const pending = parseInt((await env.LICENSES.get('stat:pending')) || '0');
+  const live = await adminLiveStats(env);
 
   return {
     text:
       `🛠 *پنل مدیریت ربات VoidrauVPN*\n\n` +
       `👥 کاربران: *${users}*\n` +
+      `✅ فعال: *${live.active}* (تستی ${live.trial}، پولی ${live.paid})\n` +
+      `⏰ در آستانهٔ انقضا (≤۳ روز): *${live.expiring}*\n` +
+      `✅ چک‌این امروز: *${live.checkinsToday}*\n` +
       `🧾 رسید در انتظار: *${pending}*\n` +
       `💳 کارت: \`${card}\`\n` +
       `🛒 متن خرید: ${buy}\n` +
@@ -1433,14 +2020,15 @@ async function adminPanel(env, tid) {
       `🆘 پشتیبانی: ${sup}`,
     parse_mode: 'Markdown',
     reply_markup: {
-      inline_keyboard: [
+      inline_keyboard: withHome([
         [{ text: '✏️ متن خرید', callback_data: 'ad:editbuy' }, { text: '💳 شماره کارت', callback_data: 'ad:editcard' }],
         [{ text: '💰 قیمت‌ها', callback_data: 'ad:editplans' }, { text: '📢 کانال اجباری', callback_data: 'ad:editch' }],
         [{ text: '🆘 پشتیبانی', callback_data: 'ad:editsup' }, { text: '🎁 روز تست', callback_data: 'ad:edittrial' }],
         [{ text: '📊 آمار کامل', callback_data: 'ad:stats' }, { text: `🧾 رسیدها (${pending})`, callback_data: 'ad:pending' }],
-        [{ text: '👥 کاربران اخیر', callback_data: 'ad:users' }, { text: '📣 پیام همگانی', callback_data: 'ad:broadcast' }],
+        [{ text: '⏰ در آستانهٔ انقضا', callback_data: 'ad:expiring' }, { text: '👥 کاربران اخیر', callback_data: 'ad:users' }],
+        [{ text: '📣 پیام همگانی', callback_data: 'ad:broadcast' }],
         [{ text: '💾 خروجی پشتیبان', callback_data: 'ad:export' }],
-      ],
+      ]),
     },
   };
 }
@@ -1462,7 +2050,7 @@ async function pendingList(env, tid) {
   }
   return {
     text: n ? `🧾 تعداد ${n} رسید در انتظار تایید وجود دارد:` : '🧾 هیچ رسیدی در انتظار تایید نیست.',
-    reply_markup: rows.length ? { inline_keyboard: rows } : undefined,
+    reply_markup: rows.length ? { inline_keyboard: withHome(rows) } : { inline_keyboard: homeRow() },
   };
 }
 
@@ -1484,7 +2072,7 @@ async function recentUsers(env) {
     }
     t += `• \`${u}\` — ${s}\n`;
   }
-  return { text: t, parse_mode: 'Markdown' };
+  return { text: t, parse_mode: 'Markdown', reply_markup: { inline_keyboard: homeRow() } };
 }
 
 async function exportBackup(env, tid) {
@@ -1517,7 +2105,7 @@ async function doTrial(env, tid) {
   if (used) {
     const key = await userKey(env, tid);
     const lic = key ? await getLic(env, key) : null;
-    if (!lic) return { text: '🔑 لایسنس قبلی یافت نشد — لطفاً با پشتیبانی تماس بگیرید.' };
+    if (!lic) return { text: '🔑 لایسنس قبلی یافت نشد — لطفاً با پشتیبانی تماس بگیرید.', reply_markup: { inline_keyboard: homeRow() } };
     const now = Math.floor(Date.now() / 1000);
     const active = lic.expiresAt && lic.expiresAt > now && lic.plan !== 'revoked';
     if (active) {
@@ -1528,11 +2116,12 @@ async function doTrial(env, tid) {
           `📅 تاریخ انقضا: *${formatJalali(lic.expiresAt)}*\n\n` +
           `کد را در برنامه (تب لایسنس) وارد کنید.`,
         parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: homeRow() },
       };
     }
     return {
       text: '⏳ دورهٔ تست رایگان شما به پایان رسیده است.\nبرای ادامه اتصال امن، لطفاً اشتراک تهیه نمایید:',
-      reply_markup: { inline_keyboard: [[{ text: '🛒 خرید لایسنس', callback_data: 'buy' }]] },
+      reply_markup: { inline_keyboard: withHome([[{ text: '🛒 خرید لایسنس', callback_data: 'buy' }]]) },
     };
   }
   const TD = await trialDaysOf(env);
@@ -1553,6 +2142,7 @@ async function doTrial(env, tid) {
       `۲. برنامه VoidrauVPN را باز کنید و در تب «لایسنس»، کد را پیست نمایید.\n` +
       `۳. دکمه اتصال را بزنید و لذت ببرید!`,
     parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: homeRow() },
   };
 }
 
@@ -1567,11 +2157,19 @@ async function doPlan(env, tid, planId) {
       `💳 لطفاً مبلغ را به شماره کارت زیر واریز کنید:\n\`${card}\`\n\n` +
       `سپس تصویر فیش یا اسکرین‌شات رسید را همین‌جا ارسال کنید تا تایید شود.`,
     parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: homeRow() },
   };
 }
 
 async function startPayloadAction(env, user, payload, steps) {
   const tid = user.id;
+  // v2.0: store the user's first name (for the referral leaderboard) and
+  // clear any in-progress gift / support flow when returning home.
+  if (user.first_name) {
+    await env.LICENSES.put(`name:${tid}`, String(user.first_name).slice(0, 64));
+  }
+  await env.LICENSES.delete(`gift:${tid}`);
+  await env.LICENSES.delete(`supMode:${tid}`);
   let idx = [];
   try {
     idx = JSON.parse((await env.LICENSES.get('userIndex')) || '[]');
@@ -1592,9 +2190,12 @@ async function startPayloadAction(env, user, payload, steps) {
   if (payload === 'trial') return doTrial(env, tid);
   if (payload === 'buy') return buyMenuFull(env);
 
+  // Plain /start always returns the unified Home v2 — with an opportunistic
+  // expiry reminder (also runs from scheduled() when cron is live).
+  await maybeSendExpiryReminder(env, tid);
   const key = await userKey(env, tid);
   const lic = key ? await getLic(env, key) : null;
-  return mainMenu(user, lic);
+  return mainMenu(env, user, lic);
 }
 
 async function recordReferralJoin(env, inviteeId, referrerId, steps) {
@@ -1639,6 +2240,7 @@ async function doReferral(env, tid) {
       `• ${needed === REFERRAL_REWARD_JOINS ? 'دعوت بعدی شروع دور جدید پاداش' : `${needed} نفر مانده تا پاداش بعدی`}\n` +
       `• اعتبار ذخیره هدیه: *${credit} روز*`,
     parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: withHome([[{ text: '🏆 لیدربورد دعوت', callback_data: 'top' }]]) },
   };
 }
 
@@ -1661,5 +2263,6 @@ async function doMyKey(env, tid) {
       `📅 تاریخ انقضا: *${formatJalali(lic.expiresAt)}*\n\n` +
       `💡 برای کپی کردن، کافیست روی کد بالا ضربه بزنید.`,
     parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: homeRow() },
   };
 }
