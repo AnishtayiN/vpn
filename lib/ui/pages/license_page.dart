@@ -6,6 +6,7 @@ import '../../services/license_service.dart';
 import '../../services/links.dart';
 import '../../theme/voidrau_theme.dart';
 import '../../app_info.dart';
+import 'sessions_page.dart';
 
 /// License screen: shows remaining time, lets the user enter a key,
 /// request a 24h trial (via the Telegram bot) and open the buy/referral chat.
@@ -221,6 +222,18 @@ class _LicensePageState extends State<VoidrauLicensePage> {
                       ),
                     ),
                   ],
+                  if (lic.maxUsers != null) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      s.sessionsUpToDevices(lic.maxUsers!),
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: VoidrauColors.muted,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
                   if (lic.key != null) ...[
                     const SizedBox(height: 12),
                     InkWell(
@@ -298,6 +311,18 @@ class _LicensePageState extends State<VoidrauLicensePage> {
           icon: const Icon(Icons.card_giftcard_rounded, size: 18),
           label: Text(s.licenseTrial),
         ),
+        if (lic.key != null) ...[
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const SessionsPage()),
+              );
+            },
+            icon: const Icon(Icons.devices_rounded, size: 18),
+            label: Text(s.sessionsTitle),
+          ),
+        ],
 
         const SizedBox(height: 20),
         const Divider(),
