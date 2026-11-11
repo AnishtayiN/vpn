@@ -347,11 +347,22 @@ def patch_windows() -> None:
         # Flutter 3.27 uses 3.14, which is okay for VS2022 but we can bump to 3.20 for safety
         # Keep original minimum to avoid breaking
 
+        # NOTE: the glob matches files AND directories. Since PR #6,
+        # third_party/windows/ contains the pt/ directory with the
+        # Psiphon/Tor helpers, so install(FILES ...) alone fails at
+        # configure time with "install FILES given directory .../pt".
+        # Directories must go through install(DIRECTORY ...) instead,
+        # which installs <prefix>/pt/ beside aether.exe — exactly where
+        # the Windows engine looks for the helpers (platform_engine.dart).
         extra = """
 file(GLOB VOIDRAU_SIDECARS "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/windows/*")
-if(VOIDRAU_SIDECARS)
-  install(FILES ${VOIDRAU_SIDECARS} DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
-endif()
+foreach(_sidecar ${VOIDRAU_SIDECARS})
+  if(IS_DIRECTORY ${_sidecar})
+    install(DIRECTORY ${_sidecar} DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
+  else()
+    install(FILES ${_sidecar} DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
+  endif()
+endforeach()
 """
         if "VOIDRAU_SIDECARS" not in t:
             t += "\n" + extra
