@@ -395,7 +395,7 @@ class _SetupWizardPageState extends State<SetupWizardPage> {
       if (_accounts.isNotEmpty) ...[
         const SizedBox(height: 12),
         DropdownButtonFormField<String>(
-          initialValue: _accountId,
+          value: _accountId,
           decoration: InputDecoration(
             labelText: s.wizardAccount,
             border: const OutlineInputBorder(),

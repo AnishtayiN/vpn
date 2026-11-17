@@ -834,7 +834,7 @@ class _ConfigPageState extends State<ConfigPage> {
     ValueChanged<String> onChanged,
   ) {
     return DropdownButtonFormField<String>(
-      initialValue: items.containsKey(value) ? value : items.keys.first,
+      value: items.containsKey(value) ? value : items.keys.first,
       items: items.entries
           .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value)))
           .toList(),
