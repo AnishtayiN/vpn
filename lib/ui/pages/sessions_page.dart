@@ -87,7 +87,7 @@ class _SessionsPageState extends State<SessionsPage> {
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
-            child: Text(s.isFa ? 'لغو' : 'Cancel'),
+            child: Text(s.cancel),
           ),
           FilledButton(
             onPressed: () => Navigator.of(ctx).pop(true),
@@ -119,7 +119,7 @@ class _SessionsPageState extends State<SessionsPage> {
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
-            child: Text(s.isFa ? 'لغو' : 'Cancel'),
+            child: Text(s.cancel),
           ),
           FilledButton(
             onPressed: () => Navigator.of(ctx).pop(true),
@@ -146,7 +146,9 @@ class _SessionsPageState extends State<SessionsPage> {
   Widget build(BuildContext context) {
     final lic = LicenseService.instance;
     final sessions = lic.sessions;
-    final maxUsers = lic.maxUsers ?? 1;
+    // m15: maxUsers stays null until the Worker reports a cap — the old
+    // `?? 1` asserted "1 of 1" for every license before the first check.
+    final maxUsers = lic.maxUsers;
     final others = sessions.where((s) => !_isCurrent(s)).toList();
     return Scaffold(
       appBar: AppBar(
@@ -172,19 +174,25 @@ class _SessionsPageState extends State<SessionsPage> {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         Text(
-                          s.sessionsActiveCount(sessions.length, maxUsers),
+                          maxUsers == null
+                              ? s.sessionsActiveUnknown(sessions.length)
+                              : s.sessionsActiveCount(
+                                  sessions.length, maxUsers),
                           textAlign: TextAlign.center,
                           style: const TextStyle(
                             fontSize: 17,
                             fontWeight: FontWeight.w800,
                           ),
                         ),
-                        const SizedBox(height: 4),
-                        Text(
-                          s.sessionsUpToDevices(maxUsers),
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(color: VoidrauColors.muted),
-                        ),
+                        if (maxUsers != null) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            s.sessionsUpToDevices(maxUsers),
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                                color: VoidrauTheme.mutedOf(context)),
+                          ),
+                        ],
                       ],
                     ),
                   ),
@@ -204,7 +212,7 @@ class _SessionsPageState extends State<SessionsPage> {
                     child: Text(
                       s.sessionsEmpty,
                       textAlign: TextAlign.center,
-                      style: const TextStyle(color: VoidrauColors.muted),
+                      style: TextStyle(color: VoidrauTheme.mutedOf(context)),
                     ),
                   )
                 else
@@ -217,13 +225,13 @@ class _SessionsPageState extends State<SessionsPage> {
                           _platformIcon(session.platform),
                           color: current
                               ? VoidrauColors.cyan
-                              : VoidrauColors.muted,
+                              : VoidrauTheme.mutedOf(context),
                         ),
                         title: Row(
                           children: [
                             Expanded(
                               child: Text(
-                                session.displayName,
+                                session.displayNameFor(fa: s.isFa),
                                 style: const TextStyle(
                                     fontWeight: FontWeight.w700),
                               ),
@@ -269,7 +277,7 @@ class _SessionsPageState extends State<SessionsPage> {
                           ],
                         ),
                         subtitle: Text(
-                          '${session.platformLabel}'
+                          '${session.platformLabelFor(fa: s.isFa)}'
                           '${session.appVersion.isNotEmpty ? ' • v${session.appVersion}' : ''}\n'
                           '${s.sessionsLastActive} ${_lastActiveText(session)}',
                         ),
@@ -299,8 +307,8 @@ class _SessionsPageState extends State<SessionsPage> {
                 ],
                 const SizedBox(height: 12),
                 OutlinedButton.icon(
-                  onPressed: () =>
-                      Links.open(AppInfo.botStartUrl('sessions')),
+                  onPressed: () => Links.openChecked(context,
+                      AppInfo.botStartUrl('sessions'), s.linkOpenFailed),
                   icon: const Icon(Icons.telegram, size: 18),
                   label: Text(s.sessionsManageInBot),
                 ),

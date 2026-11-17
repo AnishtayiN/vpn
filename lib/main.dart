@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'models/settings.dart';
 import 'services/vpn_controller.dart';
@@ -46,9 +47,17 @@ class _VoidrauAppState extends State<VoidrauApp> with WidgetsBindingObserver {
   }
 
   Future<void> _refreshLicense() async {
-    final before = LicenseService.instance.plan;
+    final beforePlan = LicenseService.instance.plan;
+    final beforeActive = LicenseService.instance.isActive;
     await LicenseService.instance.check();
-    if (LicenseService.instance.plan != before) controller.notifyLicenseChanged();
+    // Notify when the plan changed OR when active flipped: a license that
+    // expired while the app was backgrounded keeps the same plan string
+    // ('paid') but isActive goes false — without this the shell never
+    // rebuilds and the gate never appears.
+    if (LicenseService.instance.plan != beforePlan ||
+        LicenseService.instance.isActive != beforeActive) {
+      controller.notifyLicenseChanged();
+    }
   }
 
   /// Coming back to the foreground is one of the mandatory-update checkpoints:
@@ -104,6 +113,12 @@ class _VoidrauAppState extends State<VoidrauApp> with WidgetsBindingObserver {
           darkTheme: VoidrauColors.dark(),
           themeMode: dark ? ThemeMode.dark : ThemeMode.light,
           locale: controller.rtl ? const Locale('fa') : const Locale('en'),
+          localizationsDelegates: const [
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          supportedLocales: const [Locale('fa'), Locale('en')],
           builder: (context, child) {
             return Directionality(
               textDirection:

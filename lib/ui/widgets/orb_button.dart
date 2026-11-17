@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../models/engine_state.dart';
 import '../../theme/voidrau_theme.dart';
@@ -13,6 +14,7 @@ class OrbButton extends StatefulWidget {
     required this.hint,
     required this.onTap,
     this.mercury = true,
+    this.size = 250,
   });
 
   final EnginePhase phase;
@@ -20,6 +22,11 @@ class OrbButton extends StatefulWidget {
   final String hint;
   final VoidCallback onTap;
   final bool mercury;
+
+  /// Responsive diameter (C2): the Connect page passes
+  /// `min(250, width * 0.62)` so the orb never overflows small screens,
+  /// landscape, or large text scales.
+  final double size;
 
   @override
   State<OrbButton> createState() => _OrbButtonState();
@@ -32,6 +39,47 @@ class _OrbButtonState extends State<OrbButton>
     duration: const Duration(milliseconds: 2400),
   );
 
+  /// Phase-change gradient transition (improvement 9): the orb's palette is
+  /// lerped from the old phase's colors to the new one's over 400 ms
+  /// instead of cutting hard. All palettes are normalised to three entries
+  /// so the lerp is index-wise.
+  late final AnimationController _fade = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 400),
+  );
+  late List<Color> _fromColors = _palette(widget.phase);
+  late List<Color> _toColors = _palette(widget.phase);
+
+  bool _pressed = false;
+
+  static List<Color> _palette(EnginePhase phase) {
+    switch (phase) {
+      case EnginePhase.error:
+        return const [Color(0xFFFF6B74), Color(0xFF761527), Color(0xFF761527)];
+      case EnginePhase.connected:
+        return const [Color(0xFF2AE5F5), Color(0xFF0867E8), Color(0xFF082E83)];
+      case EnginePhase.connecting:
+      case EnginePhase.scanning:
+      case EnginePhase.reconnecting:
+      case EnginePhase.preparing:
+        return const [
+          VoidrauColors.cyan,
+          VoidrauColors.violet,
+          VoidrauColors.blue,
+        ];
+      case EnginePhase.disconnected:
+      case EnginePhase.disconnecting:
+        return const [Color(0xFFFF7680), Color(0xFF9D152C), Color(0xFF9D152C)];
+    }
+  }
+
+  /// C1: `letterSpacing` breaks Arabic-script joining, so Persian labels
+  /// ('اتصال' / 'قطع اتصال') get 0 spacing; Latin labels keep the 1.4
+  /// tracking that makes them look spaced-out.
+  static bool _isArabicScript(String text) => RegExp(
+        r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]',
+      ).hasMatch(text);
+
   @override
   void initState() {
     super.initState();
@@ -41,8 +89,19 @@ class _OrbButtonState extends State<OrbButton>
   @override
   void didUpdateWidget(covariant OrbButton oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.phase != widget.phase) _updateAnimation();
+    if (oldWidget.phase != widget.phase) {
+      _fromColors = _currentColors;
+      _toColors = _palette(widget.phase);
+      _fade.forward(from: 0);
+      _updateAnimation();
+    }
   }
+
+  /// The palette currently on screen (the lerp's live value).
+  List<Color> get _currentColors => List.generate(
+        3,
+        (i) => Color.lerp(_fromColors[i], _toColors[i], _fade.value)!,
+      );
 
   /// The idle glow should not run forever: repeat() only while the phase is
   /// visually live (busy or connected); disconnected/error freeze the last
@@ -60,6 +119,7 @@ class _OrbButtonState extends State<OrbButton>
   @override
   void dispose() {
     _c.dispose();
+    _fade.dispose();
     super.dispose();
   }
 
@@ -70,16 +130,8 @@ class _OrbButtonState extends State<OrbButton>
         widget.phase == EnginePhase.scanning ||
         widget.phase == EnginePhase.reconnecting ||
         widget.phase == EnginePhase.preparing;
-    final error = widget.phase == EnginePhase.error;
 
-    final colors = error
-        ? const [Color(0xFFFF6B74), Color(0xFF761527)]
-        : connected
-            ? const [Color(0xFF2AE5F5), Color(0xFF0867E8), Color(0xFF082E83)]
-            : busy
-                ? const [VoidrauColors.cyan, VoidrauColors.violet, VoidrauColors.blue]
-                : const [Color(0xFFFF7680), Color(0xFF9D152C)];
-
+    final arabic = _isArabicScript(widget.label);
     final inner = Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
@@ -91,10 +143,11 @@ class _OrbButtonState extends State<OrbButton>
         const SizedBox(height: 10),
         Text(
           widget.label,
-          style: const TextStyle(
+          style: TextStyle(
             fontWeight: FontWeight.w800,
             fontSize: 20,
-            letterSpacing: 1.4,
+            // C1: no tracking on Persian, 1.4 only for Latin.
+            letterSpacing: arabic ? 0 : 1.4,
             color: Colors.white,
           ),
         ),
@@ -109,62 +162,81 @@ class _OrbButtonState extends State<OrbButton>
       ],
     );
 
-    return AnimatedBuilder(
-      animation: _c,
-      builder: (context, _) {
-        return GestureDetector(
-          onTap: widget.onTap,
-          child: SizedBox(
-            width: 250,
-            height: 250,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: SweepGradient(
-                  colors: [...colors, colors.first],
-                  transform: busy
-                      ? GradientRotation(_c.value * 6.283)
-                      : const GradientRotation(-0.6),
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: (connected ? VoidrauColors.cyan : VoidrauColors.coral)
-                        .withValues(alpha: 0.35),
-                    blurRadius: 42,
-                    spreadRadius: 2,
-                  ),
-                ],
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(8),
+    return Semantics(
+      button: true,
+      label: '${widget.label}. ${widget.hint}',
+      onTap: widget.onTap,
+      child: AnimatedBuilder(
+        animation: Listenable.merge([_c, _fade]),
+        builder: (context, _) {
+          final colors = _currentColors;
+          return GestureDetector(
+            onTap: () {
+              HapticFeedback.mediumImpact();
+              widget.onTap();
+            },
+            onTapDown: (_) => setState(() => _pressed = true),
+            onTapUp: (_) => setState(() => _pressed = false),
+            onTapCancel: () => setState(() => _pressed = false),
+            child: AnimatedScale(
+              scale: _pressed ? 0.93 : 1.0,
+              duration: const Duration(milliseconds: 120),
+              child: SizedBox(
+                width: widget.size,
+                height: widget.size,
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: widget.mercury
-                          ? [
-                              colors[(_c.value * colors.length).floor() %
-                                  colors.length],
-                              colors.last,
-                              colors.first,
-                            ]
-                          : colors,
+                    gradient: SweepGradient(
+                      colors: [...colors, colors.first],
+                      transform: busy
+                          ? GradientRotation(_c.value * 6.283)
+                          : const GradientRotation(-0.6),
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: (connected
+                                ? VoidrauColors.cyan
+                                : VoidrauColors.coral)
+                            .withValues(alpha: 0.35),
+                        blurRadius: 42,
+                        spreadRadius: 2,
+                      ),
+                    ],
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: widget.mercury
+                              ? [
+                                  colors[(_c.value * colors.length).floor() %
+                                      colors.length],
+                                  colors.last,
+                                  colors.first,
+                                ]
+                              : colors,
+                        ),
+                      ),
+                      child: widget.mercury
+                          ? CustomPaint(
+                              painter:
+                                  _MercuryPainter(t: _c.value, colors: colors),
+                              child: inner,
+                            )
+                          : inner,
                     ),
                   ),
-                  child: widget.mercury
-                      ? CustomPaint(
-                          painter: _MercuryPainter(t: _c.value, colors: colors),
-                          child: inner,
-                        )
-                      : inner,
                 ),
               ),
             ),
-          ),
-        );
-      },
+          );
+        },
+      ),
     );
   }
 }

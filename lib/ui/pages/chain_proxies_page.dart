@@ -53,6 +53,15 @@ class _ChainProxiesPageState extends State<ChainProxiesPage> {
           SnackBar(content: Text('${s.chainInvalid}: ${e.message}')),
         );
       }
+    } catch (_) {
+      // persist() can fail too (disk/full storage); a raw exception in the
+      // UI would leak internals, so the localised sentence is all the user
+      // sees.
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(s.chainInvalid)),
+        );
+      }
     }
   }
 
@@ -78,8 +87,8 @@ class _ChainProxiesPageState extends State<ChainProxiesPage> {
             padding: const EdgeInsets.fromLTRB(20, 14, 20, 40),
             children: [
               Text(s.chainHelp,
-                  style:
-                      const TextStyle(color: VoidrauColors.muted, height: 1.5)),
+                  style: TextStyle(
+                      color: VoidrauTheme.mutedOf(context), height: 1.5)),
               const SizedBox(height: 6),
               Text(s.chainUdpNote,
                   style: const TextStyle(
@@ -119,7 +128,7 @@ class _ChainProxiesPageState extends State<ChainProxiesPage> {
               const SizedBox(height: 18),
               if (st.xrayChainProxies.isEmpty)
                 Text(s.chainEmpty,
-                    style: const TextStyle(color: VoidrauColors.muted)),
+                    style: TextStyle(color: VoidrauTheme.mutedOf(context))),
               for (final proxy in st.xrayChainProxies)
                 _tile(context, s, st, proxy, mode),
             ],
@@ -127,6 +136,21 @@ class _ChainProxiesPageState extends State<ChainProxiesPage> {
         );
       },
     );
+  }
+
+  /// m18: the masked host of a link that failed to parse — scheme + host
+  /// only, never the userinfo (a proxy link can embed a password). Falls
+  /// back to the localised "invalid link" sentence when even the host
+  /// cannot be read.
+  String _maskedOrInvalid(String link) {
+    try {
+      final uri = Uri.parse(link);
+      if (uri.hasAuthority && uri.host.isNotEmpty) {
+        final host = uri.hasPort ? '${uri.host}:${uri.port}' : uri.host;
+        return '${c.s.chainInvalid}\n${uri.scheme}://$host';
+      }
+    } catch (_) {}
+    return c.s.chainInvalid;
   }
 
   Widget _tile(
@@ -144,12 +168,12 @@ class _ChainProxiesPageState extends State<ChainProxiesPage> {
             st.xrayChainProxies.isNotEmpty &&
             st.xrayChainProxies.first == proxy);
     return Card(
-      color: VoidrauColors.surface,
+      color: VoidrauTheme.surfaceOf(context),
       child: ListTile(
         title: Text(proxy.name),
         subtitle: Text(
           info == null
-              ? proxy.link
+              ? _maskedOrInvalid(proxy.link)
               : '${info.tags.join(' · ')}\n${info.address}'
                   '${info.isUdp ? '\n${s.chainUdpOnly}' : ''}',
         ),
@@ -165,7 +189,9 @@ class _ChainProxiesPageState extends State<ChainProxiesPage> {
                 isExit
                     ? Icons.radio_button_checked_rounded
                     : Icons.radio_button_unchecked_rounded,
-                color: isExit ? VoidrauColors.cyan : VoidrauColors.muted,
+                color: isExit
+                    ? VoidrauColors.cyan
+                    : VoidrauTheme.mutedOf(context),
               ),
               tooltip: s.chainUseAsExit,
               onPressed: () async {

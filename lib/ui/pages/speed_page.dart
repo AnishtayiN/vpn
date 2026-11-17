@@ -70,7 +70,8 @@ class _SpeedPageState extends State<SpeedPage> {
                 style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
             const SizedBox(height: 6),
             Text(s.speedHelp,
-                style: const TextStyle(color: VoidrauColors.muted, height: 1.45)),
+                style: TextStyle(
+                    color: VoidrauTheme.mutedOf(context), height: 1.45)),
             const SizedBox(height: 16),
             _traffic(c, s),
             const SizedBox(height: 14),
@@ -150,7 +151,8 @@ class _SpeedPageState extends State<SpeedPage> {
               children: [
                 Text(
                   '${s.peakSpeed}:',
-                  style: const TextStyle(color: VoidrauColors.muted, fontSize: 12),
+                  style: TextStyle(
+                      color: VoidrauTheme.mutedOf(context), fontSize: 12),
                 ),
                 const Spacer(),
                 if (_peakDown > 0)
@@ -163,7 +165,8 @@ class _SpeedPageState extends State<SpeedPage> {
                     ),
                   ),
                 if (_peakDown > 0 && _peakUp > 0)
-                  const Text('  ·  ', style: TextStyle(color: VoidrauColors.muted)),
+                  Text('  ·  ',
+                    style: TextStyle(color: VoidrauTheme.mutedOf(context))),
                 if (_peakUp > 0)
                   Text(
                     '↑ ${_rate(_peakUp)}',
@@ -193,13 +196,16 @@ class _SpeedPageState extends State<SpeedPage> {
           Row(
             children: [
               Text(s.liveSpeed,
-                  style: const TextStyle(
-                      color: VoidrauColors.muted, fontWeight: FontWeight.w600)),
+                  style: TextStyle(
+                      color: VoidrauTheme.mutedOf(context),
+                      fontWeight: FontWeight.w600)),
               const Spacer(),
               Text(connected ? s.active : s.ready,
                   style: TextStyle(
                     fontSize: 12,
-                    color: connected ? VoidrauColors.cyan : VoidrauColors.muted,
+                    color: connected
+                        ? VoidrauColors.cyan
+                        : VoidrauTheme.mutedOf(context),
                   )),
             ],
           ),
@@ -228,7 +234,11 @@ class _SpeedPageState extends State<SpeedPage> {
           SizedBox(
             height: 46,
             child: CustomPaint(
-              painter: _SparkPainter(_down, _up),
+              painter: _SparkPainter(
+                _down,
+                _up,
+                gridColor: VoidrauTheme.lineOf(context),
+              ),
               size: Size.infinite,
             ),
           ),
@@ -248,7 +258,8 @@ class _SpeedPageState extends State<SpeedPage> {
         ),
         const SizedBox(height: 2),
         Text(caption,
-            style: const TextStyle(fontSize: 11, color: VoidrauColors.muted)),
+            style: TextStyle(
+                fontSize: 11, color: VoidrauTheme.mutedOf(context))),
       ],
     );
   }
@@ -278,7 +289,8 @@ class _SpeedPageState extends State<SpeedPage> {
           // native side pins the tier there: offering the choice would be a lie.
           if (Platform.isIOS)
             Text(s.perfIosNote,
-                style: const TextStyle(color: VoidrauColors.muted, height: 1.4))
+                style: TextStyle(
+                    color: VoidrauTheme.mutedOf(context), height: 1.4))
           else ...[
             Wrap(
               spacing: 8,
@@ -298,7 +310,8 @@ class _SpeedPageState extends State<SpeedPage> {
             ),
             const SizedBox(height: 10),
             Text(descriptions[st.perf]!,
-                style: const TextStyle(color: VoidrauColors.muted, height: 1.4)),
+                style: TextStyle(
+                    color: VoidrauTheme.mutedOf(context), height: 1.4)),
           ],
           if (c.snapshot.phase == EnginePhase.connected)
             Padding(
@@ -332,8 +345,9 @@ class _SpeedPageState extends State<SpeedPage> {
           }, min: 0, max: 1500),
           const Divider(height: 24),
           Text(s.tcpTuning,
-              style: const TextStyle(
-                  color: VoidrauColors.muted, fontWeight: FontWeight.w600)),
+              style: TextStyle(
+                  color: VoidrauTheme.mutedOf(context),
+                  fontWeight: FontWeight.w600)),
           _number(c, s, s.tcpConnect, st.tcpConnectSecs, null, (v) {
             st.tcpConnectSecs = v;
           }, min: 5, max: 120),
@@ -400,7 +414,7 @@ class _SpeedPageState extends State<SpeedPage> {
           helperMaxLines: 3,
           isDense: true,
           filled: true,
-          fillColor: VoidrauColors.surface,
+          fillColor: VoidrauTheme.surfaceOf(context),
           border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
         ),
         onChanged: (v) {
@@ -418,9 +432,9 @@ class _SpeedPageState extends State<SpeedPage> {
       width: double.infinity,
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: VoidrauColors.surface,
+        color: VoidrauTheme.surfaceOf(context),
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: VoidrauColors.line),
+        border: Border.all(color: VoidrauTheme.lineOf(context)),
       ),
       child: child,
     );
@@ -450,14 +464,17 @@ class _SpeedPageState extends State<SpeedPage> {
 /// Rolling down/up history: two filled lines on a shared scale, so a glance says
 /// whether the tunnel is idle, busy, or saturated.
 class _SparkPainter extends CustomPainter {
-  _SparkPainter(this.down, this.up);
+  _SparkPainter(this.down, this.up, {required this.gridColor});
   final List<double> down;
   final List<double> up;
+
+  /// Theme-aware grid colour (the painter itself has no BuildContext).
+  final Color gridColor;
 
   @override
   void paint(Canvas canvas, Size size) {
     final grid = Paint()
-      ..color = VoidrauColors.line
+      ..color = gridColor
       ..strokeWidth = 1;
     canvas.drawLine(Offset(0, size.height - 0.5),
         Offset(size.width, size.height - 0.5), grid);
@@ -496,6 +513,7 @@ class _SparkPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_SparkPainter old) {
+    if (old.gridColor != gridColor) return true;
     if (old.down.length != down.length || old.up.length != up.length) {
       return true;
     }

@@ -40,7 +40,8 @@ class ForceUpdatePage extends StatelessWidget {
                       style: const TextStyle(
                           fontSize: 22, fontWeight: FontWeight.w800)),
                   Text('v${c.runningVersion}',
-                      style: const TextStyle(color: VoidrauColors.muted)),
+                      style:
+                          TextStyle(color: VoidrauTheme.mutedOf(context))),
                 ],
               ),
             ),
@@ -82,13 +83,18 @@ class ForceUpdatePage extends StatelessWidget {
                   const SizedBox(height: 12),
                   Row(
                     children: [
-                      _pill(s.currentVersion, 'v${c.runningVersion}'),
-                      const Padding(
-                        padding: EdgeInsets.symmetric(horizontal: 8),
-                        child: Icon(Icons.arrow_forward,
-                            size: 16, color: VoidrauColors.muted),
+                      _pill(context, s.currentVersion,
+                          'v${c.runningVersion}'),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        child: Icon(
+                            Directionality.of(context) == TextDirection.rtl
+                                ? Icons.arrow_back
+                                : Icons.arrow_forward,
+                            size: 16,
+                            color: VoidrauTheme.mutedOf(context)),
                       ),
-                      _pill(s.latestVersion, 'v$target',
+                      _pill(context, s.latestVersion, 'v$target',
                           highlight: true),
                     ],
                   ),
@@ -98,7 +104,8 @@ class ForceUpdatePage extends StatelessWidget {
             const SizedBox(height: 18),
             // ── Alternative: let the Telegram bot deliver the new build.
             FilledButton.tonalIcon(
-              onPressed: () => Links.openBot(),
+              onPressed: () =>
+                  Links.openBotChecked(context, s.linkOpenFailed),
               icon: const Icon(Icons.smart_button_rounded, size: 18),
               label: Text(s.getFromBot),
             ),
@@ -143,7 +150,7 @@ class ForceUpdatePage extends StatelessWidget {
                   builder: (context, v, _) => LinearProgressIndicator(
                     value: v,
                     minHeight: 10,
-                    backgroundColor: VoidrauColors.surface,
+                    backgroundColor: VoidrauTheme.surfaceOf(context),
                     valueColor:
                         const AlwaysStoppedAnimation(VoidrauColors.cyan),
                   ),
@@ -165,7 +172,7 @@ class ForceUpdatePage extends StatelessWidget {
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: VoidrauColors.surface,
+                color: VoidrauTheme.surfaceOf(context),
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(color: VoidrauColors.cyan.withValues(alpha: 0.5)),
               ),
@@ -173,7 +180,8 @@ class ForceUpdatePage extends StatelessWidget {
                 children: [
                   TelegramButton(
                     size: 40,
-                    onPressed: () => Links.openTelegram(),
+                    onPressed: () =>
+                        Links.openTelegramChecked(context, s.linkOpenFailed),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
@@ -187,8 +195,9 @@ class ForceUpdatePage extends StatelessWidget {
                         ),
                         Text(
                           AppInfo.telegramUrl.replaceFirst('https://', ''),
-                          style: const TextStyle(
-                              color: VoidrauColors.muted, fontSize: 12),
+                          style: TextStyle(
+                              color: VoidrauTheme.mutedOf(context),
+                              fontSize: 12),
                         ),
                         const SizedBox(height: 4),
                         SelectableText(
@@ -210,22 +219,12 @@ class ForceUpdatePage extends StatelessWidget {
             _step('3', s.updateStep3),
             const SizedBox(height: 20),
             FilledButton.icon(
-              onPressed: () => Links.openTelegram(),
+              onPressed: () =>
+                  Links.openTelegramChecked(context, s.linkOpenFailed),
               icon: const Icon(Icons.send_rounded),
               label: Text('${s.openTelegram} · ${AppInfo.telegramHandle}'),
               style: FilledButton.styleFrom(
                 minimumSize: const Size.fromHeight(48),
-              ),
-            ),
-            const SizedBox(height: 10),
-            OutlinedButton.icon(
-              onPressed: () => Links.openTelegram(),
-              icon: const Icon(Icons.send_rounded),
-              label: Text(s.isFa
-                  ? 'دانلود از کانال تلگرام ${AppInfo.telegramHandle}'
-                  : 'Download from Telegram ${AppInfo.telegramHandle}'),
-              style: OutlinedButton.styleFrom(
-                minimumSize: const Size.fromHeight(46),
               ),
             ),
             const SizedBox(height: 10),
@@ -244,9 +243,9 @@ class ForceUpdatePage extends StatelessWidget {
                 constraints: const BoxConstraints(maxHeight: 260),
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: VoidrauColors.surface,
+                  color: VoidrauTheme.surfaceOf(context),
                   borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: VoidrauColors.line),
+                  border: Border.all(color: VoidrauTheme.lineOf(context)),
                 ),
                 child: SingleChildScrollView(
                   child: SelectableText(
@@ -264,15 +263,18 @@ class ForceUpdatePage extends StatelessWidget {
               ),
             Text(
               s.updatedToContinue,
-              style: const TextStyle(color: VoidrauColors.muted, fontSize: 12),
+              style: TextStyle(
+                  color: VoidrauTheme.mutedOf(context), fontSize: 12),
             ),
             const SizedBox(height: 12),
             SelectableText(
               s.isFa
                   ? 'برای دریافت نسخه جدید به کانال تلگرام مراجعه کنید:\n${AppInfo.telegramHandle}\n${AppInfo.telegramUrl}'
                   : 'Get the new build from the Telegram channel:\n${AppInfo.telegramHandle}\n${AppInfo.telegramUrl}',
-              style: const TextStyle(
-                  color: VoidrauColors.muted, fontSize: 12, height: 1.5),
+              style: TextStyle(
+                  color: VoidrauTheme.mutedOf(context),
+                  fontSize: 12,
+                  height: 1.5),
             ),
           ],
         ),
@@ -280,14 +282,19 @@ class ForceUpdatePage extends StatelessWidget {
     );
   }
 
-  Widget _pill(String label, String value, {bool highlight = false}) {
+  Widget _pill(BuildContext context, String label, String value,
+      {bool highlight = false}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color: highlight ? const Color(0x3327D7F2) : VoidrauColors.surface,
+        color: highlight
+            ? const Color(0x3327D7F2)
+            : VoidrauTheme.surfaceOf(context),
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
-            color: highlight ? VoidrauColors.cyan : VoidrauColors.line),
+            color: highlight
+                ? VoidrauColors.cyan
+                : VoidrauTheme.lineOf(context)),
       ),
       child: Text(
         '$label: $value',

@@ -734,5 +734,144 @@ class S {
       isFa ? 'فقط UDP — فقط روی WARP' : 'UDP only — WARP only';
   String get chainUseAsExit =>
       isFa ? 'استفاده به‌عنوان خروجی' : 'Use as exit';
+
+  String get cancel => isFa ? 'لغو' : 'Cancel';
+
+  // ── UI overhaul v1.6.0 ─────────────────────────────────────────────────
+  String get licenseNoInternet => isFa
+      ? 'به اینترنت وصل نیستید — اتصال را بررسی کنید و دوباره تلاش کنید'
+      : 'No internet — check your connection and try again';
+  String get licenseEnterKey =>
+      isFa ? 'اول کد لایسنس را وارد کنید' : 'Enter your license key first';
+  String get xrayTimedOut => isFa
+      ? 'Xray در زمان مقرر بالا نیامد'
+      : 'Xray did not come up in time';
+  String get xrayNoTraffic => isFa
+      ? 'تونل Xray باز شد ولی ترافیکی عبور نکرد'
+      : 'The Xray tunnel opened but carried no traffic';
+  String get watchdogStalled => isFa
+      ? 'تونل متوقف شد — اتصال مجدد…'
+      : 'Tunnel stalled — reconnecting…';
+  String get linkOpenFailed =>
+      isFa ? 'باز کردن لینک ممکن نشد' : 'Could not open the link';
+
+  // ── setup wizard errors (mapped from CloudflareException codes) ─────────
+  String get wizardTokenRequired =>
+      isFa ? 'توکن API را وارد کنید' : 'Enter your API token';
+  String get wizardGlobalKey => isFa
+      ? 'این کلید عمومی API است؛ به‌جای آن یک توکن API بسازید (دکمهٔ بالا).'
+      : 'That looks like the Global API Key. Create an API token instead (button above).';
+  String get wizardTokenInvalid => isFa
+      ? 'این شبیه توکن API کلادفلر نیست؛ خود توکن را کپی کنید.'
+      : "That doesn't look like a Cloudflare API token. Copy the token itself.";
+  String get wizardApiFailed => isFa
+      ? 'خطای Cloudflare — توکن و دسترسی‌های آن را بررسی کنید'
+      : 'Cloudflare API error — check the token and its permissions';
+  String get wizardNetworkFailed => isFa
+      ? 'به اینترنت وصل نیستید — اتصال را بررسی کنید'
+      : 'No internet — check your connection';
+  String get wizardDomainAttachFailed => isFa
+      ? 'نتوانستیم دامنه را وصل کنیم؛ دامنه باید زون همین حساب باشد'
+      : 'Could not attach the domain; it must be a zone on this account';
+  String get wizardGenericFailed =>
+      isFa ? 'عملیات ناموفق بود — دوباره تلاش کنید' : 'Something failed — try again';
+  String get wizardDisconnectWorker =>
+      isFa ? 'قطع اتصال ورکر' : 'Disconnect Worker';
+  String get wizardDisconnectTitle =>
+      isFa ? 'اتصال ورکر قطع شود؟' : 'Disconnect the Worker?';
+  String get wizardDisconnectBody => isFa
+      ? 'توکن و UUID از این دستگاه پاک می‌شود. ورکرِ دیپلوی‌شده روی حساب کلادفلر شما باقی می‌ماند؛ می‌توانید بعداً دوباره وصل شوید یا از داشبورد کلادفلر حذفش کنید.'
+      : 'The token and UUID will be removed from this device. The deployed Worker stays on your Cloudflare account; you can reconnect later or delete it from the Cloudflare dashboard.';
+  String get wizardDisconnected =>
+      isFa ? 'اتصال ورکر قطع شد' : 'Worker disconnected';
+
+  // ── diagnostics ────────────────────────────────────────────────────────
+  String testConnectionOk(int ms) =>
+      isFa ? 'وصل است — $ms میلی‌ثانیه' : 'Connected — $ms ms';
+  String get testConnectionFailed =>
+      isFa ? 'تست اتصال ناموفق بود' : 'Connection test failed';
+  String get endpointAuto => isFa ? 'خودکار' : 'Automatic';
+  String get logFilterAll => isFa ? 'همه' : 'All';
+  String get logFilterErrors => isFa ? 'خطاها' : 'Errors';
+
+  /// Localised engine phase label (drawer footer, diagnostics grid).
+  String phaseLabel(String phaseName) {
+    final faMap = {
+      'disconnected': 'قطع',
+      'preparing': 'آماده‌سازی',
+      'scanning': 'در حال اسکن…',
+      'connecting': 'در حال اتصال…',
+      'connected': 'متصل',
+      'reconnecting': 'اتصال مجدد…',
+      'disconnecting': 'در حال قطع…',
+      'error': 'خطا',
+    };
+    final enMap = {
+      'disconnected': 'Disconnected',
+      'preparing': 'Preparing',
+      'scanning': 'Scanning…',
+      'connecting': 'Connecting…',
+      'connected': 'Connected',
+      'reconnecting': 'Reconnecting…',
+      'disconnecting': 'Disconnecting…',
+      'error': 'Error',
+    };
+    return (isFa ? faMap : enMap)[phaseName] ?? phaseName;
+  }
+
+  // ── sessions ───────────────────────────────────────────────────────────
+  String sessionsActiveUnknown(int active) => isFa
+      ? '${JalaliDate.toPersianDigits('$active')} نشست فعال · سقف دستگاه نامشخص'
+      : '$active active sessions · device limit unknown';
+  String get platformAndroid => isFa ? 'اندروید' : 'Android';
+  String get platformWindows => isFa ? 'ویندوز' : 'Windows';
+  String get platformIos => isFa ? 'آیفون' : 'iPhone';
+  String get platformUnknown => isFa ? 'نامشخص' : 'Unknown';
+
+  // ── reset defaults ─────────────────────────────────────────────────────
+  String get resetConfirmTitle =>
+      isFa ? 'بازنشانی تنظیمات؟' : 'Reset settings?';
+  String get resetConfirmBody => isFa
+      ? 'همهٔ تنظیمات به پیش‌فرض برمی‌گردد، به‌جز تنظیمات Xray و ورکر/WARP شما که حفظ می‌شود.'
+      : 'All settings return to their defaults, except your Xray and Worker/WARP setup, which is kept.';
+  String get resetDone =>
+      isFa ? 'تنظیمات بازنشانی شد' : 'Settings reset';
+
+  // ── mode cards (one-line benefits) ─────────────────────────────────────
+  String get xrayOffBenefit =>
+      isFa ? 'موتور Aether مثل قبل' : 'Aether engine as before';
+  String get xrayWorkerBenefit =>
+      isFa ? 'VLESS از ورکر خودتان' : 'VLESS via your own Worker';
+  String get xrayWarpBenefit =>
+      isFa ? 'وایرگارد به WARP، بدون ورکر' : 'WireGuard to WARP, no Worker';
+  String get xrayServerlessBenefit =>
+      isFa ? 'مستقیم، بدون سرور' : 'Direct, no server';
+  String get protoSmartBenefit => isFa
+      ? 'خودکار؛ بهترین مسیر را انتخاب می‌کند'
+      : 'Automatic — picks the best route';
+  String get protoMasqueBenefit =>
+      isFa ? 'پروتکل مدرن MASQUE' : 'Modern MASQUE protocol';
+  String get protoWgBenefit =>
+      isFa ? 'سریع و کم‌مصرف برای ایران' : 'Fast and light on data for Iran';
+  String get protoGoolBenefit =>
+      isFa ? 'عبور از فیلترینگ سنگین' : 'Heavy-filter bypass';
+  String get protoMimBenefit =>
+      isFa ? 'دو لایه استتار' : 'Double obfuscation';
+  String get modeCardsTitle =>
+      isFa ? 'حالت اتصال' : 'Connection mode';
+  String get protocolCardsTitle => isFa ? 'پروتکل' : 'Protocol';
+
+  // ── connected hero card ────────────────────────────────────────────────
+  String get liveNow => isFa ? 'زنده' : 'Live';
+
+  // ── license page (progress ring + sessions preview) ────────────────────
+  String get licenseDevicesUsed =>
+      isFa ? 'دستگاه‌های فعال' : 'Devices in use';
+  String get licenseSessionsPreview =>
+      isFa ? 'نشست‌های فعال' : 'Active sessions';
+
+  // ── sectioned settings ─────────────────────────────────────────────────
+  String get sectionConnection => isFa ? 'اتصال' : 'Connection';
+  String get sectionExitCountry => isFa ? 'کشور خروجی' : 'Exit country';
 }
 

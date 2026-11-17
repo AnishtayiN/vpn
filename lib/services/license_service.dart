@@ -89,6 +89,11 @@ class LicenseService {
   /// e.g. the Worker has not reported it yet; treat as 1 for display).
   int? get maxUsers => _maxUsers;
 
+  /// When the last successful server check happened (null = never). The
+  /// controller uses it to skip a redundant re-check on every orb tap (M1):
+  /// only a stale check (>10 min) or a license near expiry re-checks.
+  DateTime? get lastCheckedAt => _checkedAt;
+
   /// Sessions reported by the last successful license check.
   List<LicenseSession> get sessions => List.unmodifiable(_sessions);
 
@@ -620,25 +625,35 @@ class LicenseSession {
   }
 
   /// Display name, falling back to the platform when the Worker sent none.
-  String get displayName {
+  /// Localised: pass the UI language — the old Persian-only text is kept as
+  /// the fa default so existing callers stay correct.
+  String displayNameFor({required bool fa}) {
     if (name.isNotEmpty) return name;
-    if (platform.isEmpty) return 'دستگاه ناشناس';
+    if (platform.isEmpty) {
+      return fa ? 'دستگاه ناشناس' : 'Unknown device';
+    }
     return LicenseService.formatDeviceName(platform, '');
   }
 
+  String get displayName => displayNameFor(fa: true);
+
   /// Platform icon name for the UI.
-  String get platformLabel {
+  String platformLabelFor({required bool fa}) {
     switch (platform) {
       case 'android':
-        return 'اندروید';
+        return fa ? 'اندروید' : 'Android';
       case 'windows':
-        return 'ویندوز';
+        return fa ? 'ویندوز' : 'Windows';
       case 'ios':
-        return 'آیفون';
+        return fa ? 'آیفون' : 'iPhone';
       default:
-        return platform.isEmpty ? 'نامشخص' : platform;
+        return platform.isEmpty
+            ? (fa ? 'نامشخص' : 'Unknown')
+            : platform;
     }
   }
+
+  String get platformLabel => platformLabelFor(fa: true);
 }
 
 /// Structured HTTP 409 `session-limit` error: the plan's device cap plus the

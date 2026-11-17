@@ -15,8 +15,12 @@ class AppInfo {
   static const version =
       String.fromEnvironment('VOIDRAU_VERSION', defaultValue: '1.3.1');
 
-  /// Version of the bundled tunnel core.
-  static const core = '2.3.0';
+  /// Version of the bundled tunnel core. Resolved from the same dart-define
+  /// the release workflow uses (`VOIDRAU_AETHER_VERSION`): 2.4.0 normally,
+  /// 2.3.0 for the legacy Android build — so About and Diagnostics always
+  /// show the core that actually shipped, never a hardcoded guess.
+  static const core =
+      String.fromEnvironment('VOIDRAU_AETHER_VERSION', defaultValue: '2.4.0');
 
   static const socksHost = '127.0.0.1';
   static const socksPort = 1819;

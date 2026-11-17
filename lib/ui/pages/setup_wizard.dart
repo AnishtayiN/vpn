@@ -70,9 +70,33 @@ class _SetupWizardPageState extends State<SetupWizardPage> {
   }
 
   void _fail(Object e) {
+    final s = c.s;
+    final msg = e is CloudflareException ? e.message : e.toString();
+    final String text;
+    if (msg.contains('Enter your API token') ||
+        msg.contains('Token missing')) {
+      text = s.wizardTokenRequired;
+    } else if (msg.contains('Global API Key')) {
+      text = s.wizardGlobalKey;
+    } else if (msg.contains("doesn't look like")) {
+      text = s.wizardTokenInvalid;
+    } else if (msg.contains('Could not attach')) {
+      text = s.wizardDomainAttachFailed;
+    } else if (e is SocketException ||
+        msg.contains('SocketException') ||
+        msg.contains('Failed host lookup') ||
+        msg.contains('Connection refused') ||
+        msg.contains('Network is unreachable')) {
+      text = s.wizardNetworkFailed;
+    } else if (msg.contains('Cloudflare API error') ||
+        e is CloudflareException) {
+      text = s.wizardApiFailed;
+    } else {
+      text = s.wizardGenericFailed;
+    }
     setState(() {
       _busy = false;
-      _status = '$e';
+      _status = text;
     });
   }
 
@@ -98,8 +122,12 @@ class _SetupWizardPageState extends State<SetupWizardPage> {
     try {
       final token = CloudflareApi.normalizeToken(_token.text);
       final api = CloudflareApi(token);
-      final accounts = await api.accounts();
-      api.close();
+      final List<CfAccount> accounts;
+      try {
+        accounts = await api.accounts();
+      } finally {
+        api.close();
+      }
       if (accounts.isEmpty) throw const CloudflareException('No accounts');
       setState(() {
         _busy = false;
@@ -139,14 +167,19 @@ class _SetupWizardPageState extends State<SetupWizardPage> {
         fallbackUrl: _fallback.text.trim(),
       );
       final api = CloudflareApi(token);
-      final deployed = await api.deployWorker(
-        accountId: accountId,
-        scriptName: st.workerScriptName,
-        env: env,
-        customDomain:
-            _customDomain.text.trim().isEmpty ? null : _customDomain.text.trim(),
-      );
-      api.close();
+      final WorkerDeploy deployed;
+      try {
+        deployed = await api.deployWorker(
+          accountId: accountId,
+          scriptName: st.workerScriptName,
+          env: env,
+          customDomain: _customDomain.text.trim().isEmpty
+              ? null
+              : _customDomain.text.trim(),
+        );
+      } finally {
+        api.close();
+      }
       await SecureStore.saveWorkerUuid(uuid);
       st.workerDomain = deployed.domain;
       st.workerAccountId = deployed.accountId;
@@ -194,6 +227,25 @@ class _SetupWizardPageState extends State<SetupWizardPage> {
   }
 
   Future<void> _removeWorker() async {
+    final s = c.s;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(s.wizardDisconnectTitle),
+        content: Text(s.wizardDisconnectBody),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(s.cancel),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(s.wizardDisconnectWorker),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
     await SecureStore.deleteCloudflareToken();
     await SecureStore.deleteWorkerUuid();
     st.workerDomain = '';
@@ -201,12 +253,16 @@ class _SetupWizardPageState extends State<SetupWizardPage> {
     st.workerDeployed = false;
     if (st.xrayMode == XrayMode.worker) st.xrayMode = XrayMode.off;
     await c.persist();
+    if (!mounted) return;
     setState(() {
       _accounts = const [];
       _accountId = null;
       _tokenSaved = false;
       _status = '';
     });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(s.wizardDisconnected)),
+    );
   }
 
   @override
@@ -218,7 +274,8 @@ class _SetupWizardPageState extends State<SetupWizardPage> {
         body: Padding(
           padding: const EdgeInsets.all(20),
           child: Text(s.xrayAndroidOnly,
-              style: const TextStyle(color: VoidrauColors.muted, height: 1.6)),
+              style: TextStyle(
+                  color: VoidrauTheme.mutedOf(context), height: 1.6)),
         ),
       );
     }
@@ -231,8 +288,8 @@ class _SetupWizardPageState extends State<SetupWizardPage> {
             padding: const EdgeInsets.fromLTRB(20, 14, 20, 40),
             children: [
               Text(s.xrayHelp,
-                  style: const TextStyle(
-                      color: VoidrauColors.muted, height: 1.5)),
+                  style: TextStyle(
+                      color: VoidrauTheme.mutedOf(context), height: 1.5)),
               const SizedBox(height: 16),
               _modePicker(s),
               const SizedBox(height: 18),
@@ -271,7 +328,7 @@ class _SetupWizardPageState extends State<SetupWizardPage> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(s.xrayModeLabel,
-            style: const TextStyle(color: VoidrauColors.muted)),
+            style: TextStyle(color: VoidrauTheme.mutedOf(context))),
         const SizedBox(height: 8),
         SegmentedButton<XrayMode>(
           segments: [
@@ -291,7 +348,8 @@ class _SetupWizardPageState extends State<SetupWizardPage> {
             XrayMode.serverless => s.xrayServerlessHelp,
             XrayMode.off => '',
           },
-          style: const TextStyle(color: VoidrauColors.muted, height: 1.5),
+          style: TextStyle(
+              color: VoidrauTheme.mutedOf(context), height: 1.5),
         ),
       ],
     );
@@ -320,7 +378,8 @@ class _SetupWizardPageState extends State<SetupWizardPage> {
             ),
             const SizedBox(width: 10),
             TextButton.icon(
-              onPressed: () => Links.open(CloudflareApi.tokenCreationUrl()),
+              onPressed: () => Links.openChecked(
+                  context, CloudflareApi.tokenCreationUrl(), s.linkOpenFailed),
               icon: const Icon(Icons.open_in_new_rounded, size: 16),
               label: Text(s.wizardMakeToken),
             ),
@@ -328,8 +387,10 @@ class _SetupWizardPageState extends State<SetupWizardPage> {
         ),
         const SizedBox(height: 8),
         Text(s.wizardTokenHelp,
-            style: const TextStyle(
-                color: VoidrauColors.muted, fontSize: 12, height: 1.5)),
+            style: TextStyle(
+                color: VoidrauTheme.mutedOf(context),
+                fontSize: 12,
+                height: 1.5)),
       ],
       if (_accounts.isNotEmpty) ...[
         const SizedBox(height: 12),
@@ -393,7 +454,7 @@ class _SetupWizardPageState extends State<SetupWizardPage> {
         TextButton.icon(
           onPressed: _busy ? null : _removeWorker,
           icon: const Icon(Icons.delete_outline_rounded, size: 18),
-          label: Text(s.wizardRemoveWorker),
+          label: Text(s.wizardDisconnectWorker),
         ),
       ],
     ];
@@ -420,8 +481,10 @@ class _SetupWizardPageState extends State<SetupWizardPage> {
       ),
       const SizedBox(height: 8),
       Text(s.wizardWarpHelp,
-          style: const TextStyle(
-              color: VoidrauColors.muted, fontSize: 12, height: 1.5)),
+          style: TextStyle(
+              color: VoidrauTheme.mutedOf(context),
+              fontSize: 12,
+              height: 1.5)),
     ];
   }
 
