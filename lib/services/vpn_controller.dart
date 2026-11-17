@@ -206,6 +206,21 @@ class VpnController extends ChangeNotifier {
   StreamSubscription? _winLogs;
   bool _wantUp = false;
   bool _userDisconnect = false;
+
+  /// Generation counter (M6): every toggle / cancel / disconnect starts a new
+  /// generation. Async connect attempts capture the generation they started
+  /// in; their stale `_set` calls are dropped once a newer generation exists,
+  /// so a cancelled attempt can never land the orb on error afterwards.
+  int _generation = 0;
+
+  /// True while a license re-check is actually running, so the orb can show a
+  /// brief "checking…" state instead of hanging silently (M1).
+  bool licenseChecking = false;
+
+  /// Ticks once a second while connected. Only the uptime text listens to
+  /// this (m24) — the old 1s `notifyListeners()` rebuilt the whole
+  /// IndexedStack every second while connected.
+  final uptimeTick = ValueNotifier<int>(0);
   int _watchdogTries = 0;
   DateTime? _lastHealthy;
 
@@ -249,6 +264,10 @@ class VpnController extends ChangeNotifier {
         ..clear()
         ..addAll(list);
       notifyListeners();
+    }).catchError((e) {
+      // A missing/failed app list must not leave the page empty forever
+      // without a trace: keep the last list and record the failure.
+      _log('installed apps: $e');
     }));
     if (!Platform.isIOS) await _restoreForceUpdate(prefs);
     // Hand the native side the retired flag before anything can start a
@@ -286,9 +305,7 @@ class VpnController extends ChangeNotifier {
         _wantUp = true;
         _userDisconnect = false;
         _startStats();
-        _clock?.cancel();
-        _clock = Timer.periodic(
-            const Duration(seconds: 1), (_) => notifyListeners());
+        _startUptimeClock();
       }
     } catch (e) {
       _log('iOS status: $e');
@@ -468,11 +485,35 @@ class VpnController extends ChangeNotifier {
     } catch (e) {
       _log('update download failed: $e');
       downloadFailed = true;
-      toast = '$e';
+      toast = s.updateDownloadFailed;
       // Stay on the update screen so the user can just tap the button again;
       // the Telegram channel stays available elsewhere on the page.
     } finally {
       downloading = false;
+      notifyListeners();
+    }
+  }
+
+  /// Cached license verdict for [toggle]: re-checks against the Worker only
+  /// when the last check is stale (>10 min), the license is near expiry
+  /// (<1 day left), or no check has ever run. While a real check runs,
+  /// [licenseChecking] is true so the UI can show a brief "checking…" state.
+  Future<bool> _licenseOk() async {
+    final lic = LicenseService.instance;
+    final last = lic.lastCheckedAt;
+    final fresh = last != null &&
+        DateTime.now().toUtc().difference(last) <
+            const Duration(minutes: 10);
+    final farFromExpiry = lic.expiresAt == null ||
+        lic.expiresAt!.difference(DateTime.now().toUtc()) >
+            const Duration(days: 1);
+    if (fresh && farFromExpiry && lic.key != null) return lic.isActive;
+    licenseChecking = true;
+    notifyListeners();
+    try {
+      return await lic.check();
+    } finally {
+      licenseChecking = false;
       notifyListeners();
     }
   }
@@ -485,8 +526,10 @@ class VpnController extends ChangeNotifier {
       return;
     }
     // License gate: connecting requires an active (or graced) license.
-    if (snapshot.phase != EnginePhase.connected &&
-        !(await LicenseService.instance.check())) {
+    // The verdict is cached (M1): a fresh check (<10 min) or a license far
+    // from expiry is trusted without another 15s network round-trip on
+    // every orb tap.
+    if (snapshot.phase != EnginePhase.connected && !(await _licenseOk())) {
       toast = LicenseService.instance.lastError == 'session-revoked'
           ? s.sessionRevokedToast
           : s.licenseRequiredToast;
@@ -512,7 +555,11 @@ class VpnController extends ChangeNotifier {
     }
     // Any mid-flight state cancels the in-flight attempt so the orb never
     // becomes a dead spinner: the native/engine stop unwinds the pipeline.
+    // The cancel starts a new generation (M6): the in-flight attempt's late
+    // writes are dropped, and the stop's own completion only publishes the
+    // disconnected snapshot if nothing newer has started since.
     if (snapshot.isActive || busy) {
+      final gen = ++_generation;
       _wantUp = false;
       _userDisconnect = true;
       _watchdogTimer?.cancel();
@@ -521,7 +568,7 @@ class VpnController extends ChangeNotifier {
       _set(snapshot.copyWith(
           phase: EnginePhase.disconnecting, message: s.disconnecting));
       unawaited(engine.stop().whenComplete(() {
-        _set(const EngineSnapshot());
+        if (gen == _generation) _set(const EngineSnapshot());
       }));
       return;
     }
@@ -540,13 +587,13 @@ class VpnController extends ChangeNotifier {
   /// tunnel the core is already about to replace. Polling the exit through the
   /// proxy costs one HTTPS request; a teardown plus a fresh scan costs seconds.
   Future<({String ip, String country, String colo, int pingMs})?>
-      _awaitCoreRelocation(VpnSettings st) async {
+      _awaitCoreRelocation(VpnSettings st, int gen) async {
     if (!_coreEnforcesExit) return null;
     final deadline = DateTime.now().add(exitCoreGrace);
     while (DateTime.now().isBefore(deadline) && _wantUp) {
       await Future<void>.delayed(const Duration(seconds: 5));
       if (!_wantUp) return null;
-      final exit = await _probeExit();
+      final exit = await _probeExit(gen);
       final cc = exit?.country ?? '';
       if (matchesExitFilter(cc, st)) return exit;
       _rememberRejected(cc);
@@ -604,6 +651,9 @@ class VpnController extends ChangeNotifier {
   /// until the exit IP belongs to a country the user accepts.
   Future<void> connect() async {
     if (busy) return;
+    // A new attempt starts a new generation (M6): the previous attempt's
+    // late writes are dropped from here on.
+    final gen = ++_generation;
     if (Platform.isIOS) IosPolicy.normalize(settings);
     // Never open a tunnel on a build that has been retired.
     if (await _releaseGate()) return;
@@ -615,7 +665,7 @@ class VpnController extends ChangeNotifier {
     }
     _fallback = null;
     busy = true;
-    _set(snapshot.copyWith(
+    _setGen(gen, snapshot.copyWith(
       phase: EnginePhase.preparing,
       message: s.preparing,
       clearExit: true,
@@ -625,7 +675,7 @@ class VpnController extends ChangeNotifier {
           (Platform.isAndroid || Platform.isIOS)) {
         final ok = await engine.prepareVpn();
         if (!ok) {
-          _set(snapshot.copyWith(
+          _setGen(gen, snapshot.copyWith(
             phase: EnginePhase.error,
             message: s.needVpnPerm,
           ));
@@ -639,7 +689,7 @@ class VpnController extends ChangeNotifier {
       final dial = _pendingDial;
       _pendingDial = null;
       if (!exitRuleEnforced) {
-        await _runAttempt(endpoint: dial?.endpoint);
+        await _runAttempt(gen, endpoint: dial?.endpoint);
         return;
       }
       // A watchdog-triggered reconnect resumes the same exit search instead of
@@ -673,6 +723,7 @@ class VpnController extends ChangeNotifier {
         final hop = next;
         final hopProtocol = hop?.protocol;
         final outcome = await _runAttempt(
+          gen,
           endpoint: hop?.endpoint,
           epoch: epoch,
           only: hopProtocol == null
@@ -703,7 +754,7 @@ class VpnController extends ChangeNotifier {
             _exitTries >= settings.exitMaxTries) {
           _promptTimer?.cancel();
           _log('exit filter: $_exitTries tunnels rejected');
-          _set(snapshot.copyWith(
+          _setGen(gen, snapshot.copyWith(
             phase: EnginePhase.error,
             message: s.exitNotFound(exitFilterLabel),
             clearConnectedAt: true,
@@ -733,7 +784,8 @@ class VpnController extends ChangeNotifier {
   ///       user does not want, so the search should continue,
   ///   [AttemptOutcome.failed]   — no tunnel at all (this is a network error,
   ///       not an exit-country problem).
-  Future<AttemptOutcome> _runAttempt({
+  Future<AttemptOutcome> _runAttempt(
+    int gen, {
     String? endpoint,
     Protocol? only,
     int epoch = 0,
@@ -755,7 +807,7 @@ class VpnController extends ChangeNotifier {
       // Everything downstream — display, wait, pin — must name the protocol
       // that ran, or a saved pin would later re-dial the refused one.
       final dialProto = attempt.protocol;
-      _set(snapshot.copyWith(
+      _setGen(gen, snapshot.copyWith(
         phase: EnginePhase.scanning,
         protocol: dialProto.name,
         message: _rejectedExits.isEmpty
@@ -781,19 +833,21 @@ class VpnController extends ChangeNotifier {
         await engine.stop();
         continue;
       }
-      var up = await _waitConnected(dialProto);
+      var up = await _waitConnected(dialProto, gen);
       if (up && Platform.isIOS && _wantUp) {
         try {
           // Native readiness proves SOCKS; also prove the actual device route.
           await SocksProbe.proveDevice();
         } catch (e) {
           up = false;
-          _set(snapshot.copyWith(phase: EnginePhase.error, message: '$e'));
+          _setGen(gen, snapshot.copyWith(
+              phase: EnginePhase.error,
+              message: friendlyCoreError('$e', s)));
         }
       }
       if (!_wantUp) return AttemptOutcome.failed;
       if (up) {
-        final exit = await _probeExit();
+        final exit = await _probeExit(gen);
         final cc = exit?.country ?? '';
         // Only a real peer address is worth remembering: the colo code from a
         // trace (`FRA`, `IAD`) is not something the core can dial.
@@ -807,7 +861,7 @@ class VpnController extends ChangeNotifier {
           protocol: dialProto.name,
         );
         if (matchesExitFilter(cc, settings)) {
-          unawaited(_finalizeConnected(dialProto));
+          unawaited(_finalizeConnected(dialProto, gen));
           unawaited(_savePin(
             (endpoint: ep, protocol: dialProto.name),
             cc,
@@ -830,7 +884,7 @@ class VpnController extends ChangeNotifier {
         // own when the exit sits in a blocked country; tearing the tunnel down
         // at the first wrong answer fights that mechanism and is what makes a
         // filtered connect slow. Give it one grace window first.
-        final moved = await _awaitCoreRelocation(attempt);
+        final moved = await _awaitCoreRelocation(attempt, gen);
         if (moved != null) {
           _lastExit = (
             ip: moved.ip,
@@ -838,7 +892,7 @@ class VpnController extends ChangeNotifier {
             endpoint: ep,
             protocol: dialProto.name,
           );
-          unawaited(_finalizeConnected(dialProto));
+          unawaited(_finalizeConnected(dialProto, gen));
           unawaited(_savePin(
             (endpoint: ep, protocol: dialProto.name),
             moved.country,
@@ -846,7 +900,7 @@ class VpnController extends ChangeNotifier {
           return AttemptOutcome.accepted;
         }
         await engine.stop();
-        _set(snapshot.copyWith(
+        _setGen(gen, snapshot.copyWith(
           phase: EnginePhase.scanning,
           message: exitSearchStatus,
           clearConnectedAt: true,
@@ -869,7 +923,7 @@ class VpnController extends ChangeNotifier {
       // search honest instead of reporting a dead network. (Once the filter
       // has been switched off mid-search this branch is skipped, so a real
       // failure is still reported as a failure.)
-      _set(snapshot.copyWith(
+      _setGen(gen, snapshot.copyWith(
         phase: EnginePhase.scanning,
         message: exitSearchStatus,
         clearConnectedAt: true,
@@ -878,7 +932,7 @@ class VpnController extends ChangeNotifier {
       return AttemptOutcome.rejected;
     }
     _promptTimer?.cancel();
-    _set(snapshot.copyWith(
+    _setGen(gen, snapshot.copyWith(
       phase: EnginePhase.error,
       message: friendlyCoreError(lastError, s),
       clearConnectedAt: true,
@@ -888,14 +942,14 @@ class VpnController extends ChangeNotifier {
   }
 
   /// The tunnel is up *and* its exit is acceptable: publish the connected state.
-  Future<void> _finalizeConnected(Protocol proto) async {
+  Future<void> _finalizeConnected(Protocol proto, int gen) async {
     _watchdogTries = 0;
     _lastHealthy = DateTime.now();
     _promptTimer?.cancel();
     exitPrompt = false;
     _fallback = null;
     _exitSearchSince = null;
-    _set(snapshot.copyWith(
+    _setGen(gen, snapshot.copyWith(
       phase: EnginePhase.connected,
       protocol: snapshot.protocol.isEmpty ? proto.name : snapshot.protocol,
       message: snapshot.message.isEmpty ? s.active : snapshot.message,
@@ -916,17 +970,14 @@ class VpnController extends ChangeNotifier {
     }
     _statsTimer?.cancel();
     _startStats();
-    _clock?.cancel();
-    _clock = Timer.periodic(const Duration(seconds: 1), (_) {
-      notifyListeners();
-    });
+    _startUptimeClock();
   }
 
   /// Fresh exit lookup straight through the tunnel's own SOCKS listener. The
   /// dashboard poller has not started yet at this point, so without this the
   /// filter would judge the *previous* tunnel's country.
   Future<({String ip, String country, String colo, int pingMs})?>
-      _probeExit() async {
+      _probeExit(int gen) async {
     ({String ip, String country, String colo, int pingMs})? last;
     final deadline = DateTime.now().add(const Duration(seconds: 25));
     while (DateTime.now().isBefore(deadline) && _wantUp) {
@@ -944,7 +995,7 @@ class VpnController extends ChangeNotifier {
       await Future<void>.delayed(const Duration(milliseconds: 900));
     }
     if (last == null) return null;
-    _set(snapshot.copyWith(
+    _setGen(gen, snapshot.copyWith(
       ip: last.ip.isEmpty ? snapshot.ip : last.ip,
       country: last.country.isEmpty ? snapshot.country : last.country,
       location: last.colo.isEmpty ? snapshot.location : last.colo,
@@ -1099,12 +1150,14 @@ class VpnController extends ChangeNotifier {
   /// Worker/WARP exits are Cloudflare's, not a scanned gateway.
   Future<void> connectXray() async {
     if (busy) return;
+    // A new attempt starts a new generation (M6).
+    final gen = ++_generation;
     XrayEngine.requireSupported();
     if (await _releaseGate()) return;
     _wantUp = true;
     _userDisconnect = false;
     busy = true;
-    _set(snapshot.copyWith(
+    _setGen(gen, snapshot.copyWith(
       phase: EnginePhase.preparing,
       message: s.preparing,
       clearExit: true,
@@ -1133,7 +1186,7 @@ class VpnController extends ChangeNotifier {
           (Platform.isAndroid || Platform.isIOS)) {
         final ok = await engine.prepareVpn();
         if (!ok) {
-          _set(snapshot.copyWith(
+          _setGen(gen, snapshot.copyWith(
             phase: EnginePhase.error,
             message: s.needVpnPerm,
           ));
@@ -1158,9 +1211,9 @@ class VpnController extends ChangeNotifier {
       }
       if (!up || !_wantUp) {
         await xray.stop();
-        _set(snapshot.copyWith(
+        _setGen(gen, snapshot.copyWith(
           phase: EnginePhase.error,
-          message: up ? s.disconnecting : 'Xray timed out',
+          message: up ? s.disconnecting : s.xrayTimedOut,
         ));
         return;
       }
@@ -1169,16 +1222,18 @@ class VpnController extends ChangeNotifier {
       try {
         await SocksProbe.prove(port: settings.socksPort);
       } catch (e) {
+        // The raw error is in the log; the UI gets the localised sentence.
+        _log('xray prove failed: $e');
         await xray.stop();
-        _set(snapshot.copyWith(
+        _setGen(gen, snapshot.copyWith(
           phase: EnginePhase.error,
-          message: 'Xray tunnel carries no traffic: $e',
+          message: s.xrayNoTraffic,
         ));
         return;
       }
       _watchdogTries = 0;
       _lastHealthy = DateTime.now();
-      _set(snapshot.copyWith(
+      _setGen(gen, snapshot.copyWith(
         phase: EnginePhase.connected,
         protocol: 'xray-${settings.xrayMode.name}',
         message: s.active,
@@ -1188,22 +1243,19 @@ class VpnController extends ChangeNotifier {
       _log('xray connected: ${settings.xrayMode.name}');
       _statsTimer?.cancel();
       _startStats();
-      _clock?.cancel();
-      _clock = Timer.periodic(const Duration(seconds: 1), (_) {
-        notifyListeners();
-      });
+      _startUptimeClock();
     } on StateError catch (e) {
       // Missing Worker / WARP account / bad config: an honest error, not a
       // spinner. The wizard is where it gets fixed.
       _log('xray: $e');
-      _set(snapshot.copyWith(
+      _setGen(gen, snapshot.copyWith(
         phase: EnginePhase.error,
         message: e.message,
       ));
     } catch (e) {
       _log('xray: $e');
       await xray.stop();
-      _set(snapshot.copyWith(
+      _setGen(gen, snapshot.copyWith(
         phase: EnginePhase.error,
         message: '$e',
       ));
@@ -1215,6 +1267,7 @@ class VpnController extends ChangeNotifier {
 
   /// Tears an Xray tunnel down.
   Future<void> disconnectXray() async {
+    ++_generation;
     _wantUp = false;
     _userDisconnect = true;
     _watchdogTimer?.cancel();
@@ -1233,6 +1286,7 @@ class VpnController extends ChangeNotifier {
   }
 
   Future<void> disconnect() async {
+    ++_generation;
     _wantUp = false;
     _userDisconnect = true;
     _watchdogTries = 0;
@@ -1264,7 +1318,7 @@ class VpnController extends ChangeNotifier {
   /// to publish `connected`. On Android that state already includes the
   /// native data-plane proof; on Windows the engine proves traffic itself
   /// before flipping the phase.
-  Future<bool> _waitConnected(Protocol proto) async {
+  Future<bool> _waitConnected(Protocol proto, int gen) async {
     // Generous budget: the gateway scan on a filtered network is the slow
     // part (the reference client gives MASQUE 60s, then races the h2 carrier). Cutting
     // at 60s while the core is still mid-scan is what produced the endless
@@ -1289,7 +1343,7 @@ class VpnController extends ChangeNotifier {
         final st = await engine.status();
         final phase = st['phase']?.toString() ?? '';
         if (phase == 'connected') {
-          _set(snapshot.copyWith(
+          _setGen(gen, snapshot.copyWith(
             phase: EnginePhase.connected,
             endpoint: st['endpoint']?.toString() ?? snapshot.endpoint,
             protocol: st['protocol']?.toString() ?? proto.name,
@@ -1299,7 +1353,7 @@ class VpnController extends ChangeNotifier {
         }
         if (phase == 'error') {
           final msg = st['message']?.toString() ?? '';
-          _set(snapshot.copyWith(
+          _setGen(gen, snapshot.copyWith(
             phase: EnginePhase.error,
             message: friendlyCoreError(
                 msg.isEmpty ? snapshot.message : msg, s),
@@ -1311,13 +1365,13 @@ class VpnController extends ChangeNotifier {
         // Progress details for the spinner subtitle.
         final msg = st['message']?.toString() ?? '';
         if (msg.isNotEmpty && msg != snapshot.message) {
-          _set(snapshot.copyWith(message: msg));
+          _setGen(gen, snapshot.copyWith(message: msg));
         }
       } catch (_) {}
       if (Platform.isWindows) {
         final win = WindowsEngine.instance;
         if (win.phase == EnginePhase.connected) {
-          _set(snapshot.copyWith(
+          _setGen(gen, snapshot.copyWith(
             phase: EnginePhase.connected,
             endpoint: win.endpoint,
             protocol: win.protocol,
@@ -1326,7 +1380,7 @@ class VpnController extends ChangeNotifier {
           return true;
         }
         if (win.phase == EnginePhase.error) {
-          _set(snapshot.copyWith(
+          _setGen(gen, snapshot.copyWith(
             phase: EnginePhase.error,
             message: friendlyCoreError(win.message, s),
           ));
@@ -1384,7 +1438,8 @@ class VpnController extends ChangeNotifier {
             DateTime.now().difference(last).inSeconds >=
                 settings.stallTimeout) {
           _log('watchdog: stall ${settings.stallTimeout}s');
-          _set(snapshot.copyWith(phase: EnginePhase.error, message: 'stalled'));
+          _set(snapshot.copyWith(
+              phase: EnginePhase.error, message: s.watchdogStalled));
           _scheduleWatchdog(forceReconnect: true);
         }
       } finally {
@@ -1514,6 +1569,10 @@ class VpnController extends ChangeNotifier {
         (e) => e.name == event['phase'],
         orElse: () => snapshot.phase,
       );
+      // A status event from an engine the user just stopped must not move
+      // the orb (M6): after a cancel/disconnect only a 'disconnected' event
+      // is still meaningful; a late 'connected'/'error' is stale.
+      if (_userDisconnect && phase != EnginePhase.disconnected) return;
       final connectedAt = int.tryParse('${event['connectedAt'] ?? 0}') ?? 0;
       // A raw core error is English and names the core's own options; the
       // Connect page shows it as the status line, so translate the known
@@ -1647,6 +1706,22 @@ class VpnController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Generation-guarded [_set]: a snapshot write from an async attempt that
+  /// has since been superseded (cancelled, re-dialled) is dropped silently.
+  void _setGen(int gen, EngineSnapshot next) {
+    if (_disposed || gen != _generation) return;
+    snapshot = next;
+    notifyListeners();
+  }
+
+  /// (Re)starts the 1-second uptime tick. Only [uptimeTick] listeners (the
+  /// duration text on the Connect page) rebuild on each tick.
+  void _startUptimeClock() {
+    _clock?.cancel();
+    _clock = Timer.periodic(
+        const Duration(seconds: 1), (_) => uptimeTick.value++);
+  }
+
   void clearLogs() {
     logs.clear();
     notifyListeners();
@@ -1662,6 +1737,7 @@ class VpnController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    uptimeTick.dispose();
     _events?.cancel();
     _winLogs?.cancel();
     _updateTimer?.cancel();

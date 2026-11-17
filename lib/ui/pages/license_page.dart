@@ -34,7 +34,13 @@ class _LicensePageState extends State<VoidrauLicensePage> {
   Future<void> _activate({String? explicitKey}) async {
     final rawKey = explicitKey ?? _keyController.text.trim();
     final key = LicenseService.extractKey(rawKey) ?? rawKey;
-    if (key.isEmpty) return;
+    // m13: an empty key used to return silently — say what is missing.
+    if (key.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(s.licenseEnterKey)),
+      );
+      return;
+    }
     setState(() {
       _busy = true;
       _message = null;
@@ -43,7 +49,13 @@ class _LicensePageState extends State<VoidrauLicensePage> {
     if (!mounted) return;
     setState(() {
       _busy = false;
-      _message = ok ? s.licenseOk : s.licenseBadKey;
+      // M4: an offline failure is not an invalid key — check() returns false
+      // with lastError == 'network' when there is no connection at all.
+      _message = ok
+          ? s.licenseOk
+          : (LicenseService.instance.lastError == 'network'
+              ? s.licenseNoInternet
+              : s.licenseBadKey);
     });
     if (ok) {
       _keyController.clear();
@@ -92,16 +104,19 @@ class _LicensePageState extends State<VoidrauLicensePage> {
       _busy = true;
       _message = null;
     });
-    await Links.open(AppInfo.botStartUrl('trial'));
+    await Links.openChecked(
+        context, AppInfo.botStartUrl('trial'), s.linkOpenFailed);
     if (mounted) setState(() => _busy = false);
   }
 
   Future<void> _buy() async {
-    await Links.open(AppInfo.botStartUrl('buy'));
+    await Links.openChecked(
+        context, AppInfo.botStartUrl('buy'), s.linkOpenFailed);
   }
 
   Future<void> _referral() async {
-    await Links.open(AppInfo.botStartUrl('ref'));
+    await Links.openChecked(
+        context, AppInfo.botStartUrl('ref'), s.linkOpenFailed);
   }
 
   String _planLabel(String p) {
@@ -159,7 +174,7 @@ class _LicensePageState extends State<VoidrauLicensePage> {
             side: BorderSide(
               color: active
                   ? VoidrauColors.cyan.withValues(alpha: 0.3)
-                  : VoidrauColors.line,
+                  : VoidrauTheme.lineOf(context),
             ),
           ),
           child: Padding(
@@ -170,7 +185,9 @@ class _LicensePageState extends State<VoidrauLicensePage> {
                 Icon(
                   active ? Icons.verified_rounded : Icons.lock_outline_rounded,
                   size: 48,
-                  color: active ? VoidrauColors.cyan : VoidrauColors.muted,
+                  color: active
+                      ? VoidrauColors.cyan
+                      : VoidrauTheme.mutedOf(context),
                 ),
                 const SizedBox(height: 12),
                 Text(
@@ -180,24 +197,65 @@ class _LicensePageState extends State<VoidrauLicensePage> {
                 ),
                 const SizedBox(height: 8),
                 if (active && lic.remaining > Duration.zero) ...[
-                  Text(
-                    lic.formatRemaining(fa: s.isFa),
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w900,
-                      color: VoidrauColors.cyan,
-                    ),
+                  Builder(
+                    builder: (context) {
+                      final total = lic.plan == 'trial'
+                          ? const Duration(hours: 24)
+                          : const Duration(days: 30);
+                      final fraction =
+                          (lic.remaining.inSeconds / total.inSeconds)
+                              .clamp(0.0, 1.0);
+                      return SizedBox(
+                        width: 148,
+                        height: 148,
+                        child: Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            SizedBox(
+                              width: 148,
+                              height: 148,
+                              child: CircularProgressIndicator(
+                                value: fraction,
+                                strokeWidth: 9,
+                                backgroundColor:
+                                    VoidrauTheme.lineOf(context),
+                                valueColor:
+                                    const AlwaysStoppedAnimation<Color>(
+                                        VoidrauColors.cyan),
+                              ),
+                            ),
+                            Padding(
+                              padding: const EdgeInsets.all(20),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    lic.formatRemaining(fa: s.isFa),
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      fontSize: 20,
+                                      fontWeight: FontWeight.w900,
+                                      color: VoidrauColors.cyan,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    '${s.isFa ? 'تاریخ انقضا:' : 'Expiry:'} ${lic.formatExpiry(fa: s.isFa)}',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      color: VoidrauTheme.mutedOf(context),
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    '${s.isFa ? 'تاریخ انقضا:' : 'Expiry:'} ${lic.formatExpiry(fa: s.isFa)}',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      color: VoidrauColors.muted,
-                      fontSize: 13,
-                    ),
-                  ),
+                  const SizedBox(height: 12),
                   if (lic.plan != null) ...[
                     const SizedBox(height: 8),
                     Center(
@@ -222,17 +280,160 @@ class _LicensePageState extends State<VoidrauLicensePage> {
                       ),
                     ),
                   ],
+                  // m15: until the Worker reports a cap, the page must not
+                  // assert "1 of 1" — show the active count with an unknown
+                  // limit instead.
+                  const SizedBox(height: 12),
                   if (lic.maxUsers != null) ...[
-                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Text(
+                          s.licenseDevicesUsed,
+                          style: TextStyle(
+                            color: VoidrauTheme.mutedOf(context),
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const Spacer(),
+                        Text(
+                          '${lic.sessions.length} / ${lic.maxUsers!}',
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: LinearProgressIndicator(
+                        value: lic.maxUsers! > 0
+                            ? (lic.sessions.length / lic.maxUsers!)
+                                .clamp(0.0, 1.0)
+                            : 0,
+                        minHeight: 8,
+                        backgroundColor: VoidrauTheme.lineOf(context),
+                        valueColor: const AlwaysStoppedAnimation<Color>(
+                            VoidrauColors.cyan),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
                     Text(
                       s.sessionsUpToDevices(lic.maxUsers!),
                       textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        color: VoidrauColors.muted,
+                      style: TextStyle(
+                        color: VoidrauTheme.mutedOf(context),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ] else
+                    Text(
+                      s.sessionsActiveUnknown(lic.sessions.length),
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: VoidrauTheme.mutedOf(context),
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
+                  // Improvement 7: inline sessions preview with one-tap
+                  // remove (confirm dialog first, same as the Sessions page).
+                  // The separate Sessions page keeps working unchanged.
+                  if (lic.sessions.isNotEmpty) ...[
+                    const SizedBox(height: 16),
+                    Align(
+                      alignment: AlignmentDirectional.centerStart,
+                      child: Text(
+                        s.licenseSessionsPreview,
+                        style: const TextStyle(
+                            fontWeight: FontWeight.w700, fontSize: 14),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    ...lic.sessions.take(3).map(
+                          (sess) => ListTile(
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            leading: Icon(
+                              sess.platform == 'android'
+                                  ? Icons.phone_android_rounded
+                                  : sess.platform == 'windows'
+                                      ? Icons.computer_rounded
+                                      : Icons.devices_rounded,
+                              size: 20,
+                              color: VoidrauTheme.mutedOf(context),
+                            ),
+                            title: Text(
+                              sess.displayNameFor(fa: s.isFa),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontSize: 13.5),
+                            ),
+                            subtitle: Text(
+                              sess.platformLabelFor(fa: s.isFa),
+                              style: TextStyle(
+                                  color: VoidrauTheme.mutedOf(context),
+                                  fontSize: 12),
+                            ),
+                            trailing: IconButton(
+                              icon: const Icon(Icons.delete_outline_rounded,
+                                  size: 20),
+                              tooltip: s.sessionsDelete,
+                              constraints: const BoxConstraints(
+                                  minWidth: 48, minHeight: 48),
+                              onPressed: () async {
+                                final confirm = await showDialog<bool>(
+                                  context: context,
+                                  builder: (ctx) => AlertDialog(
+                                    title:
+                                        Text(s.sessionsDeleteTitle),
+                                    content: Text(s.sessionsDeleteBody(
+                                        sess.displayNameFor(fa: s.isFa))),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () =>
+                                            Navigator.of(ctx).pop(false),
+                                        child: Text(s.cancel),
+                                      ),
+                                      FilledButton(
+                                        onPressed: () =>
+                                            Navigator.of(ctx).pop(true),
+                                        child: Text(s.sessionsDelete),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                                if (confirm != true || !mounted) return;
+                                final ok = await LicenseService.instance
+                                    .revokeSession(sess.id);
+                                if (!context.mounted) return;
+                                setState(() {});
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(ok
+                                        ? s.sessionsDeleted
+                                        : s.sessionsDeleteFailed),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                    if (lic.sessions.length > 3)
+                      Align(
+                        alignment: AlignmentDirectional.centerStart,
+                        child: TextButton(
+                          onPressed: () {
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                  builder: (_) => const SessionsPage()),
+                            );
+                          },
+                          child: Text(s.sessionsTitle),
+                        ),
+                      ),
                   ],
                   if (lic.key != null) ...[
                     const SizedBox(height: 12),
@@ -243,15 +444,17 @@ class _LicensePageState extends State<VoidrauLicensePage> {
                         padding: const EdgeInsets.symmetric(
                             horizontal: 12, vertical: 8),
                         decoration: BoxDecoration(
-                          color: VoidrauColors.surface,
+                          color: VoidrauTheme.surfaceOf(context),
                           borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: VoidrauColors.line),
+                          border: Border.all(
+                              color: VoidrauTheme.lineOf(context)),
                         ),
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            const Icon(Icons.key_rounded,
-                                size: 16, color: VoidrauColors.muted),
+                            Icon(Icons.key_rounded,
+                                size: 16,
+                                color: VoidrauTheme.mutedOf(context)),
                             const SizedBox(width: 8),
                             Text(
                               lic.key!,
@@ -262,8 +465,9 @@ class _LicensePageState extends State<VoidrauLicensePage> {
                               ),
                             ),
                             const SizedBox(width: 8),
-                            const Icon(Icons.copy_rounded,
-                                size: 15, color: VoidrauColors.muted),
+                            Icon(Icons.copy_rounded,
+                                size: 15,
+                                color: VoidrauTheme.mutedOf(context)),
                           ],
                         ),
                       ),
@@ -273,8 +477,8 @@ class _LicensePageState extends State<VoidrauLicensePage> {
                   Text(
                     s.licenseInactiveBody,
                     textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      color: VoidrauColors.muted,
+                    style: TextStyle(
+                      color: VoidrauTheme.mutedOf(context),
                       height: 1.5,
                       fontSize: 13.5,
                     ),
@@ -363,11 +567,20 @@ class _LicensePageState extends State<VoidrauLicensePage> {
             Expanded(
               child: FilledButton(
                 onPressed: _busy ? null : () => _activate(),
-                child: Text(
-                  _busy
-                      ? (s.isFa ? '...' : '...')
-                      : s.licenseActivate,
-                ),
+                child: _busy
+                    ? Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(s.checking),
+                        ],
+                      )
+                    : Text(s.licenseActivate),
               ),
             ),
           ],
@@ -398,6 +611,7 @@ class _LicensePageState extends State<VoidrauLicensePage> {
           TextButton.icon(
             onPressed: () async {
               await LicenseService.instance.signOut();
+              if (!mounted) return;
               widget.onChanged();
               setState(() {});
             },

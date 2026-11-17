@@ -8,6 +8,7 @@ import '../../services/license_service.dart';
 import '../../services/links.dart';
 import '../../services/vpn_controller.dart';
 import '../../theme/voidrau_theme.dart';
+import '../widgets/mode_cards.dart';
 import '../widgets/telegram_button.dart';
 import 'chain_proxies_page.dart';
 import 'setup_wizard.dart';
@@ -24,162 +25,243 @@ class SettingsPage extends StatelessWidget {
     final u = c.update;
     // Paid license only: trial/referral users get a read-only page.
     final locked = !LicenseService.instance.isPaid;
-    final children = <Widget>[
-      if (locked)
-        const Padding(
-          padding: EdgeInsets.only(bottom: 12),
-          child: Text(
-            '🔒 تنظیمات برای لایسنس تستی/رفرال قفل است — برای تغییر، لایسنس خریداری کنید.',
-            style: TextStyle(color: VoidrauColors.coral, fontSize: 13),
-          ),
-        ),
-        Text(s.appearance, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
-        const SizedBox(height: 12),
-        _seg(st.theme.name, {
-          'system': s.themeSystem,
-          'dark': s.themeDark,
-          'light': s.themeLight,
-        }, (v) {
-          st.theme = ThemeChoice.values.firstWhere((e) => e.name == v);
-          c.persist();
-        }),
-        Padding(
-          padding: const EdgeInsets.only(top: 18, bottom: 8),
-          child: Text(s.language, style: const TextStyle(color: VoidrauColors.muted)),
-        ),
-        _seg(st.language.name, const {
-          'system': 'System',
-          'en': 'English',
-          'fa': 'فارسی',
-        }, (v) {
-          st.language = LanguageChoice.values.firstWhere((e) => e.name == v);
-          c.persist();
-        }),
-        Padding(
-          padding: const EdgeInsets.only(top: 18, bottom: 8),
-          child: Text(s.orbStyle, style: const TextStyle(color: VoidrauColors.muted)),
-        ),
-        _seg(st.orbStyle.name, {
-          'classic': s.orbClassic,
-          'mercury': s.orbMercury,
-        }, (v) {
-          st.orbStyle = OrbStyle.values.firstWhere((e) => e.name == v);
-          c.persist();
-        }),
-        if (!Platform.isIOS)
-          SwitchListTile(
-            value: st.notifications,
-            title: Text(s.notifications),
-            onChanged: (v) {
-              st.notifications = v;
-              c.persist();
-            },
-          ),
-        if (Platform.isAndroid)
-          ListTile(
-            title: Text(s.battery),
-            subtitle: Text(s.batteryHelp),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => c.engine.openBatterySettings(),
-          ),
-        ListTile(
-          title: Text(s.vpnSettings),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () => c.engine.openSystemVpnSettings(),
-        ),
-        const Divider(height: 32),
-        Text(s.updates, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
-        if (Platform.isIOS)
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(20, 12, 20, 40),
+      children: [
+        if (locked)
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            child: Text(s.isFa
-                ? 'نصب و به‌روزرسانی نسخهٔ iOS فقط از TestFlight یا App Store انجام می‌شود؛ فایل APK یا EXE روی آیفون نصب نمی‌شود.'
-                : 'Install and update iOS builds using TestFlight or the App Store, not APK/EXE downloads.'),
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Text(
+              s.settingsLocked,
+              style: const TextStyle(color: VoidrauColors.coral, fontSize: 13),
+            ),
           ),
-        ListTile(
-          title: Text(s.currentVersion),
-          trailing: Text(u?.current ?? AppInfo.version),
-        ),
-        if (!Platform.isIOS) ...[
-          SwitchListTile(
-            value: st.autoUpdate,
-            title: Text(s.autoUpdates),
-            subtitle: Text(s.autoUpdatesHelp),
-            onChanged: (v) {
-              st.autoUpdate = v;
+        // Appearance.
+        ..._lockedSection(
+          locked: locked,
+          children: [
+            Text(s.appearance,
+                style: const TextStyle(
+                    fontSize: 22, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 12),
+            _seg(st.theme.name, {
+              'system': s.themeSystem,
+              'dark': s.themeDark,
+              'light': s.themeLight,
+            }, (v) {
+              st.theme = ThemeChoice.values.firstWhere((e) => e.name == v);
               c.persist();
-            },
-          ),
-          SwitchListTile(
-            value: st.autoDownload,
-            title: Text(s.autoDownload),
-            onChanged: (v) {
-              st.autoDownload = v;
-              c.persist();
-            },
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-            child: Text(s.qsTile, style: const TextStyle(color: VoidrauColors.muted, fontSize: 12)),
-          ),
-          ListTile(
-            title: Text(s.latestVersion),
-            trailing: Text(u?.latest ?? '—'),
-          ),
-          if (u?.available == true)
+            }),
             Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Text(s.updateAvailable,
-                  style: const TextStyle(color: VoidrauColors.cyan)),
+              padding: const EdgeInsets.only(top: 18, bottom: 8),
+              child: Text(s.language,
+                  style: TextStyle(color: VoidrauTheme.mutedOf(context))),
             ),
-          if (u?.notes.isNotEmpty == true)
-            Container(
-              width: double.infinity,
-              margin: const EdgeInsets.only(bottom: 12),
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: VoidrauColors.surface,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: VoidrauColors.line),
+            _seg(st.language.name, const {
+              'system': 'System',
+              'en': 'English',
+              'fa': 'فارسی',
+            }, (v) {
+              st.language =
+                  LanguageChoice.values.firstWhere((e) => e.name == v);
+              c.persist();
+            }),
+            Padding(
+              padding: const EdgeInsets.only(top: 18, bottom: 8),
+              child: Text(s.orbStyle,
+                  style: TextStyle(color: VoidrauTheme.mutedOf(context))),
+            ),
+            _seg(st.orbStyle.name, {
+              'classic': s.orbClassic,
+              'mercury': s.orbMercury,
+            }, (v) {
+              st.orbStyle = OrbStyle.values.firstWhere((e) => e.name == v);
+              c.persist();
+            }),
+            if (!Platform.isIOS)
+              SwitchListTile(
+                value: st.notifications,
+                title: Text(s.notifications),
+                onChanged: (v) {
+                  st.notifications = v;
+                  c.persist();
+                },
               ),
-              child: Text(u!.notes, style: const TextStyle(fontSize: 13, height: 1.4)),
+            if (Platform.isAndroid)
+              ListTile(
+                title: Text(s.battery),
+                subtitle: Text(s.batteryHelp),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => c.engine.openBatterySettings(),
+              ),
+            ListTile(
+              title: Text(s.vpnSettings),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => c.engine.openSystemVpnSettings(),
             ),
-          FilledButton(
-            onPressed: () async {
-              await c.refreshUpdate(force: true);
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                      c.releaseCheckFailed
-                          ? s.updateFailed
-                          : (c.update?.available == true
-                              ? s.updateAvailable
-                              : s.upToDate),
+          ],
+        ),
+        // ── Xray engine (Android only) ─────────────────────────────────
+        // m29: this used to sit at the very bottom, after the Telegram
+        // buttons. It now comes before Updates — it is a connection setting,
+        // not an afterthought. Aether stays the default everywhere; the
+        // Xray modes are an opt-in second engine, so the section is hidden
+        // on Windows/iOS entirely.
+        if (Platform.isAndroid)
+          ..._lockedSection(
+            locked: locked,
+            children: [
+              const SizedBox(height: 24),
+              Text(s.xrayTitle,
+                  style: const TextStyle(
+                      fontSize: 22, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 8),
+              Text(s.xrayHelp,
+                  style: TextStyle(
+                      color: VoidrauTheme.mutedOf(context), height: 1.5)),
+              const SizedBox(height: 12),
+              XrayModeCards(
+                mode: st.xrayMode,
+                onChanged: (mode) {
+                  st.xrayMode = mode;
+                  c.persist();
+                },
+              ),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => SetupWizardPage(controller: c),
+                  ),
+                ),
+                icon: const Icon(Icons.cloud_upload_rounded, size: 18),
+                label: Text(s.xrayTitle),
+              ),
+              const SizedBox(height: 8),
+              // Chain proxies only exist for Xray: hide the entry while Aether
+              // is the selected engine — the list would silently do nothing.
+              if (st.xrayMode != XrayMode.off)
+                OutlinedButton.icon(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => ChainProxiesPage(controller: c),
                     ),
                   ),
-                );
-              }
-            },
-            child: Text(s.checkUpdates),
+                  icon: const Icon(Icons.link_rounded, size: 18),
+                  label: Text(s.chainTitle),
+                ),
+            ],
           ),
-          const SizedBox(height: 12),
-        ],
-        // Community links; iOS updates remain managed by Apple.
+        // Updates.
+        ..._lockedSection(
+          locked: locked,
+          children: [
+            const Divider(height: 32),
+            Text(s.updates,
+                style: const TextStyle(
+                    fontSize: 22, fontWeight: FontWeight.w700)),
+            if (Platform.isIOS)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Text(s.isFa
+                    ? 'نصب و به‌روزرسانی نسخهٔ iOS فقط از TestFlight یا App Store انجام می‌شود؛ فایل APK یا EXE روی آیفون نصب نمی‌شود.'
+                    : 'Install and update iOS builds using TestFlight or the App Store, not APK/EXE downloads.'),
+              ),
+            ListTile(
+              title: Text(s.currentVersion),
+              trailing: Text(u?.current ?? AppInfo.version),
+            ),
+            if (!Platform.isIOS) ...[
+              SwitchListTile(
+                value: st.autoUpdate,
+                title: Text(s.autoUpdates),
+                subtitle: Text(s.autoUpdatesHelp),
+                onChanged: (v) {
+                  st.autoUpdate = v;
+                  c.persist();
+                },
+              ),
+              SwitchListTile(
+                value: st.autoDownload,
+                title: Text(s.autoDownload),
+                onChanged: (v) {
+                  st.autoDownload = v;
+                  c.persist();
+                },
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                child: Text(s.qsTile,
+                    style: TextStyle(
+                        color: VoidrauTheme.mutedOf(context), fontSize: 12)),
+              ),
+              ListTile(
+                title: Text(s.latestVersion),
+                trailing: Text(u?.latest ?? '—'),
+              ),
+              if (u?.available == true)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(s.updateAvailable,
+                      style: const TextStyle(color: VoidrauColors.cyan)),
+                ),
+              if (u?.notes.isNotEmpty == true)
+                Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.only(bottom: 12),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: VoidrauTheme.surfaceOf(context),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: VoidrauTheme.lineOf(context)),
+                  ),
+                  child: Text(u!.notes,
+                      style: const TextStyle(fontSize: 13, height: 1.4)),
+                ),
+              FilledButton(
+                onPressed: () async {
+                  await c.refreshUpdate(force: true);
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          c.releaseCheckFailed
+                              ? s.updateFailed
+                              : (c.update?.available == true
+                                  ? s.updateAvailable
+                                  : s.upToDate),
+                        ),
+                      ),
+                    );
+                  }
+                },
+                child: Text(s.checkUpdates),
+              ),
+              const SizedBox(height: 12),
+            ],
+          ],
+        ),
+        // Community links — plain links, not settings, so they stay usable
+        // even on the locked (trial) page. A failed open shows a toast
+        // instead of failing silently (m25).
+        const SizedBox(height: 8),
         FilledButton.tonalIcon(
-          onPressed: () => Links.openTelegram(),
+          onPressed: () =>
+              Links.openTelegramChecked(context, s.linkOpenFailed),
           icon: const Icon(Icons.send_rounded, size: 18),
           label: Text('${s.openTelegram} · ${AppInfo.telegramHandle}'),
         ),
         const SizedBox(height: 8),
         TextButton.icon(
-          onPressed: () => Links.openTelegram(),
+          onPressed: () =>
+              Links.openTelegramChecked(context, s.linkOpenFailed),
           icon: const Icon(Icons.open_in_new, size: 16),
           label: Text(s.openRelease),
         ),
         const SizedBox(height: 8),
         FilledButton.icon(
-          onPressed: () => Links.openBot(),
+          onPressed: () => Links.openBotChecked(context, s.linkOpenFailed),
           icon: const Icon(Icons.smart_button_rounded, size: 18),
           label: Text(s.getFromBot),
         ),
@@ -187,93 +269,67 @@ class SettingsPage extends StatelessWidget {
           contentPadding: EdgeInsets.zero,
           leading: TelegramButton(
             size: 30,
-            onPressed: () => Links.openTelegram(),
+            onPressed: () =>
+                Links.openTelegramChecked(context, s.linkOpenFailed),
           ),
           title: Text('${s.aboutChannel} · ${AppInfo.telegramHandle}'),
           subtitle: Text(s.aboutChannelCredit),
-          onTap: () => Links.openTelegram(),
+          onTap: () =>
+              Links.openTelegramChecked(context, s.linkOpenFailed),
         ),
         const SizedBox(height: 8),
         Container(
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
-            color: VoidrauColors.surface,
+            color: VoidrauTheme.surfaceOf(context),
             borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: VoidrauColors.line),
+            border: Border.all(color: VoidrauTheme.lineOf(context)),
           ),
           child: Row(
             children: [
-              const Icon(Icons.info_outline, size: 18, color: VoidrauColors.muted),
+              Icon(Icons.info_outline,
+                  size: 18, color: VoidrauTheme.mutedOf(context)),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   s.isFa
                       ? 'آیدی کانال: ${AppInfo.telegramHandle} — ${AppInfo.telegramUrl}'
                       : 'Channel ID: ${AppInfo.telegramHandle} — ${AppInfo.telegramUrl}',
-                  style: const TextStyle(fontSize: 12, color: VoidrauColors.muted),
+                  style: TextStyle(
+                      fontSize: 12, color: VoidrauTheme.mutedOf(context)),
                 ),
               ),
             ],
           ),
         ),
-      ];
-
-    // ── Xray engine (Android only) ─────────────────────────────────────
-    // Aether stays the default everywhere; the Xray modes are an opt-in
-    // second engine, so the section is hidden on Windows/iOS entirely.
-    if (Platform.isAndroid) {
-      children.addAll([
-        const SizedBox(height: 24),
-        Text(s.xrayTitle,
-            style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
-        const SizedBox(height: 8),
-        Text(s.xrayHelp,
-            style: const TextStyle(color: VoidrauColors.muted, height: 1.5)),
-        const SizedBox(height: 12),
-        _seg(st.xrayMode.name, {
-          'off': s.xrayOff,
-          'worker': s.xrayWorker,
-          'warp': s.xrayWarp,
-          'serverless': s.xrayServerless,
-        }, (v) {
-          st.xrayMode = XrayMode.values.firstWhere((e) => e.name == v);
-          c.persist();
-        }),
-        const SizedBox(height: 12),
-        FilledButton.icon(
-          onPressed: () => Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (_) => SetupWizardPage(controller: c),
-            ),
-          ),
-          icon: const Icon(Icons.cloud_upload_rounded, size: 18),
-          label: Text(s.xrayTitle),
-        ),
-        const SizedBox(height: 8),
-        // Chain proxies only exist for Xray: hide the entry while Aether
-        // is the selected engine — the list would silently do nothing.
-        if (st.xrayMode != XrayMode.off)
-          OutlinedButton.icon(
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute(
-                builder: (_) => ChainProxiesPage(controller: c),
-              ),
-            ),
-            icon: const Icon(Icons.link_rounded, size: 18),
-            label: Text(s.chainTitle),
-          ),
-      ]);
-    }
-    return AbsorbPointer(
-      absorbing: locked,
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 40),
-        children: children,
-      ),
+      ],
     );
   }
 
-  Widget _seg(String value, Map<String, String> items, ValueChanged<String> onChanged) {
+  /// m28: a settings section whose controls go inert (and dim) when the page
+  /// is locked, without an AbsorbPointer over the whole list — scroll drags
+  /// still reach the ListView.
+  List<Widget> _lockedSection({
+    required bool locked,
+    required List<Widget> children,
+  }) {
+    if (!locked) return children;
+    return [
+      IgnorePointer(
+        ignoring: true,
+        child: Opacity(
+          opacity: 0.55,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: children,
+          ),
+        ),
+      ),
+    ];
+  }
+
+  Widget _seg(String value, Map<String, String> items,
+      ValueChanged<String> onChanged) {
     return Wrap(
       spacing: 8,
       children: items.entries

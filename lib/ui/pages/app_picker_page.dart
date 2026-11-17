@@ -34,6 +34,23 @@ class _AppPickerPageState extends State<AppPickerPage> {
     final c = widget.controller;
     selected = {...c.settings.splitApps};
     apps = SplitRules.parseApps(c.apps);
+    c.addListener(_onControllerChanged);
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onControllerChanged);
+    super.dispose();
+  }
+
+  /// The platform app list arrives asynchronously (boot() + m23's
+  /// installedApps fetch); refresh the rows when it lands instead of
+  /// keeping the empty snapshot from initState.
+  void _onControllerChanged() {
+    final fresh = SplitRules.parseApps(widget.controller.apps);
+    final changed = fresh.length != apps.length ||
+        !fresh.every((a) => apps.any((b) => b.id == a.id));
+    if (changed && mounted) setState(() => apps = fresh);
   }
 
   List<SplitApp> get visible => SplitRules.visibleApps(
@@ -43,11 +60,14 @@ class _AppPickerPageState extends State<AppPickerPage> {
         selected: selected,
       );
 
-  void _save() {
+  /// Persists the current selection. [toast] is only for the explicit
+  /// Apply button — every toggle auto-saves silently (M3b), so Android back
+  /// no longer discards the selection.
+  void _save({bool toast = false}) {
     final c = widget.controller;
     c.settings.splitApps = selected.toList()..sort();
     c.persist();
-    c.notifyToast(c.s.splitApplied);
+    if (toast) c.notifyToast(c.s.splitApplied);
   }
 
   @override
@@ -63,7 +83,7 @@ class _AppPickerPageState extends State<AppPickerPage> {
         actions: [
           TextButton(
             onPressed: () {
-              _save();
+              _save(toast: true);
               Navigator.pop(context);
             },
             child: Text(s.apply),
@@ -79,7 +99,7 @@ class _AppPickerPageState extends State<AppPickerPage> {
                 hintText: s.searchApps,
                 prefixIcon: const Icon(Icons.search),
                 filled: true,
-                fillColor: VoidrauColors.surface,
+                fillColor: VoidrauTheme.surfaceOf(context),
                 border:
                     OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
               ),
@@ -89,13 +109,13 @@ class _AppPickerPageState extends State<AppPickerPage> {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 14),
             child: Align(
-              alignment: Alignment.centerLeft,
+              alignment: AlignmentDirectional.centerStart,
               child: Text(
                 mode == SplitMode.exclude
                     ? s.splitAppsExcludeHint
                     : s.splitAppsIncludeHint,
-                style:
-                    const TextStyle(color: VoidrauColors.muted, fontSize: 12),
+                style: TextStyle(
+                    color: VoidrauTheme.mutedOf(context), fontSize: 12),
               ),
             ),
           ),
@@ -103,33 +123,42 @@ class _AppPickerPageState extends State<AppPickerPage> {
             Padding(
               padding: const EdgeInsets.all(16),
               child: Text(s.splitPerAppUnsupported,
-                  style: const TextStyle(color: VoidrauColors.muted)),
+                  style: TextStyle(color: VoidrauTheme.mutedOf(context))),
             )
           else ...[
             Wrap(
               spacing: 4,
               children: [
                 TextButton(
-                  onPressed: () => setState(() {
-                    selected.addAll(rows.map((e) => e.id));
-                  }),
+                  onPressed: () {
+                    setState(() {
+                      selected.addAll(rows.map((e) => e.id));
+                    });
+                    _save();
+                  },
                   child: Text(s.selectAll),
                 ),
                 TextButton(
-                  onPressed: () => setState(() {
-                    for (final app in rows) {
-                      selected.remove(app.id);
-                    }
-                  }),
+                  onPressed: () {
+                    setState(() {
+                      for (final app in rows) {
+                        selected.remove(app.id);
+                      }
+                    });
+                    _save();
+                  },
                   child: Text(s.clearAll),
                 ),
                 // "Everything but these" is the useful gesture in exclude mode:
                 // selecting three apps and letting the rest go direct is the
                 // same as inverting a list of the two that must not.
                 TextButton(
-                  onPressed: () => setState(() {
-                    selected = SplitRules.invertSelection(selected, rows);
-                  }),
+                  onPressed: () {
+                    setState(() {
+                      selected = SplitRules.invertSelection(selected, rows);
+                    });
+                    _save();
+                  },
                   child: Text(s.appInvert),
                 ),
                 if (systemCount > 0)
@@ -143,7 +172,7 @@ class _AppPickerPageState extends State<AppPickerPage> {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
               child: Align(
-                alignment: Alignment.centerLeft,
+                alignment: AlignmentDirectional.centerStart,
                 child: Text('${selected.length} ${s.selected}',
                     style: const TextStyle(
                         color: VoidrauColors.cyan, fontSize: 12.5)),
@@ -155,8 +184,8 @@ class _AppPickerPageState extends State<AppPickerPage> {
                   : rows.isEmpty
                       ? Center(
                           child: Text(s.appSearchEmpty,
-                              style: const TextStyle(
-                                  color: VoidrauColors.muted)),
+                              style: TextStyle(
+                                  color: VoidrauTheme.mutedOf(context))),
                         )
                       : ListView.builder(
                           itemCount: rows.length,
@@ -170,16 +199,20 @@ class _AppPickerPageState extends State<AppPickerPage> {
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis),
                               secondary: app.system
-                                  ? const Icon(Icons.phone_android,
-                                      size: 18, color: VoidrauColors.muted)
+                                  ? Icon(Icons.phone_android,
+                                      size: 18,
+                                      color: VoidrauTheme.mutedOf(context))
                                   : null,
-                              onChanged: (v) => setState(() {
-                                if (v == true) {
-                                  selected.add(app.id);
-                                } else {
-                                  selected.remove(app.id);
-                                }
-                              }),
+                              onChanged: (v) {
+                                setState(() {
+                                  if (v == true) {
+                                    selected.add(app.id);
+                                  } else {
+                                    selected.remove(app.id);
+                                  }
+                                });
+                                _save();
+                              },
                             );
                           },
                         ),
@@ -202,6 +235,7 @@ class _AppPickerPageState extends State<AppPickerPage> {
               final path = await _askPath(context, s.addExe);
               if (path != null && path.trim().isNotEmpty) {
                 setState(() => selected.add(path.trim()));
+                _save();
               }
             },
             icon: const Icon(Icons.add, size: 18),
@@ -216,7 +250,10 @@ class _AppPickerPageState extends State<AppPickerPage> {
                       title: Text(e),
                       trailing: IconButton(
                         icon: const Icon(Icons.close, size: 18),
-                        onPressed: () => setState(() => selected.remove(e)),
+                        onPressed: () {
+                          setState(() => selected.remove(e));
+                          _save();
+                        },
                       ),
                     ))
                 .toList(),

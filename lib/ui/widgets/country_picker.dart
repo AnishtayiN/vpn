@@ -109,7 +109,7 @@ class ExitFilterBadge extends StatelessWidget {
               ? Icons.flag_outlined
               : Icons.block,
           size: 13,
-          color: VoidrauColors.muted,
+          color: VoidrauTheme.mutedOf(context),
         ),
         const SizedBox(width: 6),
         for (final code in codes.take(4))
@@ -123,12 +123,12 @@ class ExitFilterBadge extends StatelessWidget {
             c.exitFilterLabel,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(color: VoidrauColors.muted, fontSize: 12),
+            style: TextStyle(color: VoidrauTheme.mutedOf(context), fontSize: 12),
           ),
         ),
         const SizedBox(width: 4),
         Text(s.exitFilter,
-            style: const TextStyle(color: VoidrauColors.muted, fontSize: 10)),
+            style: TextStyle(color: VoidrauTheme.mutedOf(context), fontSize: 10)),
       ],
     );
   }

@@ -36,7 +36,13 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
   Future<void> _activate({String? explicitKey}) async {
     final rawKey = explicitKey ?? _keyController.text.trim();
     final key = LicenseService.extractKey(rawKey) ?? rawKey;
-    if (key.isEmpty) return;
+    // m13: an empty key used to return silently — say what is missing.
+    if (key.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(s.licenseEnterKey)),
+      );
+      return;
+    }
     setState(() {
       _busy = true;
       _message = null;
@@ -50,9 +56,12 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
           ? null
           : (_limitError != null
               ? null
-              : LicenseService.instance.lastError == 'session-revoked'
-                  ? s.sessionRevoked
-                  : s.licenseBadKey);
+              : LicenseService.instance.lastError == 'network'
+                  // M4: offline is not an invalid key.
+                  ? s.licenseNoInternet
+                  : LicenseService.instance.lastError == 'session-revoked'
+                      ? s.sessionRevoked
+                      : s.licenseBadKey);
     });
     if (ok) widget.onUnlocked();
   }
@@ -153,8 +162,8 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
                       : 'Enter your license key to connect.\n'
                           'Free 24h trial and licenses are available via the Telegram bot.',
                   textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: VoidrauColors.muted,
+                  style: TextStyle(
+                    color: VoidrauTheme.mutedOf(context),
                     fontSize: 13.5,
                     height: 1.55,
                   ),
@@ -171,7 +180,7 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
                   decoration: InputDecoration(
                     hintText: 'VDRV-XXXX-XXXX-XXXX',
                     filled: true,
-                    fillColor: VoidrauColors.surface,
+                    fillColor: VoidrauTheme.surfaceOf(context),
                     prefixIcon: const Icon(Icons.vpn_key_rounded, size: 20),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
@@ -270,8 +279,8 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
                             _limitError!.maxUsers,
                           ),
                           textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: VoidrauColors.muted,
+                          style: TextStyle(
+                            color: VoidrauTheme.mutedOf(context),
                             fontSize: 13,
                           ),
                         ),
@@ -279,8 +288,8 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
                         Text(
                           s.sessionLimitBody,
                           textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: VoidrauColors.muted,
+                          style: TextStyle(
+                            color: VoidrauTheme.mutedOf(context),
                             fontSize: 13,
                             height: 1.5,
                           ),
@@ -300,7 +309,7 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
                                         CrossAxisAlignment.start,
                                     children: [
                                       Text(
-                                        session.displayName,
+                                        session.displayNameFor(fa: s.isFa),
                                         style: const TextStyle(
                                             fontWeight: FontWeight.w700,
                                             fontSize: 13),
@@ -308,8 +317,8 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
                                       if (seen != null)
                                         Text(
                                           '${s.sessionsLastActive} ${JalaliDate.fromDateTime(seen.toLocal()).formatReadable()}',
-                                          style: const TextStyle(
-                                            color: VoidrauColors.muted,
+                                          style: TextStyle(
+                                            color: VoidrauTheme.mutedOf(context),
                                             fontSize: 12,
                                           ),
                                         ),
@@ -328,8 +337,8 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
                         }),
                         const SizedBox(height: 4),
                         OutlinedButton.icon(
-                          onPressed: () =>
-                              Links.open(AppInfo.botStartUrl('sessions')),
+                          onPressed: () => Links.openChecked(context,
+                              AppInfo.botStartUrl('sessions'), s.linkOpenFailed),
                           icon: const Icon(Icons.telegram, size: 18),
                           label: Text(s.sessionsManageInBot),
                         ),
@@ -337,8 +346,8 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
                         Text(
                           s.sessionLimitRetry,
                           textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: VoidrauColors.muted,
+                          style: TextStyle(
+                            color: VoidrauTheme.mutedOf(context),
                             fontSize: 12,
                           ),
                         ),
@@ -358,10 +367,15 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
                             color: Colors.white,
                           ),
                         )
-                      : const Icon(Icons.arrow_forward_rounded, size: 18),
+                      : Icon(
+                          Directionality.of(context) == TextDirection.rtl
+                              ? Icons.arrow_back_rounded
+                              : Icons.arrow_forward_rounded,
+                          size: 18,
+                        ),
                   label: Text(
                     _busy
-                        ? (s.isFa ? 'در حال بررسی…' : 'Checking…')
+                        ? s.checking
                         : (s.isFa ? 'ورود به برنامه' : 'Enter application'),
                     style: const TextStyle(fontWeight: FontWeight.w700),
                   ),
@@ -378,7 +392,8 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
                 const Divider(),
                 const SizedBox(height: 14),
                 FilledButton.tonalIcon(
-                  onPressed: () => Links.openBot(),
+                  onPressed: () =>
+                      Links.openBotChecked(context, s.linkOpenFailed),
                   icon: const Icon(Icons.smart_button_rounded, size: 20),
                   label: Text(
                     s.isFa
@@ -389,11 +404,12 @@ class _LicenseGatePageState extends State<LicenseGatePage> {
                 ),
                 const SizedBox(height: 8),
                 TextButton.icon(
-                  onPressed: () => Links.openTelegram(),
+                  onPressed: () =>
+                      Links.openTelegramChecked(context, s.linkOpenFailed),
                   icon: const Icon(Icons.telegram, size: 20),
                   label: Text(
                     '${s.telegram} (${AppInfo.telegramHandle})',
-                    style: const TextStyle(color: VoidrauColors.muted),
+                    style: TextStyle(color: VoidrauTheme.mutedOf(context)),
                   ),
                 ),
               ],

@@ -85,18 +85,22 @@ class _HomeShellState extends State<HomeShell> {
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                         decoration: BoxDecoration(
-                          color: VoidrauColors.surface,
+                          color: VoidrauTheme.surfaceOf(context),
                           borderRadius: BorderRadius.circular(20),
-                          border: Border.all(color: VoidrauColors.line),
+                          border: Border.all(color: VoidrauTheme.lineOf(context)),
                         ),
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Icon(Icons.public, size: 14, color: VoidrauColors.muted),
+                            Icon(Icons.public,
+                                size: 14,
+                                color: VoidrauTheme.mutedOf(context)),
                             const SizedBox(width: 6),
                             Text(
                               s.isFa ? 'پیش‌فرض: هر کشوری (Any Country)' : 'Default: Any Country',
-                              style: const TextStyle(fontSize: 12, color: VoidrauColors.muted),
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color: VoidrauTheme.mutedOf(context)),
                             ),
                           ],
                         ),
@@ -134,6 +138,10 @@ class _HomeShellState extends State<HomeShell> {
                     },
                     child: Text(s.wgHintSkip),
                   ),
+                  // M12: trial/referral users cannot change the protocol
+                  // (Config/Settings are locked for them), so offering to
+                  // apply WireGuard here would promise what the app refuses.
+                  if (LicenseService.instance.isPaid)
                   FilledButton.icon(
                     onPressed: () async {
                       // Apply WireGuard protocol
@@ -209,8 +217,8 @@ class _HomeShellState extends State<HomeShell> {
               // enter them at all (user request).
               if ((i == 1 || i == 4) && !LicenseService.instance.isPaid) {
                 Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                  content: Text('🔒 این بخش قفل است — لایسنس خریداری کنید'),
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text(s.settingsLocked),
                 ));
                 return;
               }
@@ -226,7 +234,8 @@ class _HomeShellState extends State<HomeShell> {
               Center(
                 child: TelegramButton(
                   tooltip: '${s.telegram} · ${AppInfo.telegramHandle}',
-                  onPressed: () => Links.openTelegram(),
+                  onPressed: () =>
+                      Links.openTelegramChecked(context, s.linkOpenFailed),
                 ),
               ),
               const SizedBox(width: 6),
@@ -340,7 +349,10 @@ class _Drawer extends StatelessWidget {
         selected: active,
         leading: showLock
             ? const Icon(Icons.lock_outline_rounded, color: VoidrauColors.coral)
-            : Icon(icon, color: active ? VoidrauColors.cyan : VoidrauColors.muted),
+            : Icon(icon,
+                color: active
+                    ? VoidrauColors.cyan
+                    : VoidrauTheme.mutedOf(context)),
         title: Text(label),
         trailing: badge
             ? const CircleAvatar(
@@ -379,22 +391,25 @@ class _Drawer extends StatelessWidget {
             ListTile(
               leading: TelegramButton(
                 size: 30,
-                onPressed: () => Links.openTelegram(),
+                onPressed: () =>
+                    Links.openTelegramChecked(context, s.linkOpenFailed),
               ),
               title: const Text(AppInfo.telegramHandle),
               subtitle: Text(s.telegram),
-              onTap: () => Links.openTelegram(),
+              onTap: () =>
+                  Links.openTelegramChecked(context, s.linkOpenFailed),
             ),
             Padding(
               padding: const EdgeInsets.all(16),
               child: Row(
                 children: [
                   Text(
-                    phase.name,
-                    style: const TextStyle(color: VoidrauColors.muted),
+                    s.phaseLabel(phase.name),
+                    style: TextStyle(color: VoidrauTheme.mutedOf(context)),
                   ),
                   const Spacer(),
-                  Text('v$version', style: const TextStyle(color: VoidrauColors.muted)),
+                  Text('v$version',
+                      style: TextStyle(color: VoidrauTheme.mutedOf(context))),
                 ],
               ),
             ),

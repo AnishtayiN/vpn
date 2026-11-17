@@ -191,14 +191,15 @@ class VpnSettings {
     this.routeDirect = const [],
     this.routeBlock = const [],
     this.theme = ThemeChoice.dark,
-    this.language = LanguageChoice.system,
+    this.language = LanguageChoice.fa,
     this.autoUpdate = true,
     this.autoDownload = false,
     this.notifications = true,
     this.watchdog = true,
     this.orbStyle = OrbStyle.mercury,
-    // The out-of-the-box rule is "any IP but Iran" (README, exit_filter_test):
-    // an unknown stored name must never silently disable the filter either.
+    // The out-of-the-box rule is "off" (any country): the exit filter is
+    // opt-in from the Config page. (An older comment claimed the default was
+    // "any IP but Iran" — that was the *recommended* rule, never the default.)
     this.exitFilter = ExitFilter.off,
     this.exitRulePaused = false,
     this.exitPreferred = const ['DE'],
@@ -692,7 +693,7 @@ class VpnSettings {
 
     return VpnSettings(
       mode: parse(ConnectionMode.values, 'mode', ConnectionMode.vpn),
-      protocol: parse(Protocol.values, 'protocol', Protocol.smart),
+      protocol: parse(Protocol.values, 'protocol', Protocol.wg),
       scan: parse(ScanMode.values, 'scan', ScanMode.turbo),
       ipVersion: parse(IpVersion.values, 'ipVersion', IpVersion.dual),
       transport: parse(MasqueTransport.values, 'transport', MasqueTransport.h3),
@@ -711,7 +712,7 @@ class VpnSettings {
       routeDirect: lines(json['routeDirect']),
       routeBlock: lines(json['routeBlock']),
       theme: parse(ThemeChoice.values, 'theme', ThemeChoice.dark),
-      language: parse(LanguageChoice.values, 'language', LanguageChoice.system),
+      language: parse(LanguageChoice.values, 'language', LanguageChoice.fa),
       autoUpdate: json['autoUpdate'] != false,
       autoDownload: json['autoDownload'] == true,
       notifications: json['notifications'] != false,

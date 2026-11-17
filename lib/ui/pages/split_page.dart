@@ -82,11 +82,15 @@ class _SplitPageState extends State<SplitPage> {
               style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
           const SizedBox(height: 4),
           Text(s.splitPerAppHelp,
-              style: const TextStyle(color: VoidrauColors.muted, fontSize: 12.5, height: 1.4)),
+              style: TextStyle(
+                  color: VoidrauTheme.mutedOf(context),
+                  fontSize: 12.5,
+                  height: 1.4)),
           const SizedBox(height: 12),
           if (!Platform.isAndroid)
             Text(s.splitPerAppUnsupported,
-                style: const TextStyle(color: VoidrauColors.muted, height: 1.4))
+                style: TextStyle(
+                    color: VoidrauTheme.mutedOf(context), height: 1.4))
           else ...[
             Wrap(
               spacing: 8,
@@ -135,8 +139,10 @@ class _SplitPageState extends State<SplitPage> {
               ),
               const SizedBox(height: 8),
               Text(s.splitAppsOwn,
-                  style: const TextStyle(
-                      fontSize: 11.5, color: VoidrauColors.muted, height: 1.4)),
+                  style: TextStyle(
+                      fontSize: 11.5,
+                      color: VoidrauTheme.mutedOf(context),
+                      height: 1.4)),
             ],
           ],
         ],
@@ -158,7 +164,10 @@ class _SplitPageState extends State<SplitPage> {
               style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
           const SizedBox(height: 4),
           Text(s.splitDestinationsHelp,
-              style: const TextStyle(color: VoidrauColors.muted, fontSize: 12.5, height: 1.4)),
+              style: TextStyle(
+                  color: VoidrauTheme.mutedOf(context),
+                  fontSize: 12.5,
+                  height: 1.4)),
           const SizedBox(height: 12),
           _ruleEditor(
             c,
@@ -220,8 +229,10 @@ class _SplitPageState extends State<SplitPage> {
           if (Platform.isWindows) ...[
             const SizedBox(height: 10),
             Text(s.splitWindowsNote,
-                style: const TextStyle(
-                    fontSize: 11.5, color: VoidrauColors.muted, height: 1.4)),
+                style: TextStyle(
+                    fontSize: 11.5,
+                    color: VoidrauTheme.mutedOf(context),
+                    height: 1.4)),
           ],
         ],
       ),
@@ -263,8 +274,9 @@ class _SplitPageState extends State<SplitPage> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(title,
-            style: const TextStyle(
-                color: VoidrauColors.muted, fontWeight: FontWeight.w600)),
+            style: TextStyle(
+                color: VoidrauTheme.mutedOf(context),
+                fontWeight: FontWeight.w600)),
         const SizedBox(height: 8),
         Row(
           children: [
@@ -275,7 +287,7 @@ class _SplitPageState extends State<SplitPage> {
                   hintText: hint,
                   isDense: true,
                   filled: true,
-                  fillColor: VoidrauColors.surface,
+                  fillColor: VoidrauTheme.surfaceOf(context),
                   border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(8)),
                 ),
@@ -301,7 +313,7 @@ class _SplitPageState extends State<SplitPage> {
                 final chip = Chip(
                   label: Text(e),
                   backgroundColor:
-                      inactive ? VoidrauColors.surface2 : null,
+                      inactive ? VoidrauTheme.surface2Of(context) : null,
                   onDeleted: () => onRemove(e),
                   deleteIcon: const Icon(Icons.close, size: 16),
                 );
@@ -320,9 +332,9 @@ class _SplitPageState extends State<SplitPage> {
       width: double.infinity,
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: VoidrauColors.surface,
+        color: VoidrauTheme.surfaceOf(context),
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: VoidrauColors.line),
+        border: Border.all(color: VoidrauTheme.lineOf(context)),
       ),
       child: child,
     );
