@@ -1,4 +1,4 @@
-// VoidrauVPN License Bot + API — Cloudflare Worker (single file). v2.1.0
+// VoidrauVPN License Bot + API — Cloudflare Worker (single file). v2.2.0
 //
 // Deploy: wrangler deploy (or paste in the dashboard). Needs a KV namespace
 // bound as LICENSES and the secret BOT_TOKEN (from @BotFather).
@@ -53,7 +53,7 @@
 //   GET  /api/health            → { ok, service, time, version }
 //   POST /api/trial             → { ok, key, expiresAt, serverTime }
 
-const BOT_VERSION = '2.1.0';
+const BOT_VERSION = '2.2.0';
 
 const DEFAULT_PLANS = [
   { id: 'm1', label: '۱ ماهه — ۱۰۰ هزار تومان', days: 30, maxUsers: 1 },
@@ -153,6 +153,22 @@ function checkinNext(last, streak, points, today, yesterday) {
     bonus = true;
   }
   return { already: false, streak: s, points: p, bonus };
+}
+
+// v2.2: streak milestone — every 30 consecutive days = +3 days credit.
+// Pure (unit-tested): returns the bonus days for a streak, 0 otherwise.
+const STREAK_MILESTONE_DAYS = 30;
+const STREAK_MILESTONE_REWARD = 3;
+function streakMilestone(streak) {
+  const s = parseInt(streak, 10);
+  if (!Number.isFinite(s) || s <= 0) return 0;
+  return s % STREAK_MILESTONE_DAYS === 0 ? STREAK_MILESTONE_REWARD : 0;
+}
+
+// v2.2: show the one-tap renew button when the licence is active and
+// expires within a week. Pure (unit-tested).
+function renewVisible(active, daysLeft) {
+  return !!active && Number.isFinite(daysLeft) && daysLeft <= 7;
 }
 
 // Pure gift validation (also unit-tested in /tmp).
@@ -508,6 +524,24 @@ async function applyCredit(env, key, tid) {
   return cur;
 }
 
+// v2.2: spend stored credit on the current active licence, with the same
+// claim-verify race protection as trial/check-in (M2/M5): a double-tap
+// must not spend the same credit twice. The claim key is additive and
+// self-expiring; a stale claim is simply overwritten by the next spend.
+// Returns { applied } — applied is 0 when there was no credit or when
+// another concurrent spend won the claim.
+async function spendCredit(env, key, tid) {
+  const cur = parseInt((await env.LICENSES.get(`credit:${tid}`)) || '0');
+  if (!Number.isFinite(cur) || cur <= 0) return { applied: 0 };
+  const claim = crypto.randomUUID();
+  await env.LICENSES.put(`spendclaim:${tid}`, claim, { expirationTtl: 300 });
+  const check = await env.LICENSES.get(`spendclaim:${tid}`);
+  if (check !== claim) return { applied: 0, conflict: true };
+  const applied = await applyCredit(env, key, tid);
+  try { await env.LICENSES.delete(`spendclaim:${tid}`); } catch (_) {}
+  return { applied };
+}
+
 async function upgradePlan(env, key, plan) {
   const raw = await env.LICENSES.get(`lic:${key}`);
   const lic = typeof raw === 'string' ? JSON.parse(raw) : raw;
@@ -556,6 +590,27 @@ async function tgSafe(token, method, body, env, steps) {
   }
 }
 
+// Best-effort Telegram call that returns the parsed response instead of
+// throwing (unlike tg): the caller needs error_code / retry_after to
+// decide on a 429 retry. Returns null only on network/parse failure.
+// v2.2: used by /setup's setWebhook retry.
+async function tgJson(token, method, body) {
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return await r.json().catch(() => ({ ok: false, description: 'json-parse-failed' }));
+  } catch (_) {
+    return null;
+  }
+}
+
+function sleep(ms) {
+  return new Promise((res) => setTimeout(res, ms));
+}
+
 // User-facing reply: try as built (usually Markdown); on failure retry once
 // as plain text — a stray * or _ in the text must not swallow the reply.
 // Returns null only if both attempts fail.
@@ -578,8 +633,19 @@ async function mainMenu(env, from, lic) {
   const name = from && from.first_name ? from.first_name : '';
   const now = Math.floor(Date.now() / 1000);
   const active = lic && lic.expiresAt && lic.expiresAt > now && lic.plan !== 'revoked';
+  const daysLeft = active ? Math.ceil((lic.expiresAt - now) / 86400) : 0;
   const credit = tid ? parseInt((await env.LICENSES.get(`credit:${tid}`)) || '0') : 0;
   const joins = tid ? parseInt((await env.LICENSES.get(`refjoin:${tid}`)) || '0') : 0;
+  // v2.2: streak badge — read the single check-in key (best effort; a
+  // missing key simply means no badge). Legacy per-field keys are only
+  // migrated by doCheckin, so a pre-migration streak shows no badge.
+  let streak = 0;
+  if (tid) {
+    try {
+      const cs = JSON.parse((await env.LICENSES.get(`checkin:${tid}`)) || 'null');
+      if (cs && typeof cs === 'object') streak = parseInt(cs.streak, 10) || 0;
+    } catch (_) {}
+  }
   const rows = [
     [{ text: '🛒 خرید / تمدید لایسنس', callback_data: 'buy' }, { text: '🎁 هدیه دادن', callback_data: 'gift' }],
     [{ text: '✅ چک‌این روزانه', callback_data: 'checkin' }, { text: '👥 دعوت دوستان', callback_data: 'ref' }],
@@ -589,6 +655,14 @@ async function mainMenu(env, from, lic) {
     [{ text: '🧾 وضعیت رسید من', callback_data: 'receipt' }, { text: '📖 راهنما', callback_data: 'help' }],
     [{ text: '🆘 پشتیبانی', callback_data: 'support' }],
   ];
+  // v2.2: one-tap renew when the licence expires within a week, and a
+  // spend-my-credit button while stored credit sits idle.
+  if (renewVisible(active, daysLeft)) {
+    rows.unshift([{ text: '🔄 تمدید', callback_data: 'buy' }]);
+  }
+  if (active && credit > 0) {
+    rows.splice(1, 0, [{ text: `💳 خرج کردن اعتبار (${credit} روز)`, callback_data: 'spendcredit' }]);
+  }
   if (!active) {
     rows.push([{ text: '🎁 تست رایگان', callback_data: 'trial' }]);
   }
@@ -597,7 +671,6 @@ async function mainMenu(env, from, lic) {
   let body = '';
   if (active) {
     const leftSec = lic.expiresAt - now;
-    const daysLeft = Math.ceil(leftSec / 86400);
     const totalDays = lic.days || 0;
     const planName = lic.plan === 'paid' ? 'خریداری‌شده ویژه ⭐️' : (lic.plan === 'trial' ? 'تست رایگان موقت 🎁' : 'اختصاصی');
     body = `✅ *لایسنس فعال شما*\n\`${lic.key}\`\n\n` +
@@ -605,6 +678,8 @@ async function mainMenu(env, from, lic) {
       `⏳ پیشرفت اشتراک: \`${progressBar(daysLeft, totalDays)}\`${totalDays > 0 ? ` ${daysLeft} از ${totalDays} روز` : ''}\n` +
       `⏰ زمان باقی‌مانده: *${formatDuration(leftSec)}*\n` +
       `📅 تاریخ انقضا: *${formatJalali(lic.expiresAt)}*\n` +
+      `📱 دستگاه‌ها: *${activeSessionsOf(lic, now).length} از ${maxUsersOf(lic)} نشست فعال*\n` +
+      (streak >= 30 ? `🔥 استریک افسانه‌ای: *${streak} روز*\n` : '') +
       `🎁 اعتبار ذخیره هدیه: *${credit} روز*\n` +
       `👥 افراد دعوت‌شده: *${joins} نفر*\n\n` +
       `💡 روی کد لایسنس بالا ضربه بزنید تا کپی شود.`;
@@ -1031,6 +1106,38 @@ async function doGiftHome(env, tid) {
   };
 }
 
+// v2.2: "spend my credit now" — apply the user's stored credit to their
+// current ACTIVE licence immediately (applyCredit used to run only on
+// issue/approval, so credit sat idle until renewal). No-ops safely when
+// there is no active licence or no credit.
+async function doSpendCredit(env, tid, from) {
+  const key = await userKey(env, tid);
+  const lic = key ? await getLic(env, key) : null;
+  const now = Math.floor(Date.now() / 1000);
+  if (!lic || !lic.expiresAt || lic.plan === 'revoked' || lic.expiresAt <= now) {
+    return {
+      text: '⚠️ لایسنس فعالی برای اعمال اعتبار ندارید — اول لایسنس بگیرید یا تمدید کنید.',
+      reply_markup: { inline_keyboard: homeRow() },
+    };
+  }
+  const res = await spendCredit(env, key, tid);
+  if (res.conflict) {
+    return {
+      text: '⚠️ یک درخواست اعمال اعتبار دیگر در حال انجام است — چند ثانیه بعد دوباره امتحان کنید.',
+      reply_markup: { inline_keyboard: homeRow() },
+    };
+  }
+  if (!res.applied || res.applied <= 0) {
+    return {
+      text: '🎁 اعتبار ذخیره‌ای ندارید — با دعوت دوستان یا چک‌این روزانه اعتبار بگیرید.',
+      reply_markup: { inline_keyboard: homeRow() },
+    };
+  }
+  const page = await mainMenu(env, from, await getLic(env, key));
+  page.text = `✅ *${res.applied} روز اعتبار به لایسنس شما اضافه شد!*\n\n` + page.text;
+  return page;
+}
+
 async function doCheckin(env, tid) {
   const today = tehranDate();
   const yesterday = tehranYesterday();
@@ -1076,8 +1183,17 @@ async function doCheckin(env, tid) {
     await addCredit(env, tid, 1);
     bonusText = `\n\n🎉 *تبریک! ۷ امتیاز کامل شد و ۱ روز اعتبار به حساب شما اضافه شد.*`;
   }
+  // v2.2: streak milestone — every 30 consecutive days = +3 days credit.
+  // Awarded only on the winning claim (same branch as the 7-point bonus),
+  // so a double-tap can never award it twice.
+  let milestoneText = '';
+  const milestone = streakMilestone(r.streak);
+  if (milestone > 0) {
+    await addCredit(env, tid, milestone);
+    milestoneText = `\n\n🔥 *افسانه‌ای! استریک ${r.streak} روزه کامل شد و ${milestone} روز اعتبار به حساب شما اضافه شد.*`;
+  }
   return {
-    text: `✅ *چک‌این روزانه ثبت شد!*\n\n🔥 استریک فعلی: *${r.streak} روز*\n⭐ امتیاز: *${r.points} از ۷* (هر ۷ امتیاز = ۱ روز اعتبار)${bonusText}`,
+    text: `✅ *چک‌این روزانه ثبت شد!*\n\n🔥 استریک فعلی: *${r.streak} روز*\n⭐ امتیاز: *${r.points} از ۷* (هر ۷ امتیاز = ۱ روز اعتبار)${bonusText}${milestoneText}`,
     parse_mode: 'Markdown',
     reply_markup: { inline_keyboard: homeRow() },
   };
@@ -1351,6 +1467,16 @@ async function handleHttp(request, env, ctx) {
     // lost; fall back to the random KV secret registered by /setup.
     const whs = env.WEBHOOK_SECRET || (await env.LICENSES.get('set:whsecret'));
     const hdr = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
+    // v2.2: record whether the incoming webhook carried the secret header,
+    // so /diag can show it (the C2 verification gap: getWebhookInfo never
+    // exposes the secret itself). Recorded before the 403 return, so a
+    // rejected request is itself visible as seen:false.
+    try {
+      await env.LICENSES.put(
+        'whHeader',
+        JSON.stringify({ at: new Date().toISOString(), seen: !!(whs && hdr && hdr === whs), configured: !!whs })
+      );
+    } catch (_) {}
     if (whs && hdr !== whs) return new Response('forbidden', { status: 403 });
     const upd = await request.json();
 
@@ -1386,12 +1512,21 @@ async function handleHttp(request, env, ctx) {
     return new Response('ok');
   }
 
-  if (url.pathname === '/' || url.pathname === '/setup') {
+  // v2.2: the root path is a plain alive check — it must NOT re-run the
+  // setup flow. Every visit used to call setWebhook + setMyCommands, and a
+  // visit during a Telegram rate limit recorded a failed setup (2026-11-18).
+  if (url.pathname === '/') {
+    return new Response(
+      `VoidrauVPN license bot — alive & operational.\nVersion: ${BOT_VERSION}\n`
+    );
+  }
+
+  if (url.pathname === '/setup') {
     const self = `${url.protocol}//${url.host}/webhook`;
-    // C2: the admin must run /setup once after the v2.0.1 deploy so Telegram
-    // registers the webhook WITH this secret_token (the live webhook was
-    // registered 2026-10-20, before any secret existed). Until then the
-    // secret check above accepts everything.
+    // C2: the webhook secret lives in KV (set:whsecret) or the WEBHOOK_SECRET
+    // env secret; /setup (re)registers the webhook WITH this secret_token.
+    // The secret is already set on the live worker — /setup is only needed
+    // to re-register after a change, not on every visit.
     let whs = env.WEBHOOK_SECRET || (await env.LICENSES.get('set:whsecret'));
     if (!whs) {
       whs = crypto.randomUUID().replace(/-/g, '');
@@ -1406,17 +1541,27 @@ async function handleHttp(request, env, ctx) {
     try {
       await env.LICENSES.put('set:workerhost', url.host);
     } catch (_) {}
-    const set = await tgSafe(
-      env.BOT_TOKEN || '',
-      'setWebhook',
-      {
-        url: self,
-        allowed_updates: ['message', 'callback_query'],
-        drop_pending_updates: false,
-        secret_token: whs,
-      },
-      env
-    );
+    // v2.2: retry setWebhook once after the retry_after delay on a 429
+    // (a visit during a Telegram rate limit used to record ok:false and
+    // change nothing). tgJson returns the parsed response instead of
+    // throwing, so error_code / retry_after are visible here.
+    const webhookBody = {
+      url: self,
+      allowed_updates: ['message', 'callback_query'],
+      drop_pending_updates: false,
+      secret_token: whs,
+    };
+    let set = await tgJson(env.BOT_TOKEN || '', 'setWebhook', webhookBody);
+    if (set && !set.ok && set.error_code === 429) {
+      const waitSec = Math.min(Math.max(1, parseInt(set.parameters?.retry_after, 10) || 1), 30);
+      await sleep(waitSec * 1000);
+      set = await tgJson(env.BOT_TOKEN || '', 'setWebhook', webhookBody);
+    }
+    if (set && !set.ok) {
+      try {
+        await env.LICENSES.put('lastError', `tg setWebhook: ${set.error_code || ''} ${set.description || 'unknown'}`);
+      } catch (_) {}
+    }
     const me0 = await tgSafe(env.BOT_TOKEN || '', 'getMe', {}, env);
     if (me0 && me0.ok && me0.result?.username) {
       await env.LICENSES.put('set:botusername', me0.result.username);
@@ -1433,13 +1578,6 @@ async function handleHttp(request, env, ctx) {
       await env.LICENSES.put(
         'lastSetup',
         JSON.stringify({ at: new Date().toISOString(), ok: !!set?.ok, error: set?.description || null })
-      );
-    }
-    if (url.pathname === '/') {
-      return new Response(
-        `VoidrauVPN license bot — alive & operational.\nWebhook: ${
-          set?.ok ? 'SET ✓' : 'FAILED: ' + (set?.description || '?')
-        }`
       );
     }
     return json({ setup: set });
@@ -1467,12 +1605,16 @@ async function handleHttp(request, env, ctx) {
     const lastSteps = await env.LICENSES.get('lastSteps');
     const users = await env.LICENSES.get('stat:users');
     const pending = await countPending(env);
+    // v2.2: webhook secret-header observability (see the /webhook handler).
+    let whHeader = null;
+    try { whHeader = JSON.parse((await env.LICENSES.get('whHeader')) || 'null'); } catch (_) {}
     return json({
       lastSteps,
       lastSetup: lastSetup ? JSON.parse(lastSetup) : null,
       lastUpdate: lastUpdate ? JSON.parse(lastUpdate) : null,
       lastSentId,
       lastError,
+      webhookSecretHeader: whHeader,
       stats: { users, pending },
       botTokenSet: !!env.BOT_TOKEN,
       adminIdSet: !!env.ADMIN_ID,
@@ -1766,6 +1908,8 @@ async function handle(upd, env, steps, ctx) {
       out = await mainMenu(env, cb.from, k0 ? await getLic(env, k0) : null);
     } else if (cb.data === 'checkin') {
       out = await doCheckin(env, tid);
+    } else if (cb.data === 'spendcredit') {
+      out = await doSpendCredit(env, tid, cb.from);
     } else if (cb.data === 'top') {
       out = await doLeaderboard(env, tid);
     } else if (cb.data === 'receipt') {
@@ -3005,6 +3149,17 @@ async function doReferral(env, tid) {
   const joins = parseInt((await env.LICENSES.get(`refjoin:${tid}`)) || '0');
   const credit = (await env.LICENSES.get(`credit:${tid}`)) || '0';
   const needed = REFERRAL_REWARD_JOINS - (joins % REFERRAL_REWARD_JOINS);
+  const inviteLink = `https://t.me/${botUser}?start=ref_${tid}`;
+  // v2.2: one-tap share — t.me/share/url opens Telegram's share sheet, so
+  // the invite forwards without copy-paste. (A switch_inline_query button
+  // would need inline mode enabled in BotFather plus an inline_query
+  // handler, so it would be dead on arrival; the share link needs no
+  // setup at all.)
+  const shareUrl =
+    'https://t.me/share/url?url=' +
+    encodeURIComponent(inviteLink) +
+    '&text=' +
+    encodeURIComponent('با این لینک به VoidrauVPN بپیوند و لایسنس رایگان بگیر!');
   // C1: the old message used parse_mode Markdown and the link always
   // contains ref_<id> — the underscore opens an italic entity Telegram can
   // never close, so EVERY invite failed with HTTP 400. Plain text keeps the
@@ -3018,7 +3173,12 @@ async function doReferral(env, tid) {
       `• تعداد افراد عضو شده: ${joins} نفر\n` +
       `• ${needed === REFERRAL_REWARD_JOINS ? 'دعوت بعدی شروع دور جدید پاداش' : `${needed} نفر مانده تا پاداش بعدی`}\n` +
       `• اعتبار ذخیره هدیه: ${credit} روز`,
-    reply_markup: { inline_keyboard: withHome([[{ text: '🏆 لیدربورد دعوت', callback_data: 'top' }]]) },
+    reply_markup: {
+      inline_keyboard: withHome([
+        [{ text: '📤 ارسال لینک دعوت', url: shareUrl }],
+        [{ text: '🏆 لیدربورد دعوت', callback_data: 'top' }],
+      ]),
+    },
   };
 }
 
