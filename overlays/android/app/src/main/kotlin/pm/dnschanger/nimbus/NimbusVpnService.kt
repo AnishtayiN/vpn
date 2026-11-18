@@ -58,6 +58,11 @@ class NimbusVpnService : VpnService() {
     @Volatile private var endpoint: String = ""
     @Volatile private var protocol: String = "masque"
     @Volatile private var socksPort: Int = 1819
+    // The SOCKS listener device traffic goes through: the hop's own
+    // listener in chain mode, else the tunnel's. The core's own listener
+    // stays on [socksPort] (the hop's upstream); the TUN bridge, the LAN
+    // share and the traffic validation all use this port.
+    @Volatile private var devicePort: Int = 1819
     @Volatile private var tunMtu: Int = 1500
     @Volatile private var bridgeStarted: Boolean = false
     @Volatile private var h3GatewayUnavailable: Boolean = false
@@ -137,6 +142,14 @@ class NimbusVpnService : VpnService() {
             val splitMode = extras?.getString(EXTRA_SPLIT_MODE) ?: "off"
             val splitApps = extras?.getStringArrayList(EXTRA_SPLIT_APPS) ?: arrayListOf()
             socksPort = extras?.getInt(EXTRA_SOCKS_PORT, 1819) ?: 1819
+            // The app sends this explicitly; a stale intent (QS tile / boot
+            // receiver with prefs from before the chain fix) does not have
+            // it, so fall back to the env the app already sends — a chain
+            // hop's bind address names its listener. Never guess: anything
+            // else falls back to the core's own listener.
+            devicePort = extras?.getInt(EXTRA_DEVICE_PORT, -1)
+                ?.takeIf { it in 1024..65535 }
+                ?: devicePortFromEnv(env, socksPort)
             tunMtu = extras?.getInt(EXTRA_MTU, 1500) ?: 1500
             val bypassLan = extras?.getBoolean(EXTRA_BYPASS_LAN, true) != false
             val ipv6 = extras?.getBoolean(EXTRA_IPV6, false) == true
@@ -174,11 +187,17 @@ class NimbusVpnService : VpnService() {
             // bootstrap plus bridges a minute or two). The plain validation
             // gives up after ~30 s and then re-rolls the core — for a
             // standalone or reverse hop there is no gateway to re-roll, and
-            // restarting only resets the bootstrap clock.
+            // restarting only resets the bootstrap clock. A chain hop is
+            // slow for the same reason: the hop starts after the tunnel,
+            // and "connected" is only honest once the hop itself serves.
             val slowHop = env["AETHER_PSIPHON"] == "only" ||
                 env["AETHER_TOR"] == "only" ||
                 env["AETHER_PSIPHON"] == "reverse" ||
-                env["AETHER_TOR"] == "reverse"
+                env["AETHER_TOR"] == "reverse" ||
+                env["AETHER_PSIPHON"] == "chain" ||
+                env["AETHER_TOR"] == "chain"
+            val chainHop = env["AETHER_PSIPHON"] == "chain" ||
+                env["AETHER_TOR"] == "chain"
             // Persist before any failure path so QS tile / boot auto-connect
             // reuse the last request.
             persistLast(extras, envLines)
@@ -187,7 +206,7 @@ class NimbusVpnService : VpnService() {
 
             if (lanShare) {
                 val lanPort = if (socksPort in 1..65534) socksPort + 1 else 1820
-                if (lanProxy.start(lanPort, "127.0.0.1", socksPort)) {
+                if (lanProxy.start(lanPort, "127.0.0.1", devicePort)) {
                     emit(
                         "lan",
                         "connected",
@@ -203,10 +222,24 @@ class NimbusVpnService : VpnService() {
             }
 
             publishPhase("securing", "Verifying the tunnel")
+            // In chain mode the validation goes through the HOP's listener
+            // (see validateTrafficReady): the tunnel alone proves nothing
+            // about the device path. Bounded below the app's 300 s connect
+            // budget — 4 attempts x 3 targets x ~12 s worst case — so a hop
+            // that never comes up fails here with the slow-hop message
+            // instead of the app timing out first with a bare "timeout".
             if (!validateTrafficReady(
                     session,
-                    attempts = if (slowHop) 10 else 2,
-                    readTimeoutMs = if (slowHop) 15_000 else 8_000,
+                    attempts = if (slowHop) {
+                        if (chainHop) 4 else 10
+                    } else {
+                        2
+                    },
+                    readTimeoutMs = if (slowHop) {
+                        if (chainHop) 12_000 else 15_000
+                    } else {
+                        8_000
+                    },
                 )) {
                 if (slowHop) {
                     // No gateway to re-roll here: the hop itself is still
@@ -233,7 +266,7 @@ class NimbusVpnService : VpnService() {
             publishChrome()
             publishPhase(
                 "connected",
-                if (mode == "vpn") "Device VPN active" else "SOCKS5 127.0.0.1:$socksPort",
+                if (mode == "vpn") "Device VPN active" else "SOCKS5 127.0.0.1:$devicePort",
             )
             io.execute { monitor(session, mode) }
         } catch (e: Throwable) {
@@ -287,6 +320,23 @@ class NimbusVpnService : VpnService() {
 
     private fun value(env: Map<String, String>, key: String, fallback: String): String =
         env[key]?.takeIf { it.isNotBlank() } ?: fallback
+
+    /**
+     * Device port from the env, for intents that predate the devicePort
+     * extra (QS tile / boot receiver with prefs from before the chain fix):
+     * a chain hop's bind address names its listener. Anything else — a
+     * reverse hop, a standalone mode, a plain tunnel — uses the core's own
+     * listener, so the fallback is the SOCKS port.
+     */
+    private fun devicePortFromEnv(env: Map<String, String>, fallback: Int): Int {
+        val bind = when {
+            env["AETHER_PSIPHON"] == "chain" -> env["AETHER_PSIPHON_BIND"]
+            env["AETHER_TOR"] == "chain" -> env["AETHER_TOR_BIND"]
+            else -> null
+        } ?: return fallback
+        return bind.substringAfterLast(':').toIntOrNull()
+            ?.takeIf { it in 1024..65535 } ?: fallback
+    }
 
     // ------------------------------------------------------------------
     // Core process management
@@ -726,7 +776,7 @@ class NimbusVpnService : VpnService() {
             writer.write("  icmp: 'reply'\n")
             writer.write("socks5:\n")
             writer.write("  address: '127.0.0.1'\n")
-            writer.write("  port: $socksPort\n")
+            writer.write("  port: $devicePort\n")
             writer.write("  udp: 'udp'\n")
         }
         return config
@@ -809,11 +859,15 @@ class NimbusVpnService : VpnService() {
      * One SOCKS5 domain CONNECT + HTTP/1.0 GET through the tunnel. Domain
      * CONNECT means the core resolves inside the tunnel — the exact path HEV
      * forwards for apps.
+     *
+     * The probe goes through the DEVICE port, not the core's listener: in
+     * chain mode the device path is the hop, and validating the tunnel
+     * alone would publish "connected" while the hop is still starting.
      */
     private fun httpThroughSocks(name: String, path: String, readTimeoutMs: Int = 8_000): Boolean {
         return try {
             Socket().use { socket ->
-                socket.connect(InetSocketAddress("127.0.0.1", socksPort), 4_000)
+                socket.connect(InetSocketAddress("127.0.0.1", devicePort), 4_000)
                 socket.soTimeout = readTimeoutMs
                 val out = socket.getOutputStream()
                 val input = socket.getInputStream()
@@ -1039,6 +1093,13 @@ class NimbusVpnService : VpnService() {
                 extras.getStringArrayList(EXTRA_SPLIT_APPS)?.joinToString(","),
             )
             .putInt(EXTRA_SOCKS_PORT, extras.getInt(EXTRA_SOCKS_PORT, 1819))
+            .putInt(
+                EXTRA_DEVICE_PORT,
+                extras.getInt(
+                    EXTRA_DEVICE_PORT,
+                    extras.getInt(EXTRA_SOCKS_PORT, 1819),
+                ),
+            )
             .putInt(EXTRA_MTU, extras.getInt(EXTRA_MTU, 1500))
             .putBoolean(EXTRA_KILL, extras.getBoolean(EXTRA_KILL, true))
             .putBoolean(EXTRA_BYPASS_LAN, extras.getBoolean(EXTRA_BYPASS_LAN, true))
@@ -1063,6 +1124,10 @@ class NimbusVpnService : VpnService() {
             ArrayList(apps.split(",").filter { it.isNotEmpty() }),
         )
         b.putInt(EXTRA_SOCKS_PORT, p.getInt(EXTRA_SOCKS_PORT, 1819))
+        b.putInt(
+            EXTRA_DEVICE_PORT,
+            p.getInt(EXTRA_DEVICE_PORT, p.getInt(EXTRA_SOCKS_PORT, 1819)),
+        )
         b.putInt(EXTRA_MTU, p.getInt(EXTRA_MTU, 1500))
         b.putBoolean(EXTRA_KILL, p.getBoolean(EXTRA_KILL, true))
         b.putBoolean(EXTRA_BYPASS_LAN, p.getBoolean(EXTRA_BYPASS_LAN, true))
@@ -1181,6 +1246,7 @@ class NimbusVpnService : VpnService() {
         const val EXTRA_SPLIT_MODE = "splitMode"
         const val EXTRA_SPLIT_APPS = "splitApps"
         const val EXTRA_SOCKS_PORT = "socksPort"
+        const val EXTRA_DEVICE_PORT = "devicePort"
         const val EXTRA_MTU = "tunMtu"
         const val EXTRA_KILL = "killSwitch"
         const val EXTRA_BYPASS_LAN = "bypassLan"

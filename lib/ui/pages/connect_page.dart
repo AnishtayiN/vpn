@@ -139,7 +139,7 @@ class ConnectPage extends StatelessWidget {
                       c.exitSearchStatus.isNotEmpty
                   ? c.exitSearchStatus
                   : (snap.message.isEmpty
-                      ? s.socksHint(c.settings.socksPort)
+                      ? s.socksHint(c.devicePort)
                       : snap.message),
               textAlign: TextAlign.center,
               style: TextStyle(color: VoidrauTheme.mutedOf(context)),
@@ -224,41 +224,68 @@ class ConnectPage extends StatelessWidget {
           // like the mode/protocol cards — the Config page is paid-locked,
           // but this page is not, and changing the hop country from here is
           // the same kind of live choice as switching protocol.
+          //
+          // A reverse hop is the exception: the tunnel is dialled through
+          // the hop and the final exit stays WARP, so a picked country
+          // cannot be the egress. No picker there — a note saying so, and
+          // where to go for a country exit. The caption under the picker
+          // names the topology (only / chain) so the user can see what the
+          // picked country actually controls.
           if ((c.settings.hasPsiphonHop || c.settings.hasTorHop) &&
               !c.useXray)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
-              child: CountryPickerEntryRow(
-                label: c.settings.hasPsiphonHop
-                    ? s.hopRegion
-                    : s.torExitCountry,
-                display: c.settings.hasPsiphonHop
-                    ? (c.settings.psiphonRegion.isEmpty
-                        ? s.countryAutomatic
-                        : countryLabel(c.settings.psiphonRegion,
-                            fa: s.isFa))
-                    : (c.settings.torExitCountry.isEmpty
-                        ? (c.settings.torFastExit
-                            ? s.torExitFast
-                            : s.countryAutomatic)
-                        : countryLabel(c.settings.torExitCountry,
-                            fa: s.isFa)),
-                code: c.settings.hasPsiphonHop
-                    ? c.settings.psiphonRegion
-                    : c.settings.torExitCountry,
-                onTap: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => CountryPickerScreen(
-                        controller: c,
-                        engine: c.settings.hasPsiphonHop
-                            ? CountryPickerEngine.psiphon
-                            : CountryPickerEngine.tor,
-                      ),
+              child: c.settings.isReverseHop
+                  ? Text(
+                      s.hopReverseNote(c.settings.hopName),
+                      style: TextStyle(
+                          color: VoidrauTheme.mutedOf(context), fontSize: 12),
+                    )
+                  : Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        CountryPickerEntryRow(
+                          label: c.settings.hasPsiphonHop
+                              ? s.hopRegion
+                              : s.torExitCountry,
+                          display: c.settings.hasPsiphonHop
+                              ? (c.settings.psiphonRegion.isEmpty
+                                  ? s.countryAutomatic
+                                  : countryLabel(c.settings.psiphonRegion,
+                                      fa: s.isFa))
+                              : (c.settings.torExitCountry.isEmpty
+                                  ? (c.settings.torFastExit
+                                      ? s.torExitFast
+                                      : s.countryAutomatic)
+                                  : countryLabel(c.settings.torExitCountry,
+                                      fa: s.isFa)),
+                          code: c.settings.hasPsiphonHop
+                              ? c.settings.psiphonRegion
+                              : c.settings.torExitCountry,
+                          onTap: () {
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (_) => CountryPickerScreen(
+                                  controller: c,
+                                  engine: c.settings.hasPsiphonHop
+                                      ? CountryPickerEngine.psiphon
+                                      : CountryPickerEngine.tor,
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          c.settings.isStandaloneHop
+                              ? s.hopTopologyOnly(c.settings.hopName)
+                              : s.hopTopologyChain(c.settings.hopName),
+                          style: TextStyle(
+                              color: VoidrauTheme.mutedOf(context),
+                              fontSize: 12),
+                        ),
+                      ],
                     ),
-                  );
-                },
-              ),
             ),
           // Xray engine (Android only): mode cards, shared with Config and
           // Settings (improvement 4) — one widget, one definition.
@@ -331,7 +358,7 @@ class ConnectPage extends StatelessWidget {
           TextButton(
             onPressed: () {
               Clipboard.setData(
-                ClipboardData(text: '127.0.0.1:${c.settings.socksPort}'),
+                ClipboardData(text: '127.0.0.1:${c.devicePort}'),
               );
               ScaffoldMessenger.of(context)
                   .showSnackBar(SnackBar(content: Text(s.copied)));
