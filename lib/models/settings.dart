@@ -214,10 +214,15 @@ class VpnSettings {
     this.ech = false,
     this.secondHop = SecondHop.off,
     this.standaloneMode = StandaloneMode.standard,
-    this.psiphonRegion = '',
     this.psiphonCdn = false,
     this.hopHttp = false,
     this.torCountry = '',
+    // Region fields go through their setters (see below): only a 2-letter
+    // ISO code survives, anything else becomes '' (automatic).
+    String psiphonRegion = '',
+    String torExitCountry = '',
+    this.torExitStrict = true,
+    this.torFastExit = false,
     this.httpProxy = false,
     this.socksPort = 1819,
     this.keepalive = 5,
@@ -243,7 +248,8 @@ class VpnSettings {
     this.serverlessNoise = true,
     this.xrayChainProxies = const [],
     this.xrayChainExitId = '',
-  });
+  })  : _psiphonRegion = regionCode(psiphonRegion),
+        _torExitCountry = regionCode(torExitCountry);
 
   ConnectionMode mode;
   Protocol protocol;
@@ -343,7 +349,14 @@ class VpnSettings {
   bool get hasSecondHop => secondHop != SecondHop.off;
 
   /// Country the Psiphon exit should be in, e.g. `DE`. Empty = any.
-  String psiphonRegion;
+  ///
+  /// Only a 2-letter ISO-3166 alpha-2 code survives (upper-cased): the
+  /// setter and [regionCode] collapse anything else — a full name
+  /// (`Germany`), a 3-letter code, junk — to `''`, so a mistyped region can
+  /// never silently disable the feature the way the old free-text field did.
+  String _psiphonRegion = '';
+  String get psiphonRegion => _psiphonRegion;
+  set psiphonRegion(String v) => _psiphonRegion = regionCode(v);
 
   /// Limit Psiphon to fronted meek through a CDN.
   bool psiphonCdn;
@@ -354,6 +367,101 @@ class VpnSettings {
 
   /// Country handed to bridgedb when Tor needs bridges, e.g. `ir`.
   String torCountry;
+
+  /// Country the Tor exit must be in, e.g. `DE`. Empty = automatic.
+  ///
+  /// This is the *exit* country — not [torCountry], which only picks the
+  /// country BridgeDB hands bridges out for. Tor has no core-side exit
+  /// control in aether (no `ExitNodes` variable, no control port the app can
+  /// reach), so a picked country is enforced by the exit-country search
+  /// instead: the effective rule becomes "preferred = [this country]" (see
+  /// [effectiveExitFilter]) and the connect loop re-dials until the exit
+  /// lands there. That is slow — Tor bootstrap takes a minute or two per
+  /// attempt — and the UI must say so instead of promising instant switching.
+  String _torExitCountry = '';
+  String get torExitCountry => _torExitCountry;
+  set torExitCountry(String v) => _torExitCountry = regionCode(v);
+
+  /// Strict Tor exit: only the picked [torExitCountry] counts. False means
+  /// "prefer it" — the country is accepted explicitly and anything else
+  /// still has to clear the blocked list (the plain `preferred` semantics).
+  /// True whenever a country is picked from the picker.
+  bool torExitStrict;
+
+  /// Fast Tor exits: prefer the nearby, well-provisioned list
+  /// (DE NL CH AT FR SE PL GB) instead of any exit. Only meaningful while
+  /// [torExitCountry] is empty — a picked country always wins.
+  bool torFastExit;
+
+  /// A single 2-letter ISO-3166 alpha-2 code (upper-case) or `''` for
+  /// automatic. Anything else collapses to `''`.
+  static String regionCode(Object? raw) {
+    final c = '$raw'.trim().toUpperCase();
+    if (c.length != 2) return '';
+    for (final u in c.codeUnits) {
+      if (u < 65 || u > 90) return '';
+    }
+    return c;
+  }
+
+  /// True when Psiphon is in this connection's path (standalone
+  /// Psiphon-only, or a Psiphon second hop) — the same rule
+  /// `CoreLaunch.isPsiphon` applies, restated here so settings never
+  /// imports the core launcher.
+  bool get hasPsiphonHop =>
+      standaloneMode == StandaloneMode.psiphonOnly ||
+      (standaloneMode == StandaloneMode.standard &&
+          (secondHop == SecondHop.psiphon ||
+              secondHop == SecondHop.psiphonReverse));
+
+  /// True when Tor is in this connection's path — same rule as
+  /// `CoreLaunch.isTor`, restated here for the same reason.
+  bool get hasTorHop =>
+      standaloneMode == StandaloneMode.torOnly ||
+      (standaloneMode == StandaloneMode.standard &&
+          (secondHop == SecondHop.tor || secondHop == SecondHop.torReverse));
+
+  /// The exit rule actually enforced for this connection.
+  ///
+  /// The user's [exitFilter], except that a picked Tor exit country
+  /// overrides it while Tor is in the path: Tor has no core-side exit
+  /// control, so the only enforcement is the exit-country search, and the
+  /// search needs a rule to enforce. The override is scoped to Tor
+  /// connections — picking a Tor country must not change what a plain WARP
+  /// tunnel accepts — and it never touches the stored [exitFilter],
+  /// [exitPreferred] or [exitBlocked]: clearing the Tor country restores
+  /// the user's own rule exactly, so the picker and the filter UI can never
+  /// fight each other.
+  ExitFilter get effectiveExitFilter {
+    if (!hasTorHop) return exitFilter;
+    if (torExitCountry.isNotEmpty || torFastExit) {
+      return ExitFilter.preferred;
+    }
+    return exitFilter;
+  }
+
+  /// Preferred list under the effective rule: the picked Tor country (or
+  /// the fast-exit list) while the Tor override is in force, else the
+  /// user's own list.
+  List<String> get effectiveExitPreferred {
+    if (!hasTorHop) return exitPreferred;
+    if (torExitCountry.isNotEmpty) return [torExitCountry];
+    if (torFastExit) {
+      return const ['DE', 'NL', 'CH', 'AT', 'FR', 'SE', 'PL', 'GB'];
+    }
+    return exitPreferred;
+  }
+
+  /// Blocked list under the effective rule: always the user's list — a
+  /// picked Tor country never lets a blocked exit back in.
+  List<String> get effectiveExitBlocked => exitBlocked;
+
+  /// True when the Tor country override is the rule in force.
+  bool get torExitEnforced => hasTorHop && torExitCountry.isNotEmpty;
+
+  /// True when the fast-exit list is the rule in force.
+  bool get torFastExitEnforced =>
+      hasTorHop && torExitCountry.isEmpty && torFastExit;
 
   /// Extra HTTP CONNECT listener next to the SOCKS5 one, for apps that only
   /// speak HTTP proxies.
@@ -589,6 +697,9 @@ class VpnSettings {
         'psiphonCdn': psiphonCdn,
         'hopHttp': hopHttp,
         'torCountry': torCountry,
+        'torExitCountry': torExitCountry,
+        'torExitStrict': torExitStrict,
+        'torFastExit': torFastExit,
         'httpProxy': httpProxy,
         'socksPort': socksPort,
         'keepalive': keepalive,
@@ -732,11 +843,14 @@ class VpnSettings {
       ech: json['ech'] == true,
       secondHop: secondHop,
       standaloneMode: standaloneMode,
-      psiphonRegion: json['psiphonRegion']?.toString() ?? '',
+      psiphonRegion: regionCode(json['psiphonRegion']),
       psiphonCdn: json['psiphonCdn'] == true,
       // `psiphonHttp` is what an older build stored for the same switch.
       hopHttp: json['hopHttp'] == true || json['psiphonHttp'] == true,
       torCountry: json['torCountry']?.toString() ?? '',
+      torExitCountry: regionCode(json['torExitCountry']),
+      torExitStrict: json['torExitStrict'] != false,
+      torFastExit: json['torFastExit'] == true,
       httpProxy: json['httpProxy'] == true,
       socksPort: num('socksPort', 1819),
       keepalive: num('keepalive', 5),

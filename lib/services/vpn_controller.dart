@@ -61,6 +61,18 @@ class VpnController extends ChangeNotifier {
   /// Aether otherwise.
   Future<void> reconnect() => useXray ? connectXray() : connect();
 
+  /// Re-dials the tunnel with the current settings — the country picker's
+  /// "apply now" path. Unlike [reconnect] (the watchdog's re-dial of a dead
+  /// tunnel, which only fires while nothing is connected), this stops a live
+  /// tunnel first: connect() assumes a stopped engine, so calling it while
+  /// connected would start a second attempt on top of the running one.
+  Future<void> redial() async {
+    if (snapshot.isActive || busy) {
+      await disconnect();
+    }
+    await reconnect();
+  }
+
   VpnSettings settings = VpnSettings();
   EngineSnapshot snapshot = const EngineSnapshot();
   UpdateInfo? update;
@@ -101,6 +113,14 @@ class VpnController extends ChangeNotifier {
   ({String ip, String country, String endpoint, String protocol})? _lastExit;
 
   int _exitTries = 0;
+
+  /// Consecutive dashboard exit refreshes that answered with neither an IP
+  /// nor a country. One empty answer is a transient lookup failure and keeps
+  /// the last exit on screen; three in a row (~60 s) means the exit is
+  /// genuinely unknown, and the card is cleared instead of showing a stale
+  /// flag/IP from a tunnel that may no longer exist.
+  int _emptyExitProbes = 0;
+
   final Map<String, int> _rejectedExits = {};
   DateTime? _exitSearchSince;
   Dial? _fallback;
@@ -118,9 +138,12 @@ class VpnController extends ChangeNotifier {
   int _promptAsks = 0;
 
   /// True when the exit rule is actually in force: on, and not paused by the
-  /// one-tap "connect with the Iran IP" answer.
+  /// one-tap "connect with the Iran IP" answer. Uses the *effective* rule:
+  /// a picked Tor exit country counts as a rule even when the stored filter
+  /// is off (see VpnSettings.effectiveExitFilter).
   bool get exitRuleEnforced =>
-      !settings.exitRulePaused && settings.exitFilter != ExitFilter.off;
+      !settings.exitRulePaused &&
+      settings.effectiveExitFilter != ExitFilter.off;
 
   /// True when the connection is a standalone Psiphon-only or Tor-only mode
   /// (plain Psiphon/Tor, no WARP underneath).
@@ -140,14 +163,16 @@ class VpnController extends ChangeNotifier {
   bool get exitFilterActive => exitRuleEnforced && _wantUp && !_userDisconnect;
 
   /// Human-readable rule, e.g. "Germany → any country except Iran".
+  /// Describes the *effective* rule, so a picked Tor exit country shows up
+  /// here as the country it enforces instead of the stored filter's "any".
   String get exitFilterLabel {
-    final f = settings.exitFilter;
+    final f = settings.effectiveExitFilter;
     if (f == ExitFilter.off) return s.exitAny;
     String names(List<String> codes) => codes
         .map((c) => countryLabel(c, fa: s.isFa))
         .join(s.isFa ? '، ' : ', ');
-    final want = names(settings.exitPreferred);
-    final blocked = names(settings.exitBlocked);
+    final want = names(settings.effectiveExitPreferred);
+    final blocked = names(settings.effectiveExitBlocked);
     if (f == ExitFilter.nonIran) {
       return blocked.isEmpty ? s.exitAny : '${s.exitAnyExcept} $blocked';
     }
@@ -606,17 +631,28 @@ class VpnController extends ChangeNotifier {
   ///
   /// An exit whose country could not be determined is *accepted*: a broken geo
   /// lookup must not turn into an endless re-dial loop.
+  ///
+  /// The rule judged is the *effective* one (see
+  /// VpnSettings.effectiveExitFilter): a picked Tor exit country overrides
+  /// the stored filter while Tor is in the path. With [torExitStrict] on,
+  /// only that exact country counts — anything else (except an unknown
+  /// country, per the loop protection above) is rejected, so the search
+  /// keeps re-dialling until Tor lands there.
   static bool matchesExitFilter(String? exitCountry, VpnSettings st) {
-    final f = st.exitFilter;
+    final f = st.effectiveExitFilter;
     if (f == ExitFilter.off || st.exitRulePaused) return true;
     final c = SocksProbe.countryCode(exitCountry ?? '');
     if (c.isEmpty) return true;
-    bool blocked() => st.exitBlocked.map((e) => e.toUpperCase()).contains(c);
+    if (st.torExitEnforced && st.torExitStrict) {
+      return c == st.torExitCountry;
+    }
+    bool blocked() =>
+        st.effectiveExitBlocked.map((e) => e.toUpperCase()).contains(c);
     if (f == ExitFilter.nonIran) return !blocked();
     // Preferred: the wanted countries are accepted explicitly, everything else
     // still has to clear the blocked list (so clearing the preferred list can
     // never let Iran back in).
-    final want = st.exitPreferred.map((e) => e.toUpperCase());
+    final want = st.effectiveExitPreferred.map((e) => e.toUpperCase());
     if (want.contains(c)) return true;
     return !blocked();
   }
@@ -976,6 +1012,13 @@ class VpnController extends ChangeNotifier {
   /// Fresh exit lookup straight through the tunnel's own SOCKS listener. The
   /// dashboard poller has not started yet at this point, so without this the
   /// filter would judge the *previous* tunnel's country.
+  ///
+  /// Stale-display rule: the probe's country is published as-is, even when
+  /// it is empty — an unknown country must never keep showing the previous
+  /// tunnel's flag. The IP keeps its old value when the probe has none (the
+  /// IP is the liveness proof; a single failed lookup must not blank the
+  /// card). When no probe answers at all in 25 s, the whole exit is cleared
+  /// so the hero shows "detecting" instead of the previous tunnel's exit.
   Future<({String ip, String country, String colo, int pingMs})?>
       _probeExit(int gen) async {
     ({String ip, String country, String colo, int pingMs})? last;
@@ -994,10 +1037,13 @@ class VpnController extends ChangeNotifier {
       } catch (_) {}
       await Future<void>.delayed(const Duration(milliseconds: 900));
     }
-    if (last == null) return null;
+    if (last == null) {
+      _setGen(gen, snapshot.copyWith(clearExit: true));
+      return null;
+    }
     _setGen(gen, snapshot.copyWith(
       ip: last.ip.isEmpty ? snapshot.ip : last.ip,
-      country: last.country.isEmpty ? snapshot.country : last.country,
+      country: last.country,
       location: last.colo.isEmpty ? snapshot.location : last.colo,
       pingMs: last.pingMs,
     ));
@@ -1423,12 +1469,26 @@ class VpnController extends ChangeNotifier {
           _set(snapshot.copyWith(pingMs: ping));
         } else {
           final exit = await SocksProbe.exitInfo(port: settings.socksPort);
-          _set(snapshot.copyWith(
-            pingMs: exit.pingMs,
-            ip: exit.ip.isEmpty ? snapshot.ip : exit.ip,
-            country: exit.country.isEmpty ? snapshot.country : exit.country,
-            location: exit.colo.isEmpty ? snapshot.location : exit.colo,
-          ));
+          if (exit.ip.isEmpty && exit.country.isEmpty) {
+            // Transient lookup failure: keep the last exit. Three empty
+            // refreshes in a row clear it (see _emptyExitProbes).
+            _emptyExitProbes++;
+            _set(snapshot.copyWith(pingMs: exit.pingMs));
+            if (_emptyExitProbes >= 3) {
+              _emptyExitProbes = 0;
+              _set(snapshot.copyWith(clearExit: true));
+            }
+          } else {
+            _emptyExitProbes = 0;
+            _set(snapshot.copyWith(
+              pingMs: exit.pingMs,
+              ip: exit.ip.isEmpty ? snapshot.ip : exit.ip,
+              // The country is published as-is (see _probeExit): an unknown
+              // country must not keep showing the previous tunnel's flag.
+              country: exit.country,
+              location: exit.colo.isEmpty ? snapshot.location : exit.colo,
+            ));
+          }
         }
         _lastHealthy = DateTime.now();
       } catch (_) {

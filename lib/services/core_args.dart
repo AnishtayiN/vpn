@@ -75,11 +75,18 @@ class CoreLaunch {
   /// and a deny-list when that leaves nothing (clearing the preferred list must
   /// never let a blocked exit in — the same rule the client-side filter
   /// applies after the tunnel is up).
+  ///
+  /// The rule comes from the *effective* values (`VpnSettings`
+  /// effectiveExitFilter / effectiveExitPreferred / effectiveExitBlocked),
+  /// not the stored filter: a picked Tor exit country overrides the stored
+  /// rule while Tor is in the path, so the core enforces the same allow-list
+  /// the client-side search enforces — the core relocating the gateway is
+  /// the fast path, the client's re-dial is the backstop.
   static String? exitLoc(VpnSettings s) {
     if (!s.coreExitLoc || s.exitRulePaused) return null;
-    final blocked = s.exitBlocked.map((e) => e.toUpperCase()).toList();
-    final wanted = s.exitPreferred.map((e) => e.toUpperCase()).toList();
-    switch (s.exitFilter) {
+    final blocked = s.effectiveExitBlocked.map((e) => e.toUpperCase()).toList();
+    final wanted = s.effectiveExitPreferred.map((e) => e.toUpperCase()).toList();
+    switch (s.effectiveExitFilter) {
       case ExitFilter.off:
         return null;
       case ExitFilter.nonIran:

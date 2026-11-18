@@ -97,15 +97,19 @@ class ExitFilterBadge extends StatelessWidget {
     final c = controller;
     final s = c.s;
     final st = c.settings;
-    if (st.exitFilter == ExitFilter.off) return const SizedBox.shrink();
-    final codes = st.exitFilter == ExitFilter.preferred
-        ? st.exitPreferred
-        : st.exitBlocked;
+    // The badge describes the rule the tunnel actually enforces, which —
+    // while a Tor exit country is pinned — is the Tor override, not the
+    // stored filter. See VpnSettings.effectiveExitFilter.
+    final filter = st.effectiveExitFilter;
+    if (filter == ExitFilter.off) return const SizedBox.shrink();
+    final codes = filter == ExitFilter.preferred
+        ? st.effectiveExitPreferred
+        : st.effectiveExitBlocked;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         Icon(
-          st.exitFilter == ExitFilter.preferred
+          filter == ExitFilter.preferred
               ? Icons.flag_outlined
               : Icons.block,
           size: 13,
@@ -129,6 +133,91 @@ class ExitFilterBadge extends StatelessWidget {
         const SizedBox(width: 4),
         Text(s.exitFilter,
             style: TextStyle(color: VoidrauTheme.mutedOf(context), fontSize: 10)),
+      ],
+    );
+  }
+}
+
+/// Navigation row opening the country picker: label, flag + current choice,
+/// chevron. Used on the Connect page (when a Psiphon/Tor hop is active) and
+/// in Configurations (for the Psiphon exit country).
+class CountryPickerEntryRow extends StatelessWidget {
+  const CountryPickerEntryRow({
+    super.key,
+    required this.label,
+    required this.display,
+    required this.onTap,
+    this.code,
+  });
+
+  /// Row label, e.g. the Psiphon/Tor exit-country title. Empty or null
+  /// hides the label line (the caller may already label the row).
+  final String? label;
+
+  /// Resolved current choice: the country name, "Automatic", or
+  /// "Fastest nearby".
+  final String display;
+
+  /// ISO code for the flag; null or '' shows the neutral globe badge.
+  final String? code;
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = this.label;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (label != null && label.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Text(
+              label,
+              style: TextStyle(
+                  color: VoidrauTheme.mutedOf(context), fontSize: 13),
+            ),
+          ),
+        Material(
+          color: VoidrauTheme.surfaceOf(context),
+          borderRadius: BorderRadius.circular(12),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: onTap,
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: VoidrauTheme.lineOf(context)),
+              ),
+              child: Row(
+                children: [
+                  FlagIcon(
+                    countryCode:
+                        (code == null || code!.isEmpty) ? null : code,
+                    height: 26,
+                    radius: 5,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      display,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ),
+                  Icon(
+                    Icons.chevron_right,
+                    color: VoidrauTheme.mutedOf(context),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
       ],
     );
   }

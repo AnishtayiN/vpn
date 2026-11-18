@@ -454,9 +454,6 @@ class S {
       ? 'هسته ناگهان خاموش شد. گزارش کامل را در بخش عیب‌یابی ببینید.'
       : 'The tunnel core stopped unexpectedly. See the full log in Diagnostics.';
   String get hopRegion => isFa ? 'کشور خروجی Psiphon' : 'Psiphon exit country';
-  String get hopRegionHelp => isFa
-      ? 'مثلاً DE یا US — خالی یعنی خودش انتخاب کند'
-      : 'e.g. DE or US — empty lets it choose';
   String get hopCdn => isFa ? 'محدود به CDN (meek)' : 'CDN only (meek)';
   String get hopHttp => isFa ? 'پروکسی HTTP هم بساز' : 'Also serve HTTP CONNECT';
   String get hopHttpHelp => isFa
@@ -873,5 +870,35 @@ class S {
   // ── sectioned settings ─────────────────────────────────────────────────
   String get sectionConnection => isFa ? 'اتصال' : 'Connection';
   String get sectionExitCountry => isFa ? 'کشور خروجی' : 'Exit country';
+
+  // ── country picker (Psiphon / Tor exit country, UAC-style) ────────────
+  String get countrySearch => isFa ? 'جست‌وجوی کشور' : 'Search country';
+  String get countryAutomatic => isFa ? 'خودکار' : 'Automatic';
+  String get countryAutomaticPsiphon => isFa
+      ? 'سایفون بهترین خروجی در دسترس را انتخاب می‌کند'
+      : 'Psiphon picks the best available exit';
+  String get countryAutomaticTor => isFa
+      ? 'تور بهترین خروجی در دسترس را انتخاب می‌کند'
+      : 'Tor picks the best available exit';
+  String get countryRecommended => isFa ? 'پیشنهادی' : 'Recommended';
+  String get countryAll => isFa ? 'همه کشورها' : 'All countries';
+  String get countryChoose => isFa ? 'انتخاب کشور' : 'Choose country';
+  String countryExit(String code, bool psiphon) => isFa
+      ? '$code • خروجی ${psiphon ? 'Psiphon' : 'Tor'}'
+      : '$code • ${psiphon ? 'Psiphon' : 'Tor'} exit';
+  String get countrySelectedNext => isFa
+      ? 'برای اتصال بعدی انتخاب شد'
+      : 'Selected for the next connection';
+  String countryReconnecting(String name) =>
+      isFa ? 'در حال اتصال مجدد به $name…' : 'Reconnecting to $name…';
+  String get torExitCountry => isFa ? 'کشور خروجی Tor' : 'Tor exit country';
+  String get torExitFast => isFa ? 'سریع‌ترین نزدیک' : 'Fastest nearby';
+  String get torExitFastHelp => isFa
+      ? 'خروجی‌های نزدیک و پرظرفیت (DE · NL · CH · AT · FR · SE · PL · GB)'
+      : 'Nearby, well-provisioned exits (DE · NL · CH · AT · FR · SE · PL · GB)';
+  String get torExitNote => isFa
+      ? 'تور کنترل مستقیم خروجی ندارد؛ کشور انتخاب‌شده با جست‌وجوی دوبارهٔ تونل اعمال می‌شود و چون راه‌اندازی Tor کند است، ممکن است چند دقیقه طول بکشد.'
+      : 'Tor has no direct exit control; the picked country is enforced by re-dialling, and because Tor bootstrap is slow it can take minutes.';
+  String get exitCountryUnknown => isFa ? 'کشور نامشخص' : 'Unknown country';
 }
 
