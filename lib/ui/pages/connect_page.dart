@@ -15,6 +15,7 @@ import '../widgets/country_picker.dart';
 import '../widgets/flag_icon.dart';
 import '../widgets/mode_cards.dart';
 import '../widgets/orb_button.dart';
+import 'country_picker_screen.dart';
 
 class ConnectPage extends StatelessWidget {
   const ConnectPage({super.key, required this.controller, this.onShowDiagnostics});
@@ -216,6 +217,47 @@ class ConnectPage extends StatelessWidget {
                       ),
                     ),
                 ],
+              ),
+            ),
+          // Exit-country picker for the active hop: Psiphon (region sent
+          // to the core) or Tor (enforced by the exit search). Shown here
+          // like the mode/protocol cards — the Config page is paid-locked,
+          // but this page is not, and changing the hop country from here is
+          // the same kind of live choice as switching protocol.
+          if ((c.settings.hasPsiphonHop || c.settings.hasTorHop) &&
+              !c.useXray)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+              child: CountryPickerEntryRow(
+                label: c.settings.hasPsiphonHop
+                    ? s.hopRegion
+                    : s.torExitCountry,
+                display: c.settings.hasPsiphonHop
+                    ? (c.settings.psiphonRegion.isEmpty
+                        ? s.countryAutomatic
+                        : countryLabel(c.settings.psiphonRegion,
+                            fa: s.isFa))
+                    : (c.settings.torExitCountry.isEmpty
+                        ? (c.settings.torFastExit
+                            ? s.torExitFast
+                            : s.countryAutomatic)
+                        : countryLabel(c.settings.torExitCountry,
+                            fa: s.isFa)),
+                code: c.settings.hasPsiphonHop
+                    ? c.settings.psiphonRegion
+                    : c.settings.torExitCountry,
+                onTap: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => CountryPickerScreen(
+                        controller: c,
+                        engine: c.settings.hasPsiphonHop
+                            ? CountryPickerEngine.psiphon
+                            : CountryPickerEngine.tor,
+                      ),
+                    ),
+                  );
+                },
               ),
             ),
           // Xray engine (Android only): mode cards, shared with Config and
@@ -554,7 +596,14 @@ class _HeroCard extends StatelessWidget {
                             const _SkeletonBox(width: 160, height: 12),
                           ] else ...[
                             Text(
-                              name.isEmpty ? s.detecting : name,
+                              // The IP is known here (the skeleton branch
+                              // above covers the not-yet-probed case), so an
+                              // empty country means the lookup could not
+                              // identify it — "unknown", never the previous
+                              // tunnel's country.
+                              name.isEmpty
+                                  ? s.exitCountryUnknown
+                                  : name,
                               style: const TextStyle(
                                   fontWeight: FontWeight.w800, fontSize: 17),
                             ),
