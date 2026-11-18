@@ -45,6 +45,13 @@ class PlatformEngine {
       'protocol': (proto == Protocol.smart ? Protocol.masque : proto).name,
       'transport': settings.transport.name,
       'socksPort': settings.socksPort,
+      // The SOCKS listener device traffic goes through: the hop's own
+      // listener in chain mode, else the tunnel's. The native side routes
+      // the TUN bridge (and the LAN share) at this port and validates
+      // traffic through it; the core's own listener stays on socksPort.
+      // iOS ignores this key — IosPolicy forces hops off there, so the
+      // device port is always the SOCKS port and no Swift change is needed.
+      'devicePort': settings.devicePort,
       'tunMtu': settings.deviceMtu,
       'killSwitch': settings.killSwitch,
       'bypassLan': settings.bypassLan,
@@ -166,6 +173,12 @@ class WindowsEngine {
   String lastError = '';
   String? _originalGw;
   int _socksPort = 1819;
+
+  /// The SOCKS listener device traffic goes through: the hop's own listener
+  /// in chain mode, else the tunnel's. The core's listener stays on
+  /// [_socksPort] (the hop's upstream); everything the *device* uses — the
+  /// traffic proof, the system proxy, the TUN bridge — uses this port.
+  int _devicePort = 1819;
   bool _bypassLan = true;
   final _bypass = <String>{};
   final _lanBypass = <String>[];
@@ -310,6 +323,7 @@ class WindowsEngine {
     }
 
     _socksPort = settings.socksPort;
+    _devicePort = settings.devicePort;
     _bypassLan = settings.bypassLan;
     downloadBytes = 0;
     uploadBytes = 0;
@@ -382,7 +396,11 @@ class WindowsEngine {
 
     // Proving traffic is the difference between "connected" and "the core
     // opened a listener for a tunnel that carries nothing" (the reference
-    // proven-data-plane gate).
+    // proven-data-plane gate). In chain mode the proof goes through the
+    // HOP's listener: the tunnel alone proves nothing about the device
+    // path, and a hop that never serves must fail the connect here — with
+    // its own name on the error — instead of publishing "connected" on a
+    // WARP exit.
     phase = EnginePhase.connecting;
     message = 'Verifying the tunnel';
     _emit();
@@ -390,16 +408,22 @@ class WindowsEngine {
       // A slow hop needs more than the default two 10 s probes: its first
       // traffic can legitimately take minutes.
       await SocksProbe.prove(
-        port: _socksPort,
+        port: _devicePort,
         attempts: slowHop ? 6 : 2,
         timeout: slowHop
             ? const Duration(seconds: 30)
             : const Duration(seconds: 10),
       );
     } catch (e) {
-      lastError = 'tunnel carries no traffic';
+      // The core's listener already answered (_waitSocks passed), so in
+      // chain mode a failed proof means the hop never served — not a dead
+      // tunnel. Name it, so the user does not retry the wrong thing.
+      final chainHop = CoreLaunch.isChainHop(settings);
+      lastError = chainHop
+          ? '${CoreLaunch.isPsiphon(settings) ? 'Psiphon' : 'Tor'} second hop did not start in time'
+          : 'tunnel carries no traffic';
       phase = EnginePhase.error;
-      message = '$e';
+      message = chainHop ? lastError : '$e';
       _emit();
       await stop();
       return;
@@ -414,9 +438,9 @@ class WindowsEngine {
     await proxy.rememberOriginal();
 
     if (settings.mode == ConnectionMode.proxy) {
-      await proxy.enableOurs(_socksPort);
+      await proxy.enableOurs(_devicePort);
       phase = EnginePhase.connected;
-      message = 'SOCKS5 127.0.0.1:$_socksPort — system proxy on';
+      message = 'SOCKS5 127.0.0.1:$_devicePort — system proxy on';
       _emit();
       return;
     }
@@ -427,10 +451,10 @@ class WindowsEngine {
       // Honest degradation: no TUN without elevation, so the system proxy
       // is what keeps the machine tunneled. Tell the user exactly what to
       // do instead of silently lying about a TUN.
-      await proxy.enableOurs(_socksPort);
+      await proxy.enableOurs(_devicePort);
       tunError = 'not running as Administrator — WinTUN needs elevation';
       phase = EnginePhase.connected;
-      message = 'SOCKS5 127.0.0.1:$_socksPort (system proxy) — tap "Run as Administrator" for full device VPN';
+      message = 'SOCKS5 127.0.0.1:$_devicePort (system proxy) — tap "Run as Administrator" for full device VPN';
       _emit();
       return;
     }
@@ -448,10 +472,10 @@ class WindowsEngine {
     }
     final ok = await _startTun(exeDir, settings);
     if (!ok) {
-      await proxy.enableOurs(_socksPort);
+      await proxy.enableOurs(_devicePort);
       phase = EnginePhase.connected;
       message = lastError.isEmpty
-          ? 'SOCKS5 127.0.0.1:$_socksPort (device VPN unavailable, system proxy on)'
+          ? 'SOCKS5 127.0.0.1:$_devicePort (device VPN unavailable, system proxy on)'
           : '$lastError — system proxy on';
       _emit();
       return;
@@ -475,7 +499,7 @@ class WindowsEngine {
       await _awaitAdapterGone();
       tunBackend = '';
       tunError = 'adapter came up but carried no traffic: $e';
-      await proxy.enableOurs(_socksPort);
+      await proxy.enableOurs(_devicePort);
       phase = EnginePhase.connected;
       message = 'device VPN carried no traffic on ${win.label} — SOCKS5 system proxy on';
       _emit();
@@ -513,7 +537,7 @@ class WindowsEngine {
     // Disconnect means proxy flow stops too: hand the system proxy back to
     // whatever it was before VoidrauVPN, so the machine is left direct (or with
     // the user's own proxy) instead of pointing at a dead listener.
-    await WindowsSystemProxy.instance.restore(ourPort: _socksPort);
+    await WindowsSystemProxy.instance.restore(ourPort: _devicePort);
     tunBackend = '';
     tunAdapter = '';
     tunIndex = -1;
@@ -789,7 +813,7 @@ class WindowsEngine {
         await cfg.writeAsString(HevConfig.yaml(
           adapterName: adapterBase,
           mtu: settings.deviceMtu,
-          socksPort: _socksPort,
+          socksPort: _devicePort,
           ipv6: settings.ipv6Tunnel,
           logLevel: settings.logLevel,
           fast: settings.perfToken == 'high',
@@ -803,7 +827,7 @@ class WindowsEngine {
         '-device',
         'tun://$adapterBase',
         '-proxy',
-        'socks5://127.0.0.1:$_socksPort',
+        'socks5://127.0.0.1:$_devicePort',
         '-loglevel',
         'info',
       ];

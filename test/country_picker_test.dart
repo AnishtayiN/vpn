@@ -100,8 +100,26 @@ void main() {
       expect(pinned.effectiveExitPreferred, ['FR']);
     });
 
-    test('the override flows into the core env', () {
-      final env = CoreLaunch.environment(
+    test('the override flows into the core env — except in chain mode', () {
+      // Reverse: the exit IS the tunnel's, so the core enforces the
+      // allow-list against the right egress.
+      final reverseEnv = CoreLaunch.environment(
+        VpnSettings(
+          secondHop: SecondHop.torReverse,
+          torExitCountry: 'de',
+          torCountry: 'IR',
+        ),
+        configPath: '/tmp/aether.toml',
+      );
+      expect(reverseEnv['AETHER_EXIT_LOC'], 'DE');
+      // BridgeDB still gets its own country, unchanged.
+      expect(reverseEnv['AETHER_TOR_COUNTRY'], 'ir');
+
+      // Chain: the core's check reads the trace through the TUNNEL stack
+      // (the WARP egress), while the device exit is the hop's — enforcing
+      // the allow-list there would kill a tunnel whose hop exit is exactly
+      // what was asked for. The client-side search enforces it instead.
+      final chainEnv = CoreLaunch.environment(
         VpnSettings(
           secondHop: SecondHop.tor,
           torExitCountry: 'de',
@@ -109,11 +127,11 @@ void main() {
         ),
         configPath: '/tmp/aether.toml',
       );
-      // The core gets the allow-list in AETHER_EXIT_LOC; the client-side
-      // search is the backstop.
-      expect(env['AETHER_EXIT_LOC'], 'DE');
-      // BridgeDB still gets its own country, unchanged.
-      expect(env['AETHER_TOR_COUNTRY'], 'ir');
+      expect(chainEnv.containsKey('AETHER_EXIT_LOC'), isFalse);
+      // The hop itself is still configured exactly as before.
+      expect(chainEnv['AETHER_TOR'], 'chain');
+      expect(chainEnv['AETHER_TOR_BIND'], '127.0.0.1:1821');
+      expect(chainEnv['AETHER_TOR_COUNTRY'], 'ir');
     });
   });
 

@@ -256,7 +256,7 @@ void main() {
           'auto');
     });
 
-    test('a reverse hop is a slow hop, a chain hop is not', () {
+    test('a reverse hop and a chain hop are slow hops', () {
       expect(
           CoreLaunch.isSlowHop(
               VpnSettings(secondHop: SecondHop.psiphonReverse)),
@@ -268,9 +268,15 @@ void main() {
           CoreLaunch.isSlowHop(
               VpnSettings(standaloneMode: StandaloneMode.torOnly)),
           isTrue);
+      // A chain hop starts after the tunnel does — Psiphon gets up to
+      // 180 s, Tor's bootstrap takes minutes — so "connected" is only
+      // honest once the hop itself serves, and the connect budget waits.
       expect(
           CoreLaunch.isSlowHop(VpnSettings(secondHop: SecondHop.psiphon)),
-          isFalse);
+          isTrue);
+      expect(
+          CoreLaunch.isSlowHop(VpnSettings(secondHop: SecondHop.tor)),
+          isTrue);
       expect(CoreLaunch.isSlowHop(VpnSettings()), isFalse);
     });
 

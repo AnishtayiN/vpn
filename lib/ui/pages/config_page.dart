@@ -474,20 +474,40 @@ class _ConfigPageState extends State<ConfigPage> {
             if (st.secondHop != SecondHop.off || st.isStandaloneHop) ...[
               if (CoreLaunch.isPsiphon(st)) ...[
                 _label(s.hopRegion),
-                // The old free-text field is gone: a mistyped code
-                // ("Germany" → "GERMANY") was passed to the core and silently
-                // ignored, with no feedback. The picker only ever writes a
-                // valid 2-letter code (or '' for automatic).
-                CountryPickerEntryRow(
-                  label: '',
-                  display: st.psiphonRegion.isEmpty
-                      ? s.countryAutomatic
-                      : countryLabel(st.psiphonRegion, fa: s.isFa),
-                  code: st.psiphonRegion,
-                  onTap: () => _openCountryPicker(
-                    CountryPickerEngine.psiphon,
+                if (st.isReverseHop)
+                  // Reverse: the tunnel is dialled through Psiphon and the
+                  // exit stays WARP, so a picked country cannot be the
+                  // egress. No picker — the note, and the CDN switch below
+                  // stays (it is about the hop's transport, not its exit).
+                  Text(
+                    s.hopReverseNote(st.hopName),
+                    style: TextStyle(
+                        color: VoidrauTheme.mutedOf(context), fontSize: 12),
+                  )
+                else ...[
+                  // The old free-text field is gone: a mistyped code
+                  // ("Germany" → "GERMANY") was passed to the core and silently
+                  // ignored, with no feedback. The picker only ever writes a
+                  // valid 2-letter code (or '' for automatic).
+                  CountryPickerEntryRow(
+                    label: '',
+                    display: st.psiphonRegion.isEmpty
+                        ? s.countryAutomatic
+                        : countryLabel(st.psiphonRegion, fa: s.isFa),
+                    code: st.psiphonRegion,
+                    onTap: () => _openCountryPicker(
+                      CountryPickerEngine.psiphon,
+                    ),
                   ),
-                ),
+                  const SizedBox(height: 6),
+                  Text(
+                    st.isStandaloneHop
+                        ? s.hopTopologyOnly(st.hopName)
+                        : s.hopTopologyChain(st.hopName),
+                    style: TextStyle(
+                        color: VoidrauTheme.mutedOf(context), fontSize: 12),
+                  ),
+                ],
                 SwitchListTile(
                   value: st.psiphonCdn,
                   title: Text(s.hopCdn),
@@ -498,56 +518,75 @@ class _ConfigPageState extends State<ConfigPage> {
                 ),
               ] else ...[
                 _label(s.torExitCountry),
-                // UAC's 3-way Tor exit choice: Automatic (Tor picks), Fastest
-                // nearby (DE · NL · CH …), or a pinned country (opens the
-                // picker). A pinned country is enforced by the exit-country
-                // search — Tor has no core-side exit control — so the note
-                // below says plainly that it reconnects and can take minutes.
-                _seg(
-                  st.torExitCountry.isNotEmpty
-                      ? 'country'
-                      : (st.torFastExit ? 'fast' : 'auto'),
-                  {
-                    'auto': s.countryAutomatic,
-                    'fast': s.torExitFast,
-                    'country': st.torExitCountry.isEmpty
-                        ? s.countryChoose
-                        : countryLabel(st.torExitCountry, fa: s.isFa),
-                  },
-                  (v) async {
-                    if (v == 'country') {
-                      _openCountryPicker(CountryPickerEngine.tor);
-                      return;
-                    }
-                    st.torFastExit = v == 'fast';
-                    st.torExitCountry = '';
-                    st.torExitStrict = true;
-                    await c.persist();
-                    if (!mounted) return;
-                    if (c.snapshot.isActive || c.busy) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(s.countryReconnecting(
-                            v == 'fast'
-                                ? s.torExitFast
-                                : s.countryAutomatic,
-                          )),
-                        ),
-                      );
-                      unawaited(c.redial());
-                    }
-                    setState(() {});
-                  },
-                  wrap: true,
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  s.torExitNote,
-                  style: TextStyle(
-                    color: VoidrauTheme.mutedOf(context),
-                    fontSize: 12,
+                if (st.isReverseHop)
+                  // Reverse: same as Psiphon above — the exit stays WARP.
+                  // The BridgeDB field below stays: bridges are about
+                  // reaching Tor, not about its exit country.
+                  Text(
+                    s.hopReverseNote(st.hopName),
+                    style: TextStyle(
+                        color: VoidrauTheme.mutedOf(context), fontSize: 12),
+                  )
+                else ...[
+                  // UAC's 3-way Tor exit choice: Automatic (Tor picks), Fastest
+                  // nearby (DE · NL · CH …), or a pinned country (opens the
+                  // picker). A pinned country is enforced by the exit-country
+                  // search — Tor has no core-side exit control — so the note
+                  // below says plainly that it reconnects and can take minutes.
+                  _seg(
+                    st.torExitCountry.isNotEmpty
+                        ? 'country'
+                        : (st.torFastExit ? 'fast' : 'auto'),
+                    {
+                      'auto': s.countryAutomatic,
+                      'fast': s.torExitFast,
+                      'country': st.torExitCountry.isEmpty
+                          ? s.countryChoose
+                          : countryLabel(st.torExitCountry, fa: s.isFa),
+                    },
+                    (v) async {
+                      if (v == 'country') {
+                        _openCountryPicker(CountryPickerEngine.tor);
+                        return;
+                      }
+                      st.torFastExit = v == 'fast';
+                      st.torExitCountry = '';
+                      st.torExitStrict = true;
+                      await c.persist();
+                      if (!mounted) return;
+                      if (c.snapshot.isActive || c.busy) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(s.countryReconnecting(
+                              v == 'fast'
+                                  ? s.torExitFast
+                                  : s.countryAutomatic,
+                            )),
+                          ),
+                        );
+                        unawaited(c.redial());
+                      }
+                      setState(() {});
+                    },
+                    wrap: true,
                   ),
-                ),
+                  const SizedBox(height: 8),
+                  Text(
+                    st.isStandaloneHop
+                        ? s.hopTopologyOnly(st.hopName)
+                        : s.hopTopologyChain(st.hopName),
+                    style: TextStyle(
+                        color: VoidrauTheme.mutedOf(context), fontSize: 12),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    s.torExitNote,
+                    style: TextStyle(
+                      color: VoidrauTheme.mutedOf(context),
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 4),
                 _label(s.torCountry),
                 TextFormField(

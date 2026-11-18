@@ -82,8 +82,19 @@ class CoreLaunch {
   /// rule while Tor is in the path, so the core enforces the same allow-list
   /// the client-side search enforces — the core relocating the gateway is
   /// the fast path, the client's re-dial is the backstop.
+  ///
+  /// Except in chain mode: the core's check reads the trace through the
+  /// TUNNEL stack (the WARP egress), while the device exit is the hop's.
+  /// Enforcing the rule there would kill a tunnel whose hop exit is exactly
+  /// what the user asked for, just because the WARP exit is not — the two
+  /// enforcers would disagree about the same connection. So in chain mode
+  /// the core enforces nothing and the client-side search enforces the rule
+  /// against the probed hop exit instead (see [VpnSettings.devicePort] and
+  /// the controller's hop probe). In reverse mode the exit IS the tunnel's,
+  /// so the core check stays correct there.
   static String? exitLoc(VpnSettings s) {
     if (!s.coreExitLoc || s.exitRulePaused) return null;
+    if (isChainHop(s)) return null;
     final blocked = s.effectiveExitBlocked.map((e) => e.toUpperCase()).toList();
     final wanted = s.effectiveExitPreferred.map((e) => e.toUpperCase()).toList();
     switch (s.effectiveExitFilter) {
@@ -128,18 +139,23 @@ class CoreLaunch {
   /// (reverse) instead of carrying Psiphon/Tor inside it. A reverse hop
   /// only speaks TCP, so the core refuses WireGuard outright and runs
   /// MASQUE over HTTP/2 instead — see [smartVariant] and [smartLadder].
-  static bool isReverseHop(VpnSettings s) =>
-      s.standaloneMode == StandaloneMode.standard &&
-      (s.secondHop == SecondHop.psiphonReverse ||
-          s.secondHop == SecondHop.torReverse);
+  static bool isReverseHop(VpnSettings s) => s.isReverseHop;
+
+  /// Whether a second hop carries the device traffic (chain): the hop
+  /// listens on its own port and dials out through the tunnel, so the
+  /// final exit is the hop's. See [VpnSettings.isChainHop].
+  static bool isChainHop(VpnSettings s) => s.isChainHop;
 
   /// Whether the connection is a slow starter: a standalone Psiphon/Tor
-  /// mode, or a reverse hop the tunnel must be dialled through. Psiphon
-  /// gets up to 180 s to come up (`AETHER_PSIPHON_READY_SECS`) and Tor's
-  /// bootstrap plus bridges usually take a minute or two, so the traffic
-  /// validation and the connect budget must wait longer for these than for
-  /// a plain WARP tunnel.
-  static bool isSlowHop(VpnSettings s) => isStandalone(s) || isReverseHop(s);
+  /// mode, a reverse hop the tunnel must be dialled through, or a chain hop
+  /// — Psiphon gets up to 180 s to come up (`AETHER_PSIPHON_READY_SECS`)
+  /// and Tor's bootstrap plus bridges usually take a minute or two, so the
+  /// traffic validation and the connect budget must wait longer for these
+  /// than for a plain WARP tunnel. A chain hop is slow for the same reason
+  /// as the others: "connected" is only honest once the hop itself serves,
+  /// and the hop starts after the tunnel does.
+  static bool isSlowHop(VpnSettings s) =>
+      isStandalone(s) || isReverseHop(s) || isChainHop(s);
 
   /// True for the standalone top-level modes: plain Psiphon or plain Tor on
   /// the proxy port, with no WARP underneath.

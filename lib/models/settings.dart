@@ -81,13 +81,19 @@ enum SecondHop {
   /// No second hop.
   off,
 
-  /// Psiphon carries the tunnel (Psiphon inside the tunnel path, WARP exit).
+  /// Psiphon carries the device traffic: the hop listens on its own port
+  /// ([hopPort]) and dials out through the tunnel, so the final exit is
+  /// Psiphon's — not WARP's. (An older comment said "WARP exit" here; that
+  /// described the bug, not the topology: the app used to send all traffic
+  /// to the tunnel's own listener and the hop sat idle.)
   psiphon,
 
   /// The tunnel is dialled *through* Psiphon, so the network never sees WARP.
   psiphonReverse,
 
-  /// Tor carries the tunnel.
+  /// Tor carries the device traffic: same shape as [psiphon] — the hop
+  /// listens on [hopPort] and dials out through the tunnel, so the final
+  /// exit is Tor's.
   tor,
 
   /// The tunnel is dialled through Tor.
@@ -420,6 +426,39 @@ class VpnSettings {
       standaloneMode == StandaloneMode.torOnly ||
       (standaloneMode == StandaloneMode.standard &&
           (secondHop == SecondHop.tor || secondHop == SecondHop.torReverse));
+
+  /// True when a second hop *carries the device traffic* (chain): the hop
+  /// listens on its own port ([hopPort]) and dials out through the tunnel,
+  /// so the final exit is the hop's. Standalone modes are not chain (the hop
+  /// IS the main listener there) and reverse hops are not chain (the tunnel
+  /// is dialled through the hop and the exit stays WARP).
+  bool get isChainHop =>
+      standaloneMode == StandaloneMode.standard &&
+      (secondHop == SecondHop.psiphon || secondHop == SecondHop.tor);
+
+  /// True when the tunnel is dialled *through* Psiphon/Tor (reverse): the
+  /// final exit stays WARP — the hop only carries the tunnel. The exit
+  /// pickers must not present a country as the egress in this mode.
+  bool get isReverseHop =>
+      standaloneMode == StandaloneMode.standard &&
+      (secondHop == SecondHop.psiphonReverse ||
+          secondHop == SecondHop.torReverse);
+
+  /// 'Psiphon' when Psiphon is in the path, 'Tor' when Tor is, else ''.
+  /// The name the topology captions and the reverse note are built with.
+  String get hopName {
+    if (hasPsiphonHop) return 'Psiphon';
+    if (hasTorHop) return 'Tor';
+    return '';
+  }
+
+  /// The SOCKS listener device traffic must go through: the hop's own
+  /// listener in chain mode (the hop dials out through the tunnel, so the
+  /// final exit is the hop's), otherwise the tunnel's own listener. The
+  /// TUN bridge, the system proxy and the exit probe all use this port —
+  /// pointing any of them at [socksPort] in chain mode is the bug that left
+  /// the hop idle while traffic exited via WARP.
+  int get devicePort => isChainHop ? hopPort : socksPort;
 
   /// The exit rule actually enforced for this connection.
   ///

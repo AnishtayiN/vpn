@@ -60,6 +60,10 @@ object NimbusPlugin {
                         }
                     }
                     intent.putExtra(NimbusVpnService.EXTRA_SOCKS_PORT, num("socksPort", 1819))
+                    intent.putExtra(
+                        NimbusVpnService.EXTRA_DEVICE_PORT,
+                        num("devicePort", num("socksPort", 1819)),
+                    )
                     intent.putExtra(NimbusVpnService.EXTRA_MTU, num("tunMtu", 1500))
                     intent.putExtra(NimbusVpnService.EXTRA_KILL, args["killSwitch"] != false)
                     intent.putExtra(NimbusVpnService.EXTRA_BYPASS_LAN, args["bypassLan"] != false)

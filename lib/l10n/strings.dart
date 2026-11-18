@@ -900,5 +900,32 @@ class S {
       ? 'تور کنترل مستقیم خروجی ندارد؛ کشور انتخاب‌شده با جست‌وجوی دوبارهٔ تونل اعمال می‌شود و چون راه‌اندازی Tor کند است، ممکن است چند دقیقه طول بکشد.'
       : 'Tor has no direct exit control; the picked country is enforced by re-dialling, and because Tor bootstrap is slow it can take minutes.';
   String get exitCountryUnknown => isFa ? 'کشور نامشخص' : 'Unknown country';
+
+  // ── chain-hop routing (the hop carries the device traffic) ────────────
+  /// The hop never served traffic: the tunnel is up but the device path
+  /// (the hop) is not. Named with the hop so the user retries the right thing.
+  String hopNotReady(String hop) => isFa
+      ? '$hop بالا نیامد؛ شاید در این شبکه مسدود است. حالت معمولی یا شبکهٔ دیگر را امتحان کنید.'
+      : '$hop did not come up; it may be blocked on this network. Try Standard mode or another network.';
+
+  /// Spinner subtitle while the chain hop is still starting.
+  String hopWaiting(String hop) =>
+      isFa ? 'در حال آماده‌سازی $hop…' : 'Starting $hop…';
+
+  /// Caption under the picker: what the picked country controls (chain).
+  String hopTopologyChain(String hop) => isFa
+      ? 'زنجیره‌ای — ترافیک از $hop می‌گذرد؛ خروجی نهایی همان کشور انتخاب‌شده است'
+      : 'Chained — traffic goes through $hop; the final exit is the picked country';
+
+  /// Caption under the picker: what the picked country controls (only).
+  String hopTopologyOnly(String hop) => isFa
+      ? 'فقط $hop — بدون WARP؛ خروجی همان کشور انتخاب‌شده است'
+      : '$hop only — no WARP; the exit is the picked country';
+
+  /// Reverse mode: the picked country is NOT the exit — the exit stays
+  /// WARP. Shown instead of the picker, with the way out.
+  String hopReverseNote(String hop) => isFa
+      ? 'در مسیر معکوس، خروجی نهایی تونل WARP است؛ $hop فقط تونل را حمل می‌کند. برای انتخاب کشور، «زنجیره‌ای» یا «فقط $hop» را انتخاب کنید.'
+      : 'With a reverse hop the final exit is the WARP tunnel; $hop only carries it. Choose the chained or standalone mode for a country exit.';
 }
 

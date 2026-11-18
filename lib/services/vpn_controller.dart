@@ -57,6 +57,14 @@ class VpnController extends ChangeNotifier {
   bool get useXray =>
       useXrayFor(settings.xrayMode, supported: XrayEngine.supported);
 
+  /// The SOCKS listener the dashboard probes go through: the hop's listener
+  /// in chain mode, else the tunnel's own. Xray serves its own SOCKS on
+  /// [VpnSettings.socksPort] and never runs a chain hop, so the hop port
+  /// must never be probed there — a chain setting stored alongside an Xray
+  /// mode is inert, not a second listener.
+  int get devicePort =>
+      useXray ? settings.socksPort : settings.devicePort;
+
   /// Re-dial on the engine the settings select: Xray when [useXray],
   /// Aether otherwise.
   Future<void> reconnect() => useXray ? connectXray() : connect();
@@ -884,6 +892,26 @@ class VpnController extends ChangeNotifier {
       if (!_wantUp) return AttemptOutcome.failed;
       if (up) {
         final exit = await _probeExit(gen);
+        if (exit == null && CoreLaunch.isChainHop(settings)) {
+          // The tunnel is up but the hop never served a trace: the device
+          // path is the hop, so there is no exit to judge — and accepting
+          // an unknown exit here (the usual loop protection) would publish
+          // "connected" on a tunnel whose traffic still has nowhere to go.
+          // Fail the attempt with the hop named, instead of silently
+          // falling back to the WARP exit.
+          _log('chain hop did not serve an exit');
+          _setGen(gen, snapshot.copyWith(
+            phase: EnginePhase.error,
+            message: s.hopNotReady(
+              CoreLaunch.isPsiphon(settings) ? 'Psiphon' : 'Tor',
+            ),
+            clearConnectedAt: true,
+            clearExit: true,
+          ));
+          await engine.stop();
+          _scheduleWatchdog();
+          return AttemptOutcome.failed;
+        }
         final cc = exit?.country ?? '';
         // Only a real peer address is worth remembering: the colo code from a
         // trace (`FRA`, `IAD`) is not something the core can dial.
@@ -1009,9 +1037,13 @@ class VpnController extends ChangeNotifier {
     _startUptimeClock();
   }
 
-  /// Fresh exit lookup straight through the tunnel's own SOCKS listener. The
-  /// dashboard poller has not started yet at this point, so without this the
+  /// Fresh exit lookup straight through the device-traffic SOCKS listener.
+  /// The dashboard poller has not started yet at this point, so without this the
   /// filter would judge the *previous* tunnel's country.
+  ///
+  /// The listener is the device port ([devicePort]): the hop's in chain mode,
+  /// so the filter judges the hop's exit — the exit the user actually gets —
+  /// instead of the WARP exit behind it.
   ///
   /// Stale-display rule: the probe's country is published as-is, even when
   /// it is empty — an unknown country must never keep showing the previous
@@ -1025,7 +1057,7 @@ class VpnController extends ChangeNotifier {
     final deadline = DateTime.now().add(const Duration(seconds: 25));
     while (DateTime.now().isBefore(deadline) && _wantUp) {
       try {
-        final exit = await SocksProbe.exitInfo(port: settings.socksPort);
+        final exit = await SocksProbe.exitInfo(port: devicePort);
         final cc = SocksProbe.countryCode(exit.country);
         last = (
           ip: exit.ip,
@@ -1368,27 +1400,56 @@ class VpnController extends ChangeNotifier {
     // Generous budget: the gateway scan on a filtered network is the slow
     // part (the reference client gives MASQUE 60s, then races the h2 carrier). Cutting
     // at 60s while the core is still mid-scan is what produced the endless
-    // spinner and ladder churn. A standalone Psiphon/Tor mode or a reverse
-    // hop is slower still — Psiphon gets up to 180 s to come up and Tor's
-    // bootstrap plus bridges usually take a minute or two — so those get a
-    // 300 s budget instead of being cut off mid-bootstrap.
+    // spinner and ladder churn. A standalone Psiphon/Tor mode, a reverse
+    // hop or a chain hop is slower still — Psiphon gets up to 180 s to come
+    // up and Tor's bootstrap plus bridges usually take a minute or two — so
+    // those get a 300 s budget instead of being cut off mid-bootstrap.
     final budget = CoreLaunch.isSlowHop(settings)
         ? const Duration(seconds: 300)
         : (Platform.isAndroid || Platform.isIOS)
             ? const Duration(seconds: 210)
             : const Duration(seconds: 150);
     final deadline = DateTime.now().add(budget);
+    // In chain mode the engine's "connected" only means the tunnel is up;
+    // the device path is the hop, and the hop can still be starting. The
+    // core holds the hop's listener from the start, but the SOCKS handshake
+    // only completes once the core starts relaying to a tunnelled hop
+    // (Psiphon: its start() returns after the first tunnel; Tor: serve()
+    // starts after bootstrap) — so a successful handshake IS the readiness
+    // signal, and no log parsing is needed. Until it succeeds the loop
+    // keeps waiting inside the same budget, and the spinner says the hop
+    // is starting instead of claiming "connected" on a WARP exit.
+    Future<bool> hopReady() async {
+      if (!CoreLaunch.isChainHop(settings)) return true;
+      final ok = await SocksProbe.handshake(
+        port: settings.hopPort,
+        timeout: const Duration(milliseconds: 600),
+      );
+      if (!ok) {
+        _setGen(gen, snapshot.copyWith(
+          phase: EnginePhase.connecting,
+          message: s.hopWaiting(
+            CoreLaunch.isPsiphon(settings) ? 'Psiphon' : 'Tor',
+          ),
+        ));
+      }
+      return ok;
+    }
+
     while (DateTime.now().isBefore(deadline)) {
       if (!_wantUp) return false;
       await Future<void>.delayed(const Duration(milliseconds: 500));
       // Native events already flow into _onEvent; polling keeps Windows and
       // missed broadcasts honest.
-      if (snapshot.phase == EnginePhase.connected) return true;
+      if (snapshot.phase == EnginePhase.connected) {
+        if (await hopReady()) return true;
+      }
       if (snapshot.phase == EnginePhase.error) return false;
       try {
         final st = await engine.status();
         final phase = st['phase']?.toString() ?? '';
         if (phase == 'connected') {
+          if (!await hopReady()) continue;
           _setGen(gen, snapshot.copyWith(
             phase: EnginePhase.connected,
             endpoint: st['endpoint']?.toString() ?? snapshot.endpoint,
@@ -1417,6 +1478,7 @@ class VpnController extends ChangeNotifier {
       if (Platform.isWindows) {
         final win = WindowsEngine.instance;
         if (win.phase == EnginePhase.connected) {
+          if (!await hopReady()) continue;
           _setGen(gen, snapshot.copyWith(
             phase: EnginePhase.connected,
             endpoint: win.endpoint,
@@ -1460,7 +1522,7 @@ class VpnController extends ChangeNotifier {
       tick++;
       try {
         final ping = await SocksProbe.prove(
-          port: settings.socksPort,
+          port: devicePort,
           attempts: 1,
           timeout: const Duration(seconds: 8),
         );
@@ -1468,7 +1530,7 @@ class VpnController extends ChangeNotifier {
         if (!refreshExit) {
           _set(snapshot.copyWith(pingMs: ping));
         } else {
-          final exit = await SocksProbe.exitInfo(port: settings.socksPort);
+          final exit = await SocksProbe.exitInfo(port: devicePort);
           if (exit.ip.isEmpty && exit.country.isEmpty) {
             // Transient lookup failure: keep the last exit. Three empty
             // refreshes in a row clear it (see _emptyExitProbes).
