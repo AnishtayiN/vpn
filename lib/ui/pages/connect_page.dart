@@ -15,6 +15,7 @@ import '../widgets/country_picker.dart';
 import '../widgets/flag_icon.dart';
 import '../widgets/mode_cards.dart';
 import '../widgets/orb_button.dart';
+import '../widgets/rate_sparkline.dart';
 import 'country_picker_screen.dart';
 
 class ConnectPage extends StatelessWidget {
@@ -768,6 +769,19 @@ class _HeroCard extends StatelessWidget {
                     ),
                   ],
                 ),
+                // The live rate graph: the same rolling history the Speed
+                // page draws, fed by the meter's own samples, so the home
+                // screen shows whether the tunnel is idle or saturated
+                // without a page change. Hidden while the exit is still
+                // being detected — there is no tunnel to graph yet.
+                if (!detecting) ...[
+                  const SizedBox(height: 10),
+                  RateSparkline(
+                    down: c.rate.downHistory,
+                    up: c.rate.upHistory,
+                    height: 40,
+                  ),
+                ],
               ],
             ),
           ),

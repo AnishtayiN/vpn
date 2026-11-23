@@ -883,6 +883,9 @@ class S {
   String get countryRecommended => isFa ? 'پیشنهادی' : 'Recommended';
   String get countryAll => isFa ? 'همه کشورها' : 'All countries';
   String get countryChoose => isFa ? 'انتخاب کشور' : 'Choose country';
+  String get countryPingNote => isFa
+      ? 'پینگ کنار هر کشور، آخرین اندازه‌گیری واقعی از اتصال‌هایی است که از همان کشور خارج شده‌اند؛ «—» یعنی هنوز اندازه‌گیری نشده.'
+      : 'The ping beside each country is the last real measurement from connections that exited there; "—" means not measured yet.';
   String countryExit(String code, bool psiphon) => isFa
       ? '$code • خروجی ${psiphon ? 'Psiphon' : 'Tor'}'
       : '$code • ${psiphon ? 'Psiphon' : 'Tor'} exit';

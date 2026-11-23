@@ -214,6 +214,16 @@ class _CountryPickerScreenState extends State<CountryPickerScreen> {
               ),
             ),
           ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+            child: Text(
+              s.countryPingNote,
+              style: TextStyle(
+                color: VoidrauTheme.mutedOf(context),
+                fontSize: 12,
+              ),
+            ),
+          ),
           if (!_isPsiphon)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
@@ -226,7 +236,12 @@ class _CountryPickerScreenState extends State<CountryPickerScreen> {
               ),
             ),
           Expanded(
-            child: ListView.builder(
+            // The picker rebuilds with the controller so a ping measured
+            // while this screen is open (a live tunnel exiting in one of
+            // these countries) appears without reopening the page.
+            child: ListenableBuilder(
+              listenable: widget.controller,
+              builder: (context, _) => ListView.builder(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
               itemCount: rows.length,
               itemBuilder: (context, i) {
@@ -269,10 +284,14 @@ class _CountryPickerScreenState extends State<CountryPickerScreen> {
                           s.countryExit(code.toUpperCase(), _isPsiphon),
                       countryCode: code,
                       selected: _selected.toLowerCase() == code,
+                      // Last real measurement for this exit country, or
+                      // null → the row shows "—" (never measured).
+                      pingMs: widget.controller.countryPings.of(code)?.ms,
                       onTap: () => _apply(code: code),
                     );
                 }
               },
+              ),
             ),
           ),
         ],
@@ -289,6 +308,7 @@ class _CountryRow extends StatelessWidget {
     required this.onTap,
     this.countryCode,
     this.icon,
+    this.pingMs,
   });
 
   final String title;
@@ -297,6 +317,11 @@ class _CountryRow extends StatelessWidget {
   final VoidCallback onTap;
   final String? countryCode;
   final IconData? icon;
+
+  /// Last real ping measured through a tunnel exiting in this country.
+  /// Null = never measured (or not a country row): the row shows "—" for
+  /// country rows and nothing for the automatic/fast rows.
+  final int? pingMs;
 
   @override
   Widget build(BuildContext context) {
@@ -366,6 +391,19 @@ class _CountryRow extends StatelessWidget {
                     ],
                   ),
                 ),
+                if (countryCode != null) ...[
+                  Text(
+                    pingMs == null ? '—' : '$pingMs ms',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
+                      color: pingMs == null
+                          ? VoidrauTheme.mutedOf(context)
+                          : _pingColor(pingMs!),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                ],
                 if (selected)
                   Container(
                     width: 30,
@@ -387,4 +425,14 @@ class _CountryRow extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Ping quality colour, same thresholds as the Connect hero card and the
+/// Speed page (<70 excellent, <130 good, <220 fair, else poor) so a number
+/// means the same thing on every screen.
+Color _pingColor(int pingMs) {
+  if (pingMs < 70) return VoidrauColors.cyan;
+  if (pingMs < 130) return const Color(0xFF4ADE80);
+  if (pingMs < 220) return const Color(0xFFFBBF24);
+  return VoidrauColors.coral;
 }
