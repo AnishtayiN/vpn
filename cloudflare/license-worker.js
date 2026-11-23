@@ -1,4 +1,4 @@
-// VoidrauVPN License Bot + API — Cloudflare Worker (single file). v2.2.0
+// VoidrauVPN License Bot + API — Cloudflare Worker (single file). v2.2.1
 //
 // Deploy: wrangler deploy (or paste in the dashboard). Needs a KV namespace
 // bound as LICENSES and the secret BOT_TOKEN (from @BotFather).
@@ -53,7 +53,7 @@
 //   GET  /api/health            → { ok, service, time, version }
 //   POST /api/trial             → { ok, key, expiresAt, serverTime }
 
-const BOT_VERSION = '2.2.0';
+const BOT_VERSION = '2.2.1';
 
 const DEFAULT_PLANS = [
   { id: 'm1', label: '۱ ماهه — ۱۰۰ هزار تومان', days: 30, maxUsers: 1 },
@@ -696,7 +696,7 @@ async function mainMenu(env, from, lic) {
 }
 
 // ── latest release files from GitHub ─────────────────────────────────
-async function releaseFiles(env) {
+async function releaseFilesFromApi(env) {
   try {
     const ghHeaders = { Accept: 'application/vnd.github+json', 'User-Agent': 'VoidrauLicenseBot' };
     if (env.GITHUB_TOKEN) ghHeaders.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
@@ -718,6 +718,60 @@ async function releaseFiles(env) {
     } catch (_) {}
     return null;
   }
+}
+
+// v2.2.1: fallback when the GitHub API is unreachable — unauthenticated
+// calls from shared Worker egress IPs get rate-limited (403), which used
+// to pin the bot to the stale cache forever. The public release pages
+// carry no API quota: /releases/latest redirects to the tag page, and
+// /releases/expanded_assets/<tag> lists every asset with its size.
+async function releaseFilesFromHtml() {
+  try {
+    const page = await fetch('https://github.com/AnishtayiN/vpn/releases/latest', {
+      headers: { 'User-Agent': 'VoidrauLicenseBot' },
+    });
+    if (!page.ok) return null;
+    const m = /\/releases\/tag\/([^/?#]+)/.exec(page.url || '');
+    if (!m) return null;
+    const tag = decodeURIComponent(m[1]);
+    const frag = await fetch(
+      `https://github.com/AnishtayiN/vpn/releases/expanded_assets/${encodeURIComponent(tag)}`,
+      { headers: { 'User-Agent': 'VoidrauLicenseBot' } }
+    );
+    if (!frag.ok) return null;
+    const html = await frag.text();
+    const out = [];
+    const re = /href="\/AnishtayiN\/vpn\/releases\/download\/[^/"]+\/([^"]+)"/g;
+    let mm;
+    while ((mm = re.exec(html)) !== null) {
+      const rest = html.slice(mm.index, mm.index + 4000);
+      const sm = /([0-9]+(?:\.[0-9]+)?)\s*(KB|MB|GB)/.exec(rest);
+      let size = 0;
+      if (sm) {
+        const mult = sm[2] === 'GB' ? 1073741824 : sm[2] === 'MB' ? 1048576 : 1024;
+        size = Math.round(parseFloat(sm[1]) * mult);
+      }
+      out.push({
+        name: decodeURIComponent(mm[1]),
+        size,
+        url: `https://github.com/AnishtayiN/vpn/releases/download/${encodeURIComponent(tag)}/${mm[1]}`,
+        tag,
+        date: new Date().toISOString(),
+      });
+    }
+    return out.length ? out : null;
+  } catch (e) {
+    try {
+      console.log('releaseFilesFromHtml error', e && e.message);
+    } catch (_) {}
+    return null;
+  }
+}
+
+async function releaseFiles(env) {
+  const fromApi = await releaseFilesFromApi(env);
+  if (fromApi) return fromApi;
+  return releaseFilesFromHtml();
 }
 
 const humanSize = (n) =>
@@ -1763,7 +1817,10 @@ async function handle(upd, env, steps, ctx) {
       }
       out = { text: `❌ رسید کاربر ${ru} رد شد و به او اطلاع داده شد.` };
     } else if (cb.data === 'dl' || cb.data === 'dlrefresh') {
-      if (cb.data === 'dlrefresh') await env.LICENSES.delete('cache:relfiles');
+      if (cb.data === 'dlrefresh') {
+        await env.LICENSES.delete('cache:relfiles');
+        await env.LICENSES.delete('cache:relfiles:stale');
+      }
       out = await doDownloads(env, tid);
     } else if (cb.data.startsWith('file:')) {
       const idx = parseInt(cb.data.slice(5));
