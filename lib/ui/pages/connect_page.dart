@@ -10,6 +10,7 @@ import '../../models/engine_state.dart';
 import '../../models/settings.dart';
 import '../../services/split.dart';
 import '../../services/vpn_controller.dart';
+import '../../services/xray_engine.dart';
 import '../../theme/voidrau_theme.dart';
 import '../widgets/country_picker.dart';
 import '../widgets/flag_icon.dart';
@@ -288,9 +289,43 @@ class ConnectPage extends StatelessWidget {
                       ],
                     ),
             ),
-          // Xray engine (Android only): mode cards, shared with Config and
+          // Server announcement (remote config): a dismissible banner.
+          // Dismissal is keyed by the announcement id/hash, so a new
+          // text shows again and an old one never nags twice.
+          if (c.announcementText != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(12, 10, 4, 10),
+                decoration: BoxDecoration(
+                  color: VoidrauColors.cyan.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: VoidrauTheme.lineOf(context)),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(Icons.campaign_rounded,
+                        size: 18, color: VoidrauColors.cyan),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        c.announcementText!,
+                        style: const TextStyle(height: 1.5, fontSize: 13),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: s.announcementDismiss,
+                      icon: const Icon(Icons.close_rounded, size: 18),
+                      onPressed: () => c.dismissAnnouncement(),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          // Xray engine (Android + Windows): mode cards, shared with Config and
           // Settings (improvement 4) — one widget, one definition.
-          if (Platform.isAndroid && !connected)
+          if (XrayEngine.supported && !connected)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
               child: Column(

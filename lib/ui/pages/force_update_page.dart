@@ -110,6 +110,19 @@ class ForceUpdatePage extends StatelessWidget {
               label: Text(s.getFromBot),
             ),
             const SizedBox(height: 10),
+            // A core-only release refreshes just the tunnel core files
+            // in place — say so, so the one tap below is not mistaken
+            // for a full reinstall.
+            if (c.coreOnlyUpdate) ...[
+              Text(
+                s.coreUpdateNote,
+                style: TextStyle(
+                    color: VoidrauTheme.mutedOf(context),
+                    fontSize: 12.5,
+                    height: 1.5),
+              ),
+              const SizedBox(height: 10),
+            ],
             // ── One-tap automatic update: download with progress, then install.
             FilledButton.icon(
               onPressed: (c.downloading || c.installStarted)

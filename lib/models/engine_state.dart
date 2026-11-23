@@ -1,3 +1,5 @@
+import '../services/core_update.dart';
+
 enum EnginePhase {
   disconnected,
   preparing,
@@ -104,6 +106,9 @@ class UpdateInfo {
     this.exeUrl,
     this.apkSha256,
     this.exeSha256,
+    this.zipUrl,
+    this.zipSha256,
+    this.manifest,
     this.htmlUrl,
     this.available = false,
     this.checkFailed = false,
@@ -116,6 +121,16 @@ class UpdateInfo {
   final String? exeUrl;
   final String? apkSha256;
   final String? exeSha256;
+
+  /// The Windows portable zip — the source for core-only updates
+  /// (see `core_update.dart`). Null when the release carries none.
+  final String? zipUrl;
+  final String? zipSha256;
+
+  /// The release's `core-manifest.json`, when it ships one: declares
+  /// whether the release is core-only. Null on older releases (the
+  /// remote config list declares it there instead).
+  final CoreUpdateManifest? manifest;
   final String? htmlUrl;
   final bool available;
 

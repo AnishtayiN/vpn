@@ -1,16 +1,24 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
+import 'package:path/path.dart' as p;
 
 import '../models/settings.dart';
 import 'chain_proxy.dart';
 import 'warp.dart';
+import 'windows_tun.dart';
 
 /// Xray-core beside Aether: the second engine of VoidrauVPN.
 ///
-/// **Android only.** Windows and iOS keep Aether exactly as today — the Xray
-/// modes are hidden there (see [XrayEngine.supported] and the settings UI).
+/// Android runs it in-process (gomobile `xray.aar`, TUN fd handed over by
+/// the VpnService). Windows runs the official `xray.exe` as a child
+/// process exposing the same SOCKS5 inbound, with the existing WinTUN
+/// bridges / system proxy in front of it (`WindowsEngine.startCaptureOnly`)
+/// — the mirror of how `aether.exe` is driven there. iOS keeps Aether
+/// exactly as today — the Xray modes are hidden there (see
+/// [XrayEngine.supported] and the settings UI).
 /// One tunnel at a time: starting Xray while Aether runs is the controller's
 /// job to prevent, and [XrayEngine.start] refuses to start twice.
 ///
@@ -37,16 +45,16 @@ class XrayEngine {
   /// of crashing.
   static const _channel = MethodChannel('nimbus.vpn/engine');
 
-  /// True only where the Xray engine exists: Android. Windows and iOS have
-  /// no Xray build (BPB, the reference for these modes, is Android-only too).
-  static bool get supported => Platform.isAndroid;
+  /// True where the Xray engine exists: Android (gomobile build) and
+  /// Windows (`xray.exe` sidecar). iOS has no Xray build.
+  static bool get supported => Platform.isAndroid || Platform.isWindows;
 
-  /// Throws [UnsupportedError] on Windows/iOS, so a caller can never start
-  /// an Xray mode where no Xray binary exists.
+  /// Throws [UnsupportedError] on iOS, so a caller can never start an
+  /// Xray mode where no Xray binary exists.
   static void requireSupported() {
     if (!supported) {
       throw UnsupportedError(
-        'Xray modes are Android-only for now; Windows and iOS keep Aether.',
+        'Xray modes are not available on iOS; Aether handles this platform.',
       );
     }
   }
@@ -54,16 +62,66 @@ class XrayEngine {
   bool _running = false;
   bool get isRunning => _running;
 
-  /// Starts Xray from a config built by [XrayConfigBuilder]. When [vpnMode]
-  /// is true the native side opens its own VpnService first and hands Xray
-  /// the TUN file descriptor (proxy mode passes no TUN). Throws when the
-  /// native side has no Xray build yet.
+  /// Optional sink for the Windows core's log lines (the controller
+  /// wires this to the same live log the Aether core feeds).
+  void Function(String line)? onLog;
+
+  /// Windows: fired when `xray.exe` exits without [stop] being called —
+  /// the controller engages the kill switch so the TUN/proxy capture
+  /// that outlives the core fails closed instead of leaking.
+  void Function()? onUnexpectedExit;
+
+  // ── Windows child process ──────────────────────────────────────────
+  Process? _proc;
+  bool _procExited = false;
+  String? _version;
+  String _lastError = '';
+
+  /// Where `xray.exe` lives: next to the app exe in an install, the dev
+  /// sidecar dir in a source run — the same resolution the Aether core
+  /// uses. Null when neither exists (a broken/old install).
+  static File? windowsBinary() {
+    final exeDir = File(Platform.resolvedExecutable).parent.path;
+    final installed = File(p.join(exeDir, 'xray.exe'));
+    if (installed.existsSync()) return installed;
+    final sidecar = File(p.join(
+        Directory.current.path, 'third_party', 'windows', 'xray.exe'));
+    if (sidecar.existsSync()) return sidecar;
+    return null;
+  }
+
+  /// Per-user writable dir for the generated config (mirrors
+  /// `WindowsEngine.runtimeDir` — the config carries the Worker UUID /
+  /// WARP keys, so it must never sit next to the exe under Program
+  /// Files, and it is deleted on stop).
+  static String get _windowsRuntimeDir {
+    final base = Platform.environment['LOCALAPPDATA'] ??
+        Platform.environment['APPDATA'] ??
+        Directory.systemTemp.path;
+    final dir = Directory(p.join(base, 'VoidrauVPN'));
+    dir.createSync(recursive: true);
+    return dir.path;
+  }
+
+  String get _configPath => p.join(_windowsRuntimeDir, 'xray.json');
+
+  /// Starts Xray from a config built by [XrayConfigBuilder]. On Android,
+  /// when [vpnMode] is true the native side opens its own VpnService
+  /// first and hands Xray the TUN file descriptor (proxy mode passes no
+  /// TUN). On Windows the core is spawned as `xray.exe run -c <config>`
+  /// and device capture is the caller's next step
+  /// (`PlatformEngine.startCaptureOnly`) — [vpnMode] only records the
+  /// intent there. Throws when the platform has no Xray build.
   Future<void> start(
     String configJson, {
     bool vpnMode = true,
   }) async {
     requireSupported();
     if (_running) return;
+    if (Platform.isWindows) {
+      await _startWindows(configJson);
+      return;
+    }
     try {
       await _channel.invokeMethod('startXray', {
         'config': configJson,
@@ -75,7 +133,88 @@ class XrayEngine {
     }
   }
 
+  Future<void> _startWindows(String configJson) async {
+    final exe = windowsBinary();
+    if (exe == null) {
+      throw StateError(
+          'xray.exe not found — reinstall VoidrauVPN (the Xray core is missing)');
+    }
+    // The generated config routes on `geoip:private`; without the asset
+    // files xray refuses the config at startup. Name the missing piece
+    // instead of surfacing a raw core error.
+    for (final asset in ['geoip.dat', 'geosite.dat']) {
+      if (!File(p.join(exe.parent.path, asset)).existsSync()) {
+        throw StateError(
+            '$asset not found next to xray.exe — reinstall VoidrauVPN');
+      }
+    }
+    await File(_configPath).writeAsString(configJson);
+    _procExited = false;
+    _lastError = '';
+    _proc = await Process.start(
+      exe.path,
+      ['run', '-c', _configPath],
+      workingDirectory: exe.parent.path,
+      environment: {
+        ...Platform.environment,
+        // Geo assets live next to the exe; the config lives in the
+        // runtime dir, so point Xray at the assets explicitly.
+        'XRAY_LOCATION_ASSET': exe.parent.path,
+      },
+    );
+    _running = true;
+    final proc = _proc!;
+    void onChunk(String chunk) {
+      for (final line in chunk.split(RegExp(r'\r?\n'))) {
+        final t = line.trim();
+        if (t.isEmpty) continue;
+        onLog?.call('xray: $t');
+        if (t.toLowerCase().contains('error') ||
+            t.toLowerCase().contains('failed')) {
+          _lastError = t;
+        }
+      }
+    }
+
+    proc.stdout.transform(utf8.decoder).listen(onChunk);
+    proc.stderr.transform(utf8.decoder).listen(onChunk);
+    unawaited(proc.exitCode.then((code) {
+      if (identical(_proc, proc)) {
+        _procExited = true;
+        _running = false;
+        onLog?.call('xray: core exited ($code)');
+        onUnexpectedExit?.call();
+      }
+    }));
+  }
+
   Future<void> stop() async {
+    if (Platform.isWindows) {
+      final proc = _proc;
+      _proc = null;
+      _running = false;
+      if (proc != null) {
+        // Same teardown as the Aether core: graceful signal, a short
+        // wait, then a tree-kill (xray spawns no helpers today, but the
+        // tree form is the safe default), then sigkill.
+        try {
+          proc.kill(ProcessSignal.sigterm);
+        } catch (_) {}
+        try {
+          await proc.exitCode.timeout(const Duration(milliseconds: 800));
+        } catch (_) {}
+        try {
+          await Process.run('taskkill', ProcessSweep.taskkillArgs(proc.pid));
+        } catch (_) {}
+        try {
+          proc.kill(ProcessSignal.sigkill);
+        } catch (_) {}
+      }
+      try {
+        await File(_configPath).delete();
+      } catch (_) {}
+      return;
+    }
     if (!_running && !supported) return;
     try {
       await _channel.invokeMethod('stopXray');
@@ -86,15 +225,38 @@ class XrayEngine {
     }
   }
 
-  /// Native status map: `{'running': bool, 'version': String}`. Empty when
-  /// the native side has no Xray build.
+  /// Status map: `{'running': bool, 'version': String}`. Empty when the
+  /// platform has no Xray build. On Windows, `running` tracks the child
+  /// process and `version` is read once from `xray.exe version`.
   Future<Map<String, dynamic>> status() async {
     if (!supported) return const {'running': false};
+    if (Platform.isWindows) {
+      return {
+        'running': _proc != null && !_procExited,
+        'version': await _windowsVersion(),
+        if (_lastError.isNotEmpty) 'error': _lastError,
+      };
+    }
     try {
       final map = await _channel.invokeMethod<Map>('xrayStatus');
       return Map<String, dynamic>.from(map ?? {});
     } on PlatformException {
       return const {'running': false};
+    }
+  }
+
+  Future<String> _windowsVersion() async {
+    final cached = _version;
+    if (cached != null) return cached;
+    final exe = windowsBinary();
+    if (exe == null) return _version = '';
+    try {
+      final r = await Process.run(exe.path, ['version']);
+      // "Xray 26.10.31 (Xray, Penetrates Everything.) ..."
+      final m = RegExp(r'Xray\s+([\d.]+)').firstMatch('${r.stdout}');
+      return _version = m?.group(1) ?? '';
+    } catch (_) {
+      return _version = '';
     }
   }
 }

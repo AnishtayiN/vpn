@@ -64,12 +64,20 @@ HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settin
         () {
       final s = WindowsSystemProxy.loopback(1819);
       expect(s.enabled, isTrue);
-      expect(s.server, '127.0.0.1:1819');
+      expect(s.server, 'socks=127.0.0.1:1819');
       expect(s.overrideList, '127.0.0.1;localhost;<local>');
     });
 
     test('follows the configured port', () {
-      expect(WindowsSystemProxy.loopback(9999).server, '127.0.0.1:9999');
+      expect(WindowsSystemProxy.loopback(9999).server, 'socks=127.0.0.1:9999');
+    });
+
+    test('names the SOCKS protocol — a bare host:port means HTTP to WinINET',
+        () {
+      expect(
+        WindowsSystemProxy.loopback(1821).server,
+        startsWith('socks='),
+      );
     });
   });
 

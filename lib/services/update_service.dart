@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../app_info.dart';
 import '../models/engine_state.dart';
+import 'core_update.dart';
 
 /// Checks GitHub Releases internally to know when a new build exists,
 /// but never exposes the repository link to the user — all UI surfaces
@@ -59,6 +60,9 @@ class UpdateService {
       String? exe;
       String? apkSha;
       String? exeSha;
+      String? zip;
+      String? zipSha;
+      String? manifestUrl;
       String? sumsUrl;
       final assets = <String, String>{};
       final digests = <String, String>{};
@@ -91,11 +95,36 @@ class UpdateService {
           exe = url;
           if (digest.length == 64) exeSha = digest;
         }
+        // The portable zip feeds core-only updates (Windows): only the
+        // tunnel core files are refreshed from it, in place.
+        if (name.toLowerCase().endsWith('.zip') &&
+            name.toLowerCase().contains('portable')) {
+          zip = url;
+          if (digest.length == 64) zipSha = digest;
+        }
+        if (name.toLowerCase() == 'core-manifest.json') {
+          manifestUrl = url;
+        }
       }
-      if (sumsUrl != null && (apkSha == null || exeSha == null)) {
+      if (sumsUrl != null && (apkSha == null || exeSha == null || zipSha == null)) {
         final sums = await _loadSums(sumsUrl);
         apkSha ??= _sumFor(sums, assets, apk);
         exeSha ??= _sumFor(sums, assets, exe);
+        zipSha ??= _sumFor(sums, assets, zip);
+      }
+      // The core manifest (when the release ships one) declares whether
+      // this release may be applied as a core-only refresh. Best effort:
+      // a missing/unreadable manifest just means "not declared here".
+      CoreUpdateManifest? manifest;
+      if (manifestUrl != null) {
+        try {
+          final mres = await http.get(Uri.parse(manifestUrl), headers: {
+            'User-Agent': 'VoidrauVPN/$current',
+          }).timeout(const Duration(seconds: 15));
+          if (mres.statusCode == 200) {
+            manifest = CoreUpdateManifest.tryParse(mres.body);
+          }
+        } catch (_) {}
       }
       return UpdateInfo(
         current: current,
@@ -105,6 +134,9 @@ class UpdateService {
         exeUrl: exe,
         apkSha256: apkSha,
         exeSha256: exeSha,
+        zipUrl: zip,
+        zipSha256: zipSha,
+        manifest: manifest,
         // IMPORTANT: show Telegram channel to user, not GitHub link
         htmlUrl: telegramUrl,
         available: _isNewer(latest, current),
@@ -244,5 +276,51 @@ class UpdateService {
       if (x != y) return x > y;
     }
     return false;
+  }
+}
+
+/// Extracts the human changelog from a GitHub release body.
+///
+/// The release workflow wraps the author's notes in fixed boilerplate:
+///
+/// ```
+/// ## VoidrauVPN v1.9.0
+///
+/// <author notes>
+///
+/// > **Important:** as soon as a release is published, …
+///
+/// ### Downloads — read this first on Android
+/// …
+/// ```
+///
+/// The "what's new" notice shows only the author notes: the version
+/// header is dropped and everything from the Important blockquote (or
+/// the Downloads heading) on is cut. A body without the boilerplate is
+/// returned as-is (minus a leading version header), so hand-written
+/// releases still read correctly.
+class ReleaseNotes {
+  static String userNotes(String body) {
+    final lines = body.split(RegExp(r'\r?\n'));
+    final out = <String>[];
+    for (final line in lines) {
+      final t = line.trim();
+      if (t.startsWith('> **Important:**') ||
+          t.startsWith('### Downloads')) {
+        break;
+      }
+      out.add(line);
+    }
+    // Drop the leading "## VoidrauVPN vX.Y.Z" header (the dialog titles
+    // the version itself).
+    while (out.isNotEmpty && out.first.trim().isEmpty) {
+      out.removeAt(0);
+    }
+    if (out.isNotEmpty &&
+        RegExp(r'^#{1,3}\s+VoidrauVPN\s+v?\d+\.\d+\.\d+')
+            .hasMatch(out.first.trim())) {
+      out.removeAt(0);
+    }
+    return out.join('\n').trim();
   }
 }

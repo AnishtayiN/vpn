@@ -52,8 +52,12 @@
 //   POST /api/sessions/revoke-all { key, deviceId, keepSessionId? } → { ok, sessions }
 //   GET  /api/health            → { ok, service, time, version }
 //   POST /api/trial             → { ok, key, expiresAt, serverTime }
+//   GET  /api/config            → { ok, config, serverTime }  (v2.3: small
+//        server-driven app config — announcement text, changelog override,
+//        core-only version list, feature flags; set by the admin with
+//        /appconfig in the bot. Never carries servers or keys.)
 
-const BOT_VERSION = '2.2.1';
+const BOT_VERSION = '2.3.0';
 
 const DEFAULT_PLANS = [
   { id: 'm1', label: '۱ ماهه — ۱۰۰ هزار تومان', days: 30, maxUsers: 1 },
@@ -73,6 +77,52 @@ const plansOf = async (env) => {
 const trialDaysOf = async (env) => {
   const d = parseInt((await env.LICENSES.get('setting:trialDays')) || '');
   return d && d > 0 ? d : TRIAL_DAYS;
+};
+
+// ── v2.3: remote app config (GET /api/config) ──────────────────────────
+// Small, public, server-driven values the app fetches at startup so a
+// text/flag change does not need a new release: an announcement banner, a
+// changelog override for the "what's new" notice, the list of releases
+// whose changes are core-only (Windows core refresh instead of a full
+// install), and simple boolean feature flags. Deliberately NOT a server
+// list and never keys — the app ignores anything outside this shape.
+// Stored as one JSON object under KV `config:app`; set by the admin via
+// /appconfig in the bot. Sanitized on both write and read.
+const APP_CONFIG_KEY = 'config:app';
+
+function sanitizeAppConfig(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : undefined);
+  const announcement = str(raw.announcement, 500);
+  if (announcement) out.announcement = announcement;
+  const announcementId = str(raw.announcementId, 64);
+  if (announcementId) out.announcementId = announcementId;
+  const changelog = str(raw.changelog, 4000);
+  if (changelog) out.changelog = changelog;
+  if (Array.isArray(raw.coreOnlyVersions)) {
+    const vs = raw.coreOnlyVersions
+      .filter((v) => typeof v === 'string' && /^\d+\.\d+\.\d+$/.test(v.trim()))
+      .map((v) => v.trim())
+      .slice(0, 20);
+    if (vs.length) out.coreOnlyVersions = vs;
+  }
+  if (raw.flags && typeof raw.flags === 'object' && !Array.isArray(raw.flags)) {
+    const flags = {};
+    for (const [k, v] of Object.entries(raw.flags).slice(0, 20)) {
+      if (typeof v === 'boolean' && /^[a-zA-Z0-9_.-]{1,40}$/.test(k)) flags[k] = v;
+    }
+    if (Object.keys(flags).length) out.flags = flags;
+  }
+  return out;
+}
+
+const appConfigOf = async (env) => {
+  try {
+    return sanitizeAppConfig(JSON.parse((await env.LICENSES.get(APP_CONFIG_KEY)) || 'null'));
+  } catch (_) {
+    return {};
+  }
 };
 
 const REFERRAL_REWARD_JOINS = 3; // every N joins
@@ -1460,6 +1510,23 @@ async function handleHttp(request, env, ctx) {
     return json({ ok: true, service: 'VoidrauVPN License API', time: Math.floor(Date.now() / 1000), version: BOT_VERSION });
   }
 
+  // v2.3: remote app config — public by design (announcement text and
+  // flags only; no licence data, no servers, no keys). The app fails
+  // open to its built-in defaults when this is unreachable.
+  if (url.pathname === '/api/config') {
+    const config = await appConfigOf(env);
+    return new Response(
+      JSON.stringify({ ok: true, config, serverTime: Math.floor(Date.now() / 1000) }),
+      {
+        status: 200,
+        headers: {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'public, max-age=300',
+        },
+      },
+    );
+  }
+
   if (url.pathname === '/api/trial' && request.method === 'POST') {
     const body = await request.json().catch(() => ({}));
     const tid = String(body.telegramId || '').trim();
@@ -2422,6 +2489,33 @@ async function ensureIndexed(env, tid) {
       const diagKey = (await env.LICENSES.get('set:diagkey')) || '';
       const host = (await env.LICENSES.get('set:workerhost')) || 'voidrau.massagetoanishtayin.workers.dev';
       await sendReply(env, tid, {text: diagKey ? `🔐 لینک عیب‌یابی (فقط برای شما):\nhttps://${host}/diag?a=${env.ADMIN_ID}&k=${diagKey}\n\nاین لینک را با کسی به اشتراک نگذارید.` : '⚠️ کلید عیب‌یابی هنوز ساخته نشده است — اول یک‌بار /setup را در مرورگر باز کنید.'}, steps);
+      return;
+    }
+    // v2.3: /appconfig — view/set the remote app config served at
+    // GET /api/config (announcement, changelog override, coreOnlyVersions,
+    // flags). `/appconfig` shows it, `/appconfig clear` deletes it,
+    // `/appconfig <json>` replaces it (sanitized to the known shape).
+    if (text === '/appconfig' || text.startsWith('/appconfig ')) {
+      const arg = text.slice('/appconfig'.length).trim();
+      if (!arg) {
+        const cur = await appConfigOf(env);
+        await sendReply(env, tid, {text: '⚙️ کانفیگ فعلی اپ (GET /api/config):\n```json\n' + JSON.stringify(cur, null, 2) + '\n```\nبرای تغییر: /appconfig <json>\nبرای حذف: /appconfig clear', parse_mode: 'Markdown'});
+        return;
+      }
+      if (arg === 'clear') {
+        await env.LICENSES.delete(APP_CONFIG_KEY);
+        await sendReply(env, tid, {text: '✅ کانفیگ اپ پاک شد — اپ با پیش‌فرض‌های داخلی کار می‌کند.'});
+        return;
+      }
+      let parsed = null;
+      try { parsed = JSON.parse(arg); } catch (_) {}
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        await sendReply(env, tid, {text: '❌ JSON معتبر نیست. مثال:\n/appconfig {"announcement":"متن اطلاعیه","announcementId":"a1","flags":{"whatsNew":true}}'});
+        return;
+      }
+      const clean = sanitizeAppConfig(parsed);
+      await env.LICENSES.put(APP_CONFIG_KEY, JSON.stringify(clean));
+      await sendReply(env, tid, {text: '✅ کانفیگ اپ ذخیره شد:\n```json\n' + JSON.stringify(clean, null, 2) + '\n```', parse_mode: 'Markdown'});
       return;
     }
     if (text === '/panel') {

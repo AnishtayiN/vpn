@@ -233,6 +233,24 @@ class S {
       ? 'فایل را نصب کنید و برنامه را دوباره باز کنید'
       : 'Install it and reopen the app';
   String get releaseNotes => isFa ? 'توضیحات نسخه' : 'Release notes';
+
+  // ── what's new / announcement / core-only update ───────────────────
+  String whatsNewTitle(String version) => isFa
+      ? 'چه خبر؟ — نسخه $version'
+      : "What's new in v$version";
+  String get whatsNewDismiss => isFa ? 'فهمیدم' : 'Got it';
+  String get announcementDismiss => isFa ? 'بستن' : 'Dismiss';
+  String get coreUpdateNote => isFa
+      ? 'این نسخه فقط هستهٔ تونل را به‌روز می‌کند — نصب کامل لازم نیست و تنظیماتت دست نمی‌خورد.'
+      : 'This release only refreshes the tunnel core — no full install, and your settings stay untouched.';
+  String get coreUpdateDone =>
+      isFa ? 'هستهٔ تونل به‌روز شد' : 'Tunnel core updated';
+  String get coreUpdateFailed => isFa
+      ? 'به‌روزرسانی هسته ناموفق بود؛ نصب کامل را امتحان کن'
+      : 'Core update failed — try the full install';
+  String get coreUpdateBusy => isFa
+      ? 'اول قطع کن؛ هسته هنگام اتصال قفل است'
+      : 'Disconnect first — the core is locked while connected';
   String get checkAgain => isFa ? 'بررسی مجدد' : 'Check again';
   String get updatedToContinue => isFa
       ? 'پس از نصب نسخه جدید، اتصال دوباره فعال می‌شود'

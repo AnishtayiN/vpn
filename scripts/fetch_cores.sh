@@ -14,6 +14,11 @@ if [[ "$AETHER_TAG" == "$AETHER_LEGACY_TAG" ]]; then
   AETHER_PIN_PREFIX="aether_legacy"
 fi
 HEV_TAG="${HEV_TAG:-2.17.1}"
+# Xray-core for Windows (the second engine's Windows binary). The tag matches
+# the module version xray/go.mod pins for Android (pseudo-version of
+# 2026-10-31 → release v26.10.31), so both platforms run the same core build
+# and accept the same generated configs.
+XRAY_TAG="${XRAY_TAG:-v26.10.31}"
 TUN2SOCKS_TAG="${TUN2SOCKS_TAG:-v2.6.0}"
 # v2.5.1 is the last tun2socks release built with Go 1.20 — the last Go that
 # still runs on Windows 7/8/8.1. Everything newer needs Windows 10+, so the
@@ -306,6 +311,49 @@ if not (dest / "wintun.dll").exists():
 HEV_PY
 }
 
+# Xray-core (XTLS/Xray-core) for Windows: the official release zip carries
+# xray.exe plus the geoip.dat / geosite.dat asset files the generated config
+# names (`geoip:private` routing). The app spawns xray.exe as a SOCKS5 core
+# and points the same WinTUN bridges at it as it does for aether.exe, so the
+# three files stage next to the other sidecars. The zip's own wintun.dll is
+# NOT taken: the pinned WinTUN build (stage_wintun) stays the one copy.
+stage_xray_windows() {
+  local tmp="$ROOT/third_party/xray-win"
+  mkdir -p "$tmp" "$ROOT/third_party/windows"
+  download "https://github.com/XTLS/Xray-core/releases/download/${XRAY_TAG}/Xray-windows-64.zip" "$tmp/Xray-windows-64.zip" "$(pin_sha256 xray_windows_64)"
+  "$PYTHON" - "$tmp" "$ROOT/third_party/windows" <<'XRAY_PY'
+import shutil, sys, zipfile
+from pathlib import Path
+
+def _safe_extract(zf, dest):
+    dest = dest.resolve()
+    for m in zf.infolist():
+        t = (dest / m.filename).resolve()
+        if not str(t).startswith(str(dest)):
+            raise SystemExit(f"zip-slip member rejected: {m.filename}")
+    zf.extractall(dest)
+
+src, dest = Path(sys.argv[1]), Path(sys.argv[2])
+with zipfile.ZipFile(src / "Xray-windows-64.zip") as z:
+    _safe_extract(z, src / "x")
+files = {p.name.lower(): p for p in (src / "x").rglob("*") if p.is_file()}
+exe = files.get("xray.exe")
+if exe is None:
+    raise SystemExit("Error: xray.exe missing from the Xray windows zip")
+data = exe.read_bytes()
+if not data.startswith(b"MZ"):
+    raise SystemExit("Error: the Xray Windows binary is not a PE executable")
+shutil.copy2(exe, dest / "xray.exe")
+print(f"staged xray.exe ({len(data) // 1024} KiB)")
+for name in ("geoip.dat", "geosite.dat"):
+    f = files.get(name)
+    if f is None:
+        raise SystemExit(f"Error: {name} missing from the Xray windows zip")
+    shutil.copy2(f, dest / name)
+    print(f"staged {name}")
+XRAY_PY
+}
+
 stage_wintun() {
   local tmp="$ROOT/third_party/wintun"
   mkdir -p "$tmp" "$ROOT/third_party/windows"
@@ -343,5 +391,6 @@ if [[ "$TARGET" == "all" || "$TARGET" == "windows" ]]; then
   stage_tun2socks_legacy
   stage_wintun
   stage_hev_windows
+  stage_xray_windows
 fi
 echo "cores staged"

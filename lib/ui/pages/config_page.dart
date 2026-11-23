@@ -11,6 +11,7 @@ import '../../services/ios_policy.dart';
 import '../../services/split.dart';
 import '../../services/license_service.dart';
 import '../../services/vpn_controller.dart';
+import '../../services/xray_engine.dart';
 import '../../theme/voidrau_theme.dart';
 import '../widgets/country_picker.dart';
 import '../widgets/mode_cards.dart';
@@ -149,9 +150,9 @@ class _ConfigPageState extends State<ConfigPage> {
           Text(IosPolicy.help(s.isFa),
               style:
                   TextStyle(color: VoidrauTheme.mutedOf(context), height: 1.5)),
-        // Improvement 8: Xray at the top on Android (improvement 4's shared
+        // Improvement 8: Xray at the top (improvement 4's shared
         // mode cards, same widget as Connect and Settings).
-        if (Platform.isAndroid)
+        if (XrayEngine.supported)
           _section(
             title: s.xrayTitle,
             open: _xrayOpen,

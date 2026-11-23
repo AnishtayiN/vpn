@@ -10,6 +10,7 @@ import '../models/settings.dart';
 import 'core_args.dart';
 import 'socks_probe.dart';
 import 'split.dart';
+import 'windows_killswitch.dart';
 import 'windows_proxy.dart';
 import 'windows_tun.dart';
 
@@ -65,12 +66,24 @@ class PlatformEngine {
     throw UnsupportedError('Unsupported platform');
   }
 
-  Future<void> stop() {
+  /// [keepBlock] (Windows only): a recovery teardown that must keep the
+  /// kill-switch block (and the dead-listener proxy) in place while the
+  /// watchdog re-dials. User disconnects always pass false.
+  Future<void> stop({bool keepBlock = false}) {
     if (Platform.isAndroid || Platform.isIOS) {
       return _channel.invokeMethod('stop');
     }
-    if (Platform.isWindows) return WindowsEngine.instance.stop();
+    if (Platform.isWindows) {
+      return WindowsEngine.instance.stop(keepBlock: keepBlock);
+    }
     return Future.value();
+  }
+
+  /// Windows: engage the kill-switch block now (used when the Xray core
+  /// dies unexpectedly — the Aether core's own exit handler engages it
+  /// inside the engine). No-op off Windows / when not armed.
+  Future<void> engageKillSwitch() async {
+    if (Platform.isWindows) return WindowsEngine.instance.engageKillSwitch();
   }
 
   Future<Map<String, dynamic>> status() async {
@@ -95,6 +108,22 @@ class PlatformEngine {
     if (Platform.isAndroid || Platform.isIOS) {
       await _channel.invokeMethod('recover');
     }
+  }
+
+  /// Windows Xray path: the Xray core (spawned by `XrayEngine`) already
+  /// serves a proven SOCKS5 listener; this puts the same device capture
+  /// (WinTUN + egress gate, or the verified system proxy) in front of it
+  /// that the Aether path uses. No-op off Windows.
+  Future<void> startCaptureOnly(VpnSettings settings) async {
+    if (Platform.isWindows) {
+      return WindowsEngine.instance.startCaptureOnly(settings);
+    }
+  }
+
+  /// Windows self-heal: undo a kill-switch block left behind by a
+  /// hard-killed run. No-op off Windows.
+  Future<void> sweepKillSwitch() async {
+    if (Platform.isWindows) return WindowsEngine.instance.sweepKillSwitch();
   }
 
   Future<void> installUpdate(String path) async {
@@ -214,6 +243,45 @@ class WindowsEngine {
   int? _tunExit;
   List<String>? _defaultRouteDelete;
 
+  /// The machine has a global IPv6 default route (detected per start).
+  /// When true, TUN mode must capture or block IPv6 — an IPv4-only TUN
+  /// leaves dual-stack traffic on the physical line while every IPv4
+  /// probe stays green.
+  bool _hasIpv6Default = false;
+
+  /// We installed a `::/0` route via the TUN adapter this session and
+  /// owe its removal on teardown.
+  bool _ipv6RouteInstalled = false;
+
+  /// Kill switch ("Fail closed"): armed from settings at start; engaged
+  /// when the tunnel drops unexpectedly, disengaged on a proven
+  /// reconnect, a user disconnect, or the startup sweep. See
+  /// `windows_killswitch.dart`.
+  WindowsKillSwitch? _ks;
+  bool _killSwitchEnabled = false;
+
+  /// True while [stop] is tearing down on purpose — the process-exit
+  /// handlers must not mistake our own teardown for a tunnel drop and
+  /// engage the kill switch against a user disconnect.
+  bool _stopping = false;
+
+  /// HEV mapdns is active for this session (hev bridge + chain hop):
+  /// adapter DNS is the mapdns listener and the fake-IP network is
+  /// routed into the TUN. See [HevConfig].
+  bool _mapDnsActive = false;
+
+  /// We installed the mapdns fake-IP route (`240.0.0.0/4`) this session
+  /// and owe its removal on teardown.
+  bool _fakeIpRoute = false;
+
+  /// Extra upstream IPs to bypass before the default route goes in —
+  /// the Xray path's worker/WARP endpoints, whose dials must not enter
+  /// the TUN they feed. Empty on the Aether path.
+  List<String> _extraBypassIps = const [];
+
+  WindowsKillSwitch get _killSwitch => _ks ??=
+      WindowsKillSwitch(stateDir: runtimeDir, onLog: _logLine);
+
   Stream<String> get logs => _logs.stream;
 
   Map<String, dynamic> statusMap() => {
@@ -302,7 +370,13 @@ class WindowsEngine {
   }
 
   Future<void> start(VpnSettings settings, {Protocol? protocol}) async {
-    await stop();
+    _killSwitchEnabled = settings.killSwitch;
+    _extraBypassIps = const [];
+    // A restart during recovery keeps the kill-switch block (and the
+    // system proxy) in place: tearing capture down first is exactly the
+    // leak window the kill switch exists to close. A fresh connect with
+    // nothing engaged is unaffected either way.
+    await stop(keepBlock: settings.killSwitch);
     final proto = protocol ?? settings.protocol;
     final protoName = proto == Protocol.smart ? 'masque' : proto.name;
     this.protocol = protoName;
@@ -380,6 +454,9 @@ class WindowsEngine {
         phase = EnginePhase.error;
         message = lastError.isEmpty ? 'Tunnel core exited ($code)' : lastError;
         _emit();
+        // Unexpected drop: block device traffic until the watchdog's
+        // reconnect proves capture again (or the user disconnects).
+        unawaited(engageKillSwitch());
       }
     });
 
@@ -396,7 +473,7 @@ class WindowsEngine {
       phase = EnginePhase.error;
       message = lastError;
       _emit();
-      await stop();
+      await stop(keepBlock: _killSwitchEnabled);
       return;
     }
 
@@ -431,22 +508,110 @@ class WindowsEngine {
       phase = EnginePhase.error;
       message = chainHop ? lastError : '$e';
       _emit();
-      await stop();
+      await stop(keepBlock: _killSwitchEnabled);
       return;
     }
 
-    // The tunnel is proven. From here on the Windows system proxy follows
-    // the app's on/off state: snapshot whatever the user had, then take it
-    // (proxy mode) or give it back (device VPN — with a stale manual proxy
-    // active, WinINET apps would shortcut the tunnel through the raw SOCKS
-    // listener, so a full device VPN must run proxy-free).
+    await _capture(settings, exeDir);
+  }
+
+  /// Device capture for a SOCKS5 listener that is already proven — the
+  /// Xray-on-Windows path (`XrayEngine` spawns xray.exe, the controller
+  /// proves its SOCKS, then this puts the WinTUN/proxy capture in front
+  /// of it). Xray serves device traffic on its own SOCKS port, so the
+  /// device port is the SOCKS port here (no hop listener exists).
+  Future<void> startCaptureOnly(VpnSettings settings) async {
+    _killSwitchEnabled = settings.killSwitch;
+    _socksPort = settings.socksPort;
+    _devicePort = settings.socksPort;
+    _bypassLan = settings.bypassLan;
+    _extraBypassIps = await _resolveBypassIps(settings);
+    phase = EnginePhase.connecting;
+    message = 'Verifying the tunnel';
+    _emit();
+    final exeDir = File(Platform.resolvedExecutable).parent.path;
+    // Serverless dials direct by design (freedom outbound): behind a TUN
+    // its own sockets would loop back into itself, because Windows has
+    // no per-process tunnel exclusion like Android's UID rule. Proxy
+    // capture is the honest equivalent — apps ride the SOCKS, Xray's
+    // own dials stay direct.
+    final forceProxy = settings.xrayMode == XrayMode.serverless &&
+        settings.mode == ConnectionMode.vpn;
+    if (forceProxy) {
+      _logLine('Xray serverless on Windows uses proxy capture — a TUN '
+          'would loop its direct dials back into itself');
+    }
+    await _capture(settings, exeDir, forceProxy: forceProxy);
+  }
+
+  /// Upstream IPs the Xray core will dial that must bypass the TUN:
+  /// the worker domain's addresses (Worker mode) and the WARP endpoint
+  /// IPs (WARP mode). Resolved with the system resolver at connect
+  /// time; Cloudflare anycast answers are stable per-PoP in practice.
+  Future<List<String>> _resolveBypassIps(VpnSettings settings) async {
+    final ips = <String>{};
+    if (settings.xrayMode == XrayMode.worker) {
+      final domain = settings.workerDomain.trim();
+      if (domain.isNotEmpty) {
+        try {
+          for (final a in await InternetAddress.lookup(domain)) {
+            if (a.type == InternetAddressType.IPv4) ips.add(a.address);
+          }
+        } catch (e) {
+          _logLine('xray worker resolve failed ($domain): $e');
+        }
+      }
+    }
+    if (settings.xrayMode == XrayMode.warp) {
+      final ipRe = RegExp(r'(\d{1,3}(?:\.\d{1,3}){3})');
+      for (final ep in settings.warpEndpoints) {
+        final m = ipRe.firstMatch(ep);
+        if (m != null) ips.add(m.group(1)!);
+      }
+    }
+    if (ips.isNotEmpty) {
+      _logLine('xray upstreams bypass the TUN: ${ips.join(', ')}');
+    }
+    return ips.toList();
+  }
+
+  /// The capture half of a connect, shared by the Aether path ([start],
+  /// after its SOCKS proof) and the Xray path ([startCaptureOnly]):
+  /// system-proxy snapshot, then proxy mode, the non-elevated proxy
+  /// fallback, or the full WinTUN device VPN with its egress gate.
+  ///
+  /// The tunnel is proven. From here on the Windows system proxy follows
+  /// the app's on/off state: snapshot whatever the user had, then take it
+  /// (proxy mode) or give it back (device VPN — with a stale manual proxy
+  /// active, WinINET apps would shortcut the tunnel through the raw SOCKS
+  /// listener, so a full device VPN must run proxy-free).
+  Future<void> _capture(VpnSettings settings, String exeDir,
+      {bool forceProxy = false}) async {
     final proxy = WindowsSystemProxy.instance;
     await proxy.rememberOriginal();
 
-    if (settings.mode == ConnectionMode.proxy) {
-      await proxy.enableOurs(_devicePort);
+    _hasIpv6Default = await _detectIpv6Default();
+    if (_hasIpv6Default) {
+      _logLine('IPv6 default route present on this machine');
+    }
+
+    if (settings.mode == ConnectionMode.proxy || forceProxy) {
+      final proxyOk = await proxy.enableOurs(_devicePort);
+      if (_hasIpv6Default) {
+        _logLine('IPv6 default route present — proxy mode does not '
+            'capture IPv6; use device VPN mode for full capture');
+      }
+      // Capture verified: the recovery block (if any) has done its job.
+      if (proxyOk) await _killSwitch.disengage();
       phase = EnginePhase.connected;
-      message = 'SOCKS5 127.0.0.1:$_devicePort — system proxy on';
+      // The SOCKS listener itself is proven (prove() above), so proxy
+      // mode stays connected even when the system-proxy write fails —
+      // but the message must not claim a capture that never landed.
+      message = proxyOk
+          ? 'SOCKS5 127.0.0.1:$_devicePort — system proxy on'
+          : 'SOCKS5 127.0.0.1:$_devicePort — system proxy could not be '
+              'set; point apps at it manually';
+      if (!proxyOk) tunError = 'system proxy could not be set';
       _emit();
       return;
     }
@@ -457,11 +622,11 @@ class WindowsEngine {
       // Honest degradation: no TUN without elevation, so the system proxy
       // is what keeps the machine tunneled. Tell the user exactly what to
       // do instead of silently lying about a TUN.
-      await proxy.enableOurs(_devicePort);
       tunError = 'not running as Administrator — WinTUN needs elevation';
-      phase = EnginePhase.connected;
-      message = 'SOCKS5 127.0.0.1:$_devicePort (system proxy) — tap "Run as Administrator" for full device VPN';
-      _emit();
+      await _proxyFallback(
+        message:
+            'SOCKS5 127.0.0.1:$_devicePort (system proxy) — tap "Run as Administrator" for full device VPN',
+      );
       return;
     }
     final directRules =
@@ -476,39 +641,89 @@ class WindowsEngine {
     if (directRules.isNotEmpty) {
       _logLine('split tunneling: direct ${directRules.join(', ')}');
     }
+
+    // The line's own address, measured before any capture exists: the
+    // reference the egress gate below compares the device path against.
+    // Best effort — a filtered line may not answer a direct probe at
+    // all, and the gate then requires an exact match with the tunnel
+    // exit instead of the not-the-raw-line test.
+    String? rawIp;
+    try {
+      rawIp = (await SocksProbe.rawInfo()).ip;
+      _logLine('raw line address: $rawIp');
+    } catch (_) {}
+
     final ok = await _startTun(exeDir, settings);
     if (!ok) {
-      await proxy.enableOurs(_devicePort);
-      phase = EnginePhase.connected;
-      message = lastError.isEmpty
-          ? 'SOCKS5 127.0.0.1:$_devicePort (device VPN unavailable, system proxy on)'
-          : '$lastError — system proxy on';
-      _emit();
+      await _proxyFallback(
+        message: lastError.isEmpty
+            ? 'SOCKS5 127.0.0.1:$_devicePort (device VPN unavailable, system proxy on)'
+            : '$lastError — system proxy on',
+      );
       return;
     }
     // Full device tunnel: every app rides the TUN adapter directly, so the
     // system proxy goes back to off — no proxy to set, everything through
     // the VPN device.
-    await proxy.clearOurs();
+    if (!await proxy.clearOurs()) {
+      _logLine('warning: could not clear the system proxy — WinINET apps '
+          'may shortcut the TUN through a stale proxy');
+    }
+    // Routes now point into the TUN, so capture no longer depends on the
+    // firewall block — and the egress probe below must not be filtered
+    // by it. Disengage; a gate failure re-engages before the fallback.
+    await _killSwitch.disengage();
 
-    // An adapter that exists and a default route that is installed are not the
-    // same thing as internet that works. Prove the *device* carries traffic
-    // (plain HTTP, no SOCKS — the OS has nothing left but the TUN) before
-    // claiming a full VPN; otherwise a bridge that died right after creating
-    // the adapter would leave the machine blackholed and the UI green.
+    // Egress gate: an adapter that exists and a default route that is
+    // installed are not the same thing as traffic that leaves through the
+    // tunnel. A TUN whose default route loses the metric race (or points
+    // nowhere) keeps every SOCKS probe green while the machine's own
+    // traffic goes direct — the UI shows the tunnel exit, every site
+    // shows the user's real IP. So measure the egress of the device path
+    // itself and compare it with the tunnel exit and the raw line address
+    // before claiming a system VPN. A leak (or an unverifiable egress)
+    // tears the TUN down and degrades to the verified system proxy
+    // instead of publishing "connected" over an uncaptured machine.
+    String? tunFail;
+    String deviceIp = '';
     try {
-      await SocksProbe.proveDevice();
+      deviceIp = (await SocksProbe.deviceExit()).ip;
     } catch (e) {
-      _logLine('device VPN data-plane proof failed: $e');
+      tunFail = 'adapter came up but carried no traffic: $e';
+    }
+    if (tunFail == null) {
+      String? tunnelIp;
+      try {
+        tunnelIp = (await SocksProbe.exitInfo(port: _devicePort)).ip;
+      } catch (_) {}
+      final verdict = EgressCheck.evaluate(
+          deviceIp: deviceIp, tunnelIp: tunnelIp, rawIp: rawIp);
+      _logLine('device egress $deviceIp, tunnel exit ${tunnelIp ?? '?'}, '
+          'raw line ${rawIp ?? '?'} → $verdict');
+      if (!EgressCheck.ok(verdict)) {
+        _logLine(
+            'default routes: ${_defaultRouteSnapshot(await _routeTable())}');
+        tunFail = verdict == EgressVerdict.leaked
+            ? 'device traffic bypasses the tunnel '
+                '(egress $deviceIp is the raw line address)'
+            : 'device egress could not be verified (egress $deviceIp)';
+      }
+    }
+    if (tunFail != null) {
+      _logLine('device VPN egress gate failed: $tunFail');
       await _removeRoutes();
       await _killTun();
       await _awaitAdapterGone();
       tunBackend = '';
-      tunError = 'adapter came up but carried no traffic: $e';
-      await proxy.enableOurs(_devicePort);
-      phase = EnginePhase.connected;
-      message = 'device VPN carried no traffic on ${win.label} — SOCKS5 system proxy on';
-      _emit();
+      tunError = tunFail;
+      // The TUN is gone and nothing captures yet: if the kill switch is
+      // armed, block again until the proxy fallback lands (it disengages
+      // on success).
+      if (_killSwitchEnabled) await engageKillSwitch();
+      await _proxyFallback(
+        message:
+            'device VPN did not carry traffic on ${win.label} — SOCKS5 system proxy on',
+      );
       return;
     }
 
@@ -517,7 +732,40 @@ class WindowsEngine {
     _emit();
   }
 
-  Future<void> stop() async {
+  /// The honest degradation when no TUN captures the device: the system
+  /// proxy, *verified*. When even that cannot be set, nothing captures
+  /// traffic — claiming "connected" then is exactly the leak where every
+  /// site shows the user's real IP under a green UI — so the connect
+  /// fails loudly instead of publishing a capture that never landed.
+  Future<void> _proxyFallback({required String message}) async {
+    if (_hasIpv6Default) {
+      _logLine('IPv6 default route present — the system proxy does not '
+          'capture IPv6; run as Administrator for full device VPN');
+    }
+    final proxyOk = await WindowsSystemProxy.instance.enableOurs(_devicePort);
+    if (!proxyOk) {
+      lastError = 'could not set the system proxy — traffic is not protected';
+      tunError = lastError;
+      phase = EnginePhase.error;
+      this.message = lastError;
+      _emit();
+      await stop(keepBlock: _killSwitchEnabled);
+      return;
+    }
+    // The verified proxy captures WinINET traffic again — recovery over.
+    await _killSwitch.disengage();
+    phase = EnginePhase.connected;
+    this.message = message;
+    _emit();
+  }
+
+  /// Tears the session down. [keepBlock] is the recovery variant: the
+  /// kill-switch block (and a system proxy still pointing at the dead
+  /// listener) stay in place so traffic cannot leak direct while the
+  /// watchdog re-dials — the next proven capture disengages them. A
+  /// user disconnect always passes false.
+  Future<void> stop({bool keepBlock = false}) async {
+    _stopping = true;
     if (phase == EnginePhase.connected ||
         phase == EnginePhase.connecting ||
         phase == EnginePhase.scanning ||
@@ -557,18 +805,50 @@ class WindowsEngine {
     }
     await _sweepLeftoverHelpers();
     await _awaitAdapterGone();
-    // Disconnect means proxy flow stops too: hand the system proxy back to
-    // whatever it was before VoidrauVPN, so the machine is left direct (or with
-    // the user's own proxy) instead of pointing at a dead listener.
-    await WindowsSystemProxy.instance.restore(ourPort: _devicePort);
+    if (!keepBlock) {
+      // User disconnect (or recovery): the block has served its purpose.
+      await _killSwitch.disengage();
+      // Disconnect means proxy flow stops too: hand the system proxy back to
+      // whatever it was before VoidrauVPN, so the machine is left direct (or with
+      // the user's own proxy) instead of pointing at a dead listener.
+      await WindowsSystemProxy.instance.restore(ourPort: _devicePort);
+    }
+    // keepBlock: the proxy stays pointed at the dead listener on purpose —
+    // WinINET apps fail closed while the watchdog re-dials, exactly like
+    // Android's TUN staying up across core restarts.
+    _mapDnsActive = false;
     tunBackend = '';
     tunAdapter = '';
     tunIndex = -1;
     phase = EnginePhase.disconnected;
     message = '';
     endpoint = '';
+    _stopping = false;
     _emit();
   }
+
+  /// Engages the kill-switch block when armed. Needs Administrator —
+  /// in TUN mode the process is elevated by definition; without it the
+  /// block cannot be installed and the log says so (proxy mode still
+  /// fails closed for WinINET apps via the dead listener).
+  Future<void> engageKillSwitch() async {
+    if (!_killSwitchEnabled || _stopping) return;
+    if (!await isAdmin()) {
+      _logLine('kill switch: needs Administrator — traffic is NOT '
+          'firewall-blocked (proxy capture only)');
+      return;
+    }
+    await _killSwitch.engage(_killSwitchExePaths());
+  }
+
+  /// Executables the kill switch lets through so the tunnel can
+  /// re-dial while everything else is blocked: this install's cores
+  /// (the same path-scoped list the orphan sweep uses).
+  List<String> _killSwitchExePaths() => _helperExePaths();
+
+  /// Startup / recovery sweep for a kill-switch block left behind by a
+  /// hard-killed run (see [WindowsKillSwitch.sweep]).
+  Future<void> sweepKillSwitch() => _killSwitch.sweep();
 
   /// Full paths of this install's core and pt helpers — the exact
   /// executables the orphan sweep may stop. Mirrors the resolution in
@@ -587,6 +867,13 @@ class WindowsEngine {
       corePath,
       p.join(ptDir, 'psiphon-tunnel-core.exe'),
       p.join(ptDir, 'lyrebird.exe'),
+      // The Xray core is a sibling sidecar: an orphaned xray.exe would
+      // hold the SOCKS port against the next launch exactly like an
+      // orphaned psiphon holds its datastore.
+      installed
+          ? p.join(exeDir, 'xray.exe')
+          : p.join(Directory.current.path, 'third_party', 'windows',
+              'xray.exe'),
     ];
   }
 
@@ -785,6 +1072,7 @@ class WindowsEngine {
     tunAdapter = '';
     tunIndex = -1;
     tunError = '';
+    _mapDnsActive = false;
 
     // The installed layout keeps every bridge next to `voidrauvpn.exe`; a
     // development run keeps them in `third_party/windows`.
@@ -823,7 +1111,11 @@ class WindowsEngine {
     }
 
     final failures = <TunFailure>[];
-    for (final backend in TunPlan.order(build: win, available: bridges.keys)) {
+    // A chain hop (Psiphon/Tor last) makes the device egress TCP-only:
+    // only hev's mapdns can carry DNS there, so hev goes first.
+    final chainHop = CoreLaunch.isChainHop(settings);
+    for (final backend in TunPlan.order(
+        build: win, available: bridges.keys, preferMapDns: chainHop)) {
       _logLine('device VPN: trying ${backend.label} on ${win.label}');
       final attempt =
           await _tryTun(backend, bridges[backend]!, wintun, settings);
@@ -888,6 +1180,7 @@ class WindowsEngine {
           mtu: settings.deviceMtu,
           socksPort: _devicePort,
           ipv6: settings.ipv6Tunnel,
+          mapDns: CoreLaunch.isChainHop(settings),
           logLevel: settings.logLevel,
           fast: settings.perfToken == 'high',
         ));
@@ -934,6 +1227,16 @@ class WindowsEngine {
       // next one look like it died on the spot.
       if (identical(_tun, proc)) _tunExit = code;
       _onTunLog('${backend.fileName} exited ($code)');
+      // A bridge that dies under a live session takes the adapter (and
+      // its routes) with it — the machine is direct again. Fail the
+      // session loudly and engage the kill switch; the watchdog's
+      // reconnect rebuilds capture.
+      if (phase == EnginePhase.connected && !_stopping) {
+        phase = EnginePhase.error;
+        message = 'TUN bridge exited ($code)';
+        _emit();
+        unawaited(engageKillSwitch());
+      }
     }));
 
     // Wait for the WinTUN adapter to materialise; do not assume 2 seconds, and
@@ -956,6 +1259,19 @@ class WindowsEngine {
     tunAdapter = adapter.name;
     tunIndex = adapter.index;
 
+    // Hop-DNS: only hev can carry DNS through a TCP-only chain hop
+    // (mapdns). The adapter DNS and the fake-IP route below key off
+    // this flag; with tun2socks the limit is stated in the log instead
+    // of silently shipping dead DNS.
+    _mapDnsActive =
+        backend == TunBackend.hev && CoreLaunch.isChainHop(settings);
+    if (_mapDnsActive) {
+      _logLine('DNS via HEV mapdns (TCP-only hop in path)');
+    } else if (CoreLaunch.isChainHop(settings)) {
+      _logLine('${backend.label} has no mapdns — DNS over UDP cannot '
+          'ride the TCP-only hop; the hev bridge is preferred in chain mode');
+    }
+
     final cfg = await _configureAdapter(settings);
     if (cfg != null) return cfg;
 
@@ -966,8 +1282,26 @@ class WindowsEngine {
       return _TunAttempt.fail('default route install failed: $route',
           fatal: true);
     }
+    if (_mapDnsActive) {
+      // Fake-IP destinations must reach the bridge: 240.0.0.0/4 via the
+      // TUN adapter (mirrors Android's addRoute(MAPDNS_NETWORK, 4)).
+      final fake = await Process.run('route', [
+        'add', HevConfig.mapDnsNetwork, 'mask', HevConfig.mapDnsNetmask,
+        tunIp, 'if', '$tunIndex',
+      ]);
+      if (fake.exitCode == 0) {
+        _fakeIpRoute = true;
+      } else {
+        _logLine('mapdns fake-IP route failed: ${_out(fake)} — '
+            'fake-IP destinations will not reach the bridge');
+      }
+    }
     await _bypassLanRoutes();
     await _bypassDirectRoutes(settings);
+    final v6 = await _installIpv6Route(settings);
+    if (v6 != null) {
+      return _TunAttempt.fail('IPv6 route install failed: $v6', fatal: true);
+    }
     return _TunAttempt.success();
   }
 
@@ -1002,16 +1336,23 @@ class WindowsEngine {
     ]);
     if (mtu.exitCode != 0) _logLine('netsh set mtu: ${_out(mtu)}');
 
-    final dns = await _netsh(
-        ['interface', 'ipv4', 'set', 'dns', 'name=@if@', 'static', '1.1.1.1']);
-    if (dns.exitCode != 0) _logLine('netsh set dns: ${_out(dns)}');
-    final dns2 = await _netsh([
-      'interface', 'ipv4', 'add', 'dns',
-      'name=@if@',
-      '1.0.0.1',
-      'index=2',
+    // With mapdns active the adapter's only resolver is the bridge's
+    // fake-IP listener — a real secondary resolver would answer with
+    // real IPs and bypass the domain-name CONNECTs mapdns exists for.
+    final dns = await _netsh([
+      'interface', 'ipv4', 'set', 'dns', 'name=@if@', 'static',
+      _mapDnsActive ? HevConfig.mapDnsAddress : '1.1.1.1',
     ]);
-    if (dns2.exitCode != 0) _logLine('netsh add dns: ${_out(dns2)}');
+    if (dns.exitCode != 0) _logLine('netsh set dns: ${_out(dns)}');
+    if (!_mapDnsActive) {
+      final dns2 = await _netsh([
+        'interface', 'ipv4', 'add', 'dns',
+        'name=@if@',
+        '1.0.0.1',
+        'index=2',
+      ]);
+      if (dns2.exitCode != 0) _logLine('netsh add dns: ${_out(dns2)}');
+    }
     return null;
   }
 
@@ -1043,6 +1384,54 @@ class WindowsEngine {
     } catch (_) {
       return '';
     }
+  }
+
+  /// True when the machine has a global IPv6 default route (`route
+  /// print -6` shows `::/0`). Best effort: a failure to even ask means
+  /// "unknown", treated as absent so a tooling hiccup cannot block a
+  /// connect on a machine with no IPv6 to leak.
+  Future<bool> _detectIpv6Default() async {
+    try {
+      final r = await Process.run('route', ['print', '-6']);
+      return Netsh.hasIpv6DefaultRoute('${r.stdout}');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Captures IPv6 for TUN mode: an on-link `::/0` via the TUN adapter.
+  ///
+  /// With the IPv6 tunnel setting on, the adapter also gets the `fc00::1`
+  /// address the bridge config already names (hev stamps it itself; for
+  /// tun2socks netsh does it here, best effort). With the setting off,
+  /// the route still goes in — into a bridge with no IPv6 egress — so
+  /// IPv6 fails closed inside the tunnel instead of leaking direct while
+  /// the UI claims a full device VPN. Returns null on success (or when
+  /// there is no IPv6 default to capture), or the failure to report.
+  Future<String?> _installIpv6Route(VpnSettings settings) async {
+    if (!_hasIpv6Default) return null;
+    if (settings.ipv6Tunnel) {
+      try {
+        await Process.run('netsh', [
+          'interface', 'ipv6', 'set', 'address',
+          'interface=$tunIndex', 'address=fc00::1',
+        ]);
+      } catch (_) {}
+    }
+    try {
+      final r = await Process.run('netsh', [
+        'interface', 'ipv6', 'add', 'route',
+        'prefix=::/0', 'interface=$tunIndex', 'metric=5',
+      ]);
+      if (r.exitCode != 0) return _out(r);
+    } catch (e) {
+      return '$e';
+    }
+    _ipv6RouteInstalled = true;
+    _logLine(settings.ipv6Tunnel
+        ? 'IPv6 default route → TUN (IPv6 tunnel on)'
+        : 'IPv6 default route → TUN (blocked: IPv6 tunnel off, fail closed)');
+    return null;
   }
 
   /// One-line summary of whatever default routes the table currently holds —
@@ -1230,6 +1619,23 @@ class WindowsEngine {
   /// without the matching bypass routes would send the core's own connection
   /// into the tunnel — a routing loop, not a VPN.
   Future<void> _removeRoutes({bool forgetUpstreams = false}) async {
+    if (_fakeIpRoute) {
+      _fakeIpRoute = false;
+      try {
+        await Process.run('route', ['delete', HevConfig.mapDnsNetwork]);
+      } catch (_) {}
+    }
+    if (_ipv6RouteInstalled) {
+      _ipv6RouteInstalled = false;
+      if (tunIndex >= 0) {
+        try {
+          await Process.run('netsh', [
+            'interface', 'ipv6', 'delete', 'route',
+            'prefix=::/0', 'interface=$tunIndex',
+          ]);
+        } catch (_) {}
+      }
+    }
     await _removeTunDefaultRoute();
     for (final dest in _rangeRoutes) {
       await Process.run('route', ['delete', dest]);
@@ -1264,6 +1670,8 @@ class WindowsEngine {
       final ip = RegExp(r'(\d{1,3}(?:\.\d{1,3}){3})').firstMatch(custom);
       if (ip != null) _bypass.add(ip.group(1)!);
     }
+    // Xray path: the worker/WARP upstreams resolved at capture time.
+    _bypass.addAll(_extraBypassIps);
     final gw = _originalGw;
     if (gw == null) {
       _logLine('no upstream gateway found — WARP ranges are not bypassed');

@@ -35,6 +35,10 @@ class _HomeShellState extends State<HomeShell> {
   bool _asking = false;
   bool _exitPromptScheduled = false;
 
+  /// Guards the "what's new" dialog the same way: shown once per
+  /// pending notice (first launch after an update / core refresh).
+  bool _whatsNewScheduled = false;
+
   @override
   void initState() {
     super.initState();
@@ -205,6 +209,16 @@ class _HomeShellState extends State<HomeShell> {
             _askAboutExit(c, s);
           });
         }
+        if (c.whatsNewPending &&
+            !c.blocked &&
+            !_whatsNewScheduled &&
+            c.remoteConfig.flag('whatsNew', defaultValue: true)) {
+          _whatsNewScheduled = true;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            _whatsNewScheduled = false;
+            _showWhatsNew(c, s);
+          });
+        }
         return Scaffold(
           drawer: _Drawer(
             s: s,
@@ -319,6 +333,39 @@ class _HomeShellState extends State<HomeShell> {
       c.removeListener(onProgress);
       if (mounted) setState(() => _asking = false);
     }
+  }
+
+  /// The post-update "what's new" notice: version + changelog, once,
+  /// dismissed for good by the button (or by tapping outside — the
+  /// dismissal is recorded either way, so it never nags twice).
+  Future<void> _showWhatsNew(VpnController c, S s) async {
+    if (!mounted || !c.whatsNewPending) return;
+    final version = c.coreVersion.isNotEmpty &&
+            c.update?.latest == c.coreVersion
+        ? c.coreVersion
+        : AppInfo.version;
+    final notes = c.whatsNewNotes.trim();
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(s.whatsNewTitle(version),
+            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
+        content: SingleChildScrollView(
+          child: Text(
+            notes.isEmpty ? s.updateAvailable : notes,
+            style: const TextStyle(height: 1.6, fontSize: 13.5),
+          ),
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: Text(s.whatsNewDismiss),
+          ),
+        ],
+      ),
+    );
+    await c.dismissWhatsNew();
   }
 }
 

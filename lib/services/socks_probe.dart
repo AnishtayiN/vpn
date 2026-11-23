@@ -58,6 +58,10 @@ class SocksProbe {
   /// the tunnel is broken, so a routing failure and a DNS failure are not
   /// confused with each other. The domain targets then check name resolution
   /// through the tunnel.
+  ///
+  /// Connectivity only: a reply that left through the physical line (the
+  /// TUN default route installed but not winning) also succeeds here. Use
+  /// [deviceExit] + [EgressCheck] when the *egress* has to be proven.
   static Future<int> proveDevice({
     Duration timeout = const Duration(seconds: 12),
     int attempts = 2,
@@ -71,7 +75,8 @@ class SocksProbe {
     for (var attempt = 0; attempt < attempts; attempt++) {
       for (final target in targets) {
         try {
-          return await _directGet(target[0], target[1], timeout: timeout);
+          final r = await _directGet(target[0], target[1], timeout: timeout);
+          return r.pingMs;
         } catch (e) {
           lastError = e;
         }
@@ -80,7 +85,52 @@ class SocksProbe {
     throw SocketException('device VPN data-plane proof failed: $lastError');
   }
 
-  static Future<int> _directGet(
+  /// The egress the **device** path presents: a plain HTTP GET (no proxy)
+  /// to a Cloudflare trace target, parsed for `ip=`/`loc=`.
+  ///
+  /// This is the address the machine's own traffic leaves from — through
+  /// the TUN when the TUN captures it, through the physical line when it
+  /// does not. It is the counterpart of [exitInfo] (which dials SOCKS
+  /// explicitly and therefore only ever proves the *listener*): comparing
+  /// the two is how a TUN that routes nowhere is caught instead of being
+  /// published as "connected" on the strength of the SOCKS probe alone.
+  static Future<({String ip, String country, int pingMs})> deviceExit({
+    Duration timeout = const Duration(seconds: 12),
+    int attempts = 2,
+  }) async {
+    const targets = <List<String>>[
+      ['1.1.1.1', '/cdn-cgi/trace'],
+      ['www.cloudflare.com', '/cdn-cgi/trace'],
+    ];
+    Object? lastError;
+    for (var attempt = 0; attempt < attempts; attempt++) {
+      for (final target in targets) {
+        try {
+          final r = await _directGet(target[0], target[1], timeout: timeout);
+          final exit = traceExit(r.body);
+          if (exit == null) {
+            throw const SocketException('no address in the trace answer');
+          }
+          return (ip: exit.ip, country: exit.country, pingMs: r.pingMs);
+        } catch (e) {
+          lastError = e;
+        }
+      }
+    }
+    throw SocketException('device egress lookup failed: $lastError');
+  }
+
+  /// `ip=`/`loc=` out of a Cloudflare trace body, or null when the body
+  /// carries no usable address. Pure, so the parsing is unit-testable
+  /// without a network.
+  static ({String ip, String country})? traceExit(String body) {
+    final map = parseTrace(body);
+    final ip = (map['ip'] ?? '').trim();
+    if (ip.isEmpty) return null;
+    return (ip: ip, country: countryCode(map['loc'] ?? ''));
+  }
+
+  static Future<({String body, int pingMs})> _directGet(
     String host,
     String path, {
     Duration timeout = const Duration(seconds: 12),
@@ -94,12 +144,15 @@ class SocksProbe {
           await client.getUrl(Uri.parse('http://$host$path')).timeout(timeout);
       request.followRedirects = false;
       final response = await request.close().timeout(timeout);
-      await response.drain<void>().timeout(timeout);
+      final body = await response
+          .transform(utf8.decoder)
+          .join()
+          .timeout(timeout);
       sw.stop();
       if (response.statusCode < 200 || response.statusCode >= 400) {
         throw SocketException('HTTP ${response.statusCode} via the TUN device');
       }
-      return sw.elapsedMilliseconds;
+      return (body: body, pingMs: sw.elapsedMilliseconds);
     } finally {
       client.close(force: true);
     }
@@ -375,4 +428,63 @@ class SocksProbe {
     }
     return map;
   }
+}
+
+/// Verdict of comparing the device path's egress against the tunnel's.
+///
+/// The SOCKS probe ([SocksProbe.exitInfo]) only ever proves the *listener*
+/// exits where the UI says. The device path (TUN adapter + routes, or the
+/// system proxy) is a separate mechanism that can fail independently —
+/// a default route that loses the metric race, a proxy write that never
+/// landed — while every SOCKS probe stays green. This is the comparison
+/// that closes that gap: device traffic must demonstrably leave through
+/// the tunnel before "connected" is claimed.
+enum EgressVerdict {
+  /// Device egress == tunnel exit: the same exit the UI displays.
+  verified,
+
+  /// Device egress is not the raw line address (tunneled), but differs
+  /// from the probed exit — an exit pool (Tor circuits, anycast) handing
+  /// out more than one address. Protected, worth a log line.
+  tunneled,
+
+  /// Device egress == the raw line address: traffic bypasses the tunnel.
+  leaked,
+
+  /// Not enough measurements to tell. Unverified capture must not be
+  /// published as connected.
+  unknown,
+}
+
+class EgressCheck {
+  /// [deviceIp] is the egress measured on the device path itself
+  /// ([SocksProbe.deviceExit]); [tunnelIp] the exit measured through the
+  /// device-traffic SOCKS listener ([SocksProbe.exitInfo] on the device
+  /// port); [rawIp] the line's own address measured *before* any capture
+  /// was installed ([SocksProbe.rawInfo]). Either reference may be null
+  /// when its lookup failed.
+  static EgressVerdict evaluate({
+    required String deviceIp,
+    String? tunnelIp,
+    String? rawIp,
+  }) {
+    final device = deviceIp.trim();
+    if (device.isEmpty) return EgressVerdict.unknown;
+    final raw = (rawIp ?? '').trim();
+    // A device egress equal to the line's own address is a leak even when
+    // it also equals the probed exit (that only happens when the "tunnel"
+    // itself exits via the user's address, which no Windows Aether mode
+    // does) — so the leak test runs first.
+    if (raw.isNotEmpty && device == raw) return EgressVerdict.leaked;
+    final tunnel = (tunnelIp ?? '').trim();
+    if (tunnel.isNotEmpty && device == tunnel) {
+      return EgressVerdict.verified;
+    }
+    if (raw.isNotEmpty) return EgressVerdict.tunneled;
+    return EgressVerdict.unknown;
+  }
+
+  /// True when the device path is proven to leave through the tunnel.
+  static bool ok(EgressVerdict v) =>
+      v == EgressVerdict.verified || v == EgressVerdict.tunneled;
 }
