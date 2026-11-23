@@ -357,6 +357,12 @@ class WindowsEngine {
         ? coreFile.path
         : p.join(Directory.current.path, 'third_party', 'windows',
             'aether.exe');
+    // Heal a machine already stuck with an orphaned helper (crash,
+    // force-close, or an older build): a leftover psiphon holds the
+    // BoltDB datastore lock in runtimeDir and the new core's psiphon
+    // would time out opening it. stop() above only knows about *this*
+    // process's core; the sweep is path-scoped to this install.
+    await _sweepLeftoverHelpers();
     _coreExited = false;
     _core = await Process.start(
       corePath,
@@ -526,13 +532,30 @@ class WindowsEngine {
     // killing the bridge would leave the machine with no way out at all.
     await _removeRoutes(forgetUpstreams: true);
     await _killTun();
+    // Kill the core *and its helpers*. Dart's kill reaches only the core
+    // process itself; the psiphon/lyrebird children it spawned would
+    // orphan and keep the BoltDB datastore lock in runtimeDir, breaking
+    // every later launch ("psiphon stopped before it was ready"). So:
+    // graceful signal first, a short wait for a cooperative exit, then a
+    // tree-kill while the parent is still there to walk, then the
+    // path-scoped sweep for anything already orphaned.
     try {
       core?.kill(ProcessSignal.sigterm);
     } catch (_) {}
-    await Future<void>.delayed(const Duration(milliseconds: 400));
-    try {
-      core?.kill(ProcessSignal.sigkill);
-    } catch (_) {}
+    if (core != null) {
+      try {
+        await core.exitCode.timeout(const Duration(milliseconds: 800));
+      } catch (_) {}
+      try {
+        await Process.run('taskkill', ProcessSweep.taskkillArgs(core.pid));
+      } catch (e) {
+        _logLine('core tree-kill failed: $e');
+      }
+      try {
+        core.kill(ProcessSignal.sigkill);
+      } catch (_) {}
+    }
+    await _sweepLeftoverHelpers();
     await _awaitAdapterGone();
     // Disconnect means proxy flow stops too: hand the system proxy back to
     // whatever it was before VoidrauVPN, so the machine is left direct (or with
@@ -545,6 +568,56 @@ class WindowsEngine {
     message = '';
     endpoint = '';
     _emit();
+  }
+
+  /// Full paths of this install's core and pt helpers — the exact
+  /// executables the orphan sweep may stop. Mirrors the resolution in
+  /// [start] (installed layout first, dev sidecar as fallback).
+  List<String> _helperExePaths() {
+    final exeDir = File(Platform.resolvedExecutable).parent.path;
+    final installed = File(p.join(exeDir, 'aether.exe')).existsSync();
+    final corePath = installed
+        ? p.join(exeDir, 'aether.exe')
+        : p.join(
+            Directory.current.path, 'third_party', 'windows', 'aether.exe');
+    final ptDir = installed
+        ? p.join(exeDir, 'pt')
+        : p.join(Directory.current.path, 'third_party', 'windows', 'pt');
+    return [
+      corePath,
+      p.join(ptDir, 'psiphon-tunnel-core.exe'),
+      p.join(ptDir, 'lyrebird.exe'),
+    ];
+  }
+
+  /// Stops leftover core/helper processes from *this* install whose
+  /// parent is already gone (crash, force-close, or an older build's
+  /// orphan). An orphaned psiphon keeps the BoltDB datastore lock in
+  /// [runtimeDir], so without this sweep every later launch dies with
+  /// "psiphon stopped before it was ready". Path-scoped only (see
+  /// [ProcessSweep]); every failure is logged, never thrown.
+  Future<void> _sweepLeftoverHelpers() async {
+    try {
+      final r = await Process.run('powershell', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        ProcessSweep.sweepScript(_helperExePaths()),
+      ]);
+      final out = '${r.stdout}'.trim();
+      if (out.isNotEmpty) {
+        for (final line in out.split('\n')) {
+          _logLine('leftover helper stopped: ${line.trim()}');
+        }
+      }
+      if (r.exitCode != 0) {
+        _logLine('helper sweep exited ${r.exitCode}: ${r.stderr}'.trim());
+      }
+    } catch (e) {
+      _logLine('helper sweep failed: $e');
+    }
   }
 
   /// Terminates the TUN bridge. The WinTUN adapter is owned by the process, so

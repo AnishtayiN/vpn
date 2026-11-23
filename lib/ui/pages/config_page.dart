@@ -795,7 +795,7 @@ class _ConfigPageState extends State<ConfigPage> {
         initialValue: '${st.tunMtu}',
         keyboardType: TextInputType.number,
         onChanged: (v) {
-          st.tunMtu = (int.tryParse(v) ?? 1500).clamp(576, 65535);
+          st.tunMtu = (int.tryParse(v) ?? 1400).clamp(576, 65535);
           _persistSoon();
         },
         onFieldSubmitted: (_) => c.persist(),

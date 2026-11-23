@@ -376,8 +376,8 @@ class S {
       : 'device $device / core ${core == 0 ? 'auto' : '$core'}';
 
   String get mtuHelp => isFa
-      ? 'MTU دستگاه: اندازه بسته‌هایی که برنامه‌ها می‌فرستند. ۱۵۰۰ پیشنهاد می‌شود.'
-      : 'Device MTU: the packet size apps send. 1500 is the usual pick.';
+      ? 'MTU دستگاه: اندازه بسته‌هایی که برنامه‌ها می‌فرستند. ۱۴۰۰ پیشنهاد می‌شود.'
+      : 'Device MTU: the packet size apps send. 1400 is the usual pick.';
   String get coreMtuLabel =>
       isFa ? 'MTU داخلی هسته (۰ = خودکار)' : 'Core inner MTU (0 = auto)';
   String get coreMtuHelp => isFa
