@@ -1,5 +1,4 @@
 import 'dart:io' show Platform;
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -8,6 +7,7 @@ import '../../models/engine_state.dart';
 import '../../models/settings.dart';
 import '../../services/vpn_controller.dart';
 import '../../theme/voidrau_theme.dart';
+import '../widgets/rate_sparkline.dart';
 
 /// Where a "slow VPN" complaint gets fixed.
 ///
@@ -231,17 +231,7 @@ class _SpeedPageState extends State<SpeedPage> {
             ],
           ),
           const SizedBox(height: 10),
-          SizedBox(
-            height: 46,
-            child: CustomPaint(
-              painter: _SparkPainter(
-                _down,
-                _up,
-                gridColor: VoidrauTheme.lineOf(context),
-              ),
-              size: Size.infinite,
-            ),
-          ),
+          RateSparkline(down: _down, up: _up),
         ],
       ),
     );
@@ -458,70 +448,5 @@ class _SpeedPageState extends State<SpeedPage> {
       i++;
     }
     return '${v.toStringAsFixed(v >= 10 || i == 0 ? 0 : 1)} ${units[i]}';
-  }
-}
-
-/// Rolling down/up history: two filled lines on a shared scale, so a glance says
-/// whether the tunnel is idle, busy, or saturated.
-class _SparkPainter extends CustomPainter {
-  _SparkPainter(this.down, this.up, {required this.gridColor});
-  final List<double> down;
-  final List<double> up;
-
-  /// Theme-aware grid colour (the painter itself has no BuildContext).
-  final Color gridColor;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final grid = Paint()
-      ..color = gridColor
-      ..strokeWidth = 1;
-    canvas.drawLine(Offset(0, size.height - 0.5),
-        Offset(size.width, size.height - 0.5), grid);
-    var peak = 0.0;
-    for (final v in [...down, ...up]) {
-      peak = math.max(peak, v);
-    }
-    if (peak <= 0) return;
-    _line(canvas, size, down, peak, VoidrauColors.cyan);
-    _line(canvas, size, up, peak, VoidrauColors.coral);
-  }
-
-  void _line(Canvas canvas, Size size, List<double> values, double peak,
-      Color color) {
-    if (values.length < 2) return;
-    final step = size.width / (values.length - 1);
-    final path = Path();
-    for (var i = 0; i < values.length; i++) {
-      final y = size.height - (values[i] / peak) * (size.height - 4) - 2;
-      final x = i * step;
-      if (i == 0) {
-        path.moveTo(x, y);
-      } else {
-        path.lineTo(x, y);
-      }
-    }
-    canvas.drawPath(
-      path,
-      Paint()
-        ..color = color
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.6
-        ..strokeJoin = StrokeJoin.round,
-    );
-  }
-
-  @override
-  bool shouldRepaint(_SparkPainter old) {
-    if (old.gridColor != gridColor) return true;
-    if (old.down.length != down.length || old.up.length != up.length) {
-      return true;
-    }
-    if (down.isEmpty && up.isEmpty) return false;
-    final lastDownOld = old.down.isEmpty ? 0 : old.down.last;
-    final lastUpOld = old.up.isEmpty ? 0 : old.up.last;
-    final lastDown = down.isEmpty ? 0 : down.last;
-    final lastUp = up.isEmpty ? 0 : up.last;
-    return lastDownOld != lastDown || lastUpOld != lastUp;
   }
 }

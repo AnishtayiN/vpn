@@ -13,6 +13,7 @@ import '../models/engine_state.dart';
 import '../models/settings.dart';
 import 'core_args.dart';
 import 'core_errors.dart';
+import 'country_ping.dart';
 import 'license_service.dart';
 import 'exit_pin.dart';
 import 'ios_policy.dart';
@@ -83,6 +84,11 @@ class VpnController extends ChangeNotifier {
 
   VpnSettings settings = VpnSettings();
   EngineSnapshot snapshot = const EngineSnapshot();
+
+  /// Last real ping measured per exit country (see [CountryPingStore]).
+  /// The country picker reads this; the exit probes below are the only
+  /// writers, and only with a country and a round trip measured together.
+  final countryPings = CountryPingStore();
   UpdateInfo? update;
   final logs = <LogLine>[];
   final apps = <Map<String, String>>[];
@@ -282,6 +288,8 @@ class VpnController extends ChangeNotifier {
     // never survive on Windows. (There is no Windows policy class; boot is
     // the one place settings are normalised per platform.)
     if (Platform.isWindows) settings.xrayMode = XrayMode.off;
+    // Last real pings per exit country, for the country picker.
+    await countryPings.load();
     _events = engine.events().listen(_onEvent, onError: (_) {});
     if (Platform.isWindows) {
       _winLogs = WindowsEngine.instance.logs.listen((line) => _log(line));
@@ -1079,6 +1087,9 @@ class VpnController extends ChangeNotifier {
       location: last.colo.isEmpty ? snapshot.location : last.colo,
       pingMs: last.pingMs,
     ));
+    // A real round trip through a real tunnel, filed under the country that
+    // tunnel actually exited in — the country picker's only ping source.
+    unawaited(countryPings.record(last.country, last.pingMs));
     return last;
   }
 
@@ -1550,6 +1561,10 @@ class VpnController extends ChangeNotifier {
               country: exit.country,
               location: exit.colo.isEmpty ? snapshot.location : exit.colo,
             ));
+            // Same paired measurement as _probeExit, from the dashboard's
+            // own refresh: keeps the picker's per-country ping current
+            // while the tunnel runs.
+            unawaited(countryPings.record(exit.country, exit.pingMs));
           }
         }
         _lastHealthy = DateTime.now();
@@ -1733,11 +1748,36 @@ class VpnController extends ChangeNotifier {
     }
   }
 
+  /// Watchdog re-dial delay for attempt [tries] (1-based): exponential
+  /// backoff — 2 s, 4 s, 8 s, 16 s, then capped at 32 s — so a line that
+  /// just dropped gets a quick first retry, while a genuinely dead network
+  /// is not hammered with a fresh scan every few seconds. Pure and
+  /// unit-testable, like [useXrayFor].
+  static Duration watchdogDelay(int tries) {
+    if (tries <= 1) return const Duration(seconds: 2);
+    final secs = 2 << (tries - 1); // 2, 4, 8, 16, 32, …
+    return Duration(seconds: secs > 32 ? 32 : secs);
+  }
+
+  /// Most watchdog re-dials in a row before the app gives up and stays on
+  /// the error state (a healthy connect resets the counter).
+  static const int watchdogMaxTries = 5;
+
   void _scheduleWatchdog({bool forceReconnect = false}) {
-    if (!_wantUp || !settings.watchdog || _watchdogTries >= 5) return;
+    if (!_wantUp || !settings.watchdog || _watchdogTries >= watchdogMaxTries) {
+      return;
+    }
     _watchdogTries++;
     _watchdogTimer?.cancel();
-    final delay = Duration(seconds: 2 * _watchdogTries);
+    final delay = watchdogDelay(_watchdogTries);
+    // A re-dial is now genuinely scheduled: say so on the orb instead of
+    // leaving the error state up while the app is already recovering. The
+    // error message stays — it is still the reason for the re-dial. Only an
+    // error phase is relabelled; a phase that has moved on (a fresh manual
+    // connect already scanning) is never stomped.
+    if (snapshot.phase == EnginePhase.error) {
+      _set(snapshot.copyWith(phase: EnginePhase.reconnecting));
+    }
     _watchdogTimer = Timer(delay, () {
       if (_wantUp &&
           snapshot.phase != EnginePhase.connected &&

@@ -67,4 +67,49 @@ void main() {
       expect(RateMeter().downBytesPerSec, 0);
     });
   });
+
+  group('rate history (the home-card graph)', () {
+    test('the baseline reading records nothing', () {
+      final meter = RateMeter();
+      meter.update(1000, 500, at: DateTime(2026, 1, 1, 0, 0, 0));
+      expect(meter.downHistory, isEmpty);
+      expect(meter.upHistory, isEmpty);
+    });
+
+    test('each computed rate is appended, oldest first', () {
+      final meter = RateMeter();
+      final t0 = DateTime(2026, 1, 1, 0, 0, 0);
+      meter.update(0, 0, at: t0);
+      meter.update(2048, 1024, at: t0.add(const Duration(seconds: 1)));
+      meter.update(6144, 1024, at: t0.add(const Duration(seconds: 2)));
+      expect(meter.downHistory.length, 2);
+      expect(meter.downHistory.first, closeTo(2048, 1));
+      // Second sample is the smoothed rate, above the first.
+      expect(meter.downHistory.last, greaterThan(meter.downHistory.first));
+      expect(meter.upHistory.length, 2);
+    });
+
+    test('a backwards counter records the drop to zero', () {
+      final meter = RateMeter();
+      final t0 = DateTime(2026, 1, 1, 0, 0, 0);
+      meter.update(0, 0, at: t0);
+      meter.update(1024 * 1024, 0, at: t0.add(const Duration(seconds: 1)));
+      meter.update(0, 0, at: t0.add(const Duration(seconds: 2)));
+      expect(meter.downHistory.last, 0);
+    });
+
+    test('history is capped and reset clears it', () {
+      final meter = RateMeter();
+      var t = DateTime(2026, 1, 1, 0, 0, 0);
+      meter.update(0, 0, at: t);
+      for (var i = 1; i <= RateMeter.historyLength + 10; i++) {
+        t = t.add(const Duration(seconds: 1));
+        meter.update(i * 1024, 0, at: t);
+      }
+      expect(meter.downHistory.length, RateMeter.historyLength);
+      meter.reset();
+      expect(meter.downHistory, isEmpty);
+      expect(meter.upHistory, isEmpty);
+    });
+  });
 }
