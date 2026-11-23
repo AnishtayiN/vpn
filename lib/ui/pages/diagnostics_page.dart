@@ -94,6 +94,7 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
       buffer.writeln('WinTUN Adapter: ${tun["adapter"] ?? "—"}');
       buffer.writeln('WinTUN Backend: ${tun["backend"] ?? "—"}');
       buffer.writeln('Elevated: ${tun["elevated"] ?? "—"}');
+      buffer.writeln('Egress: ${tun["egress"] ?? "—"}');
     }
     buffer.writeln(
         'Download: ${_fmt(snap.downloadBytes)} | Upload: ${_fmt(snap.uploadBytes)}');
@@ -187,6 +188,13 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
           _note(Icons.report_gmailerrorred_outlined,
               '${s.tunBlocked}: $tunBlocked'),
         ],
+        if (Platform.isWindows &&
+            snap.phase == EnginePhase.connected &&
+            (tun['egress'] ?? '').startsWith('unverified')) ...[
+          const SizedBox(height: 12),
+          _note(Icons.warning_amber_outlined,
+              '${s.egressUnverified} (${tun['egress']})'),
+        ],
         const SizedBox(height: 12),
         _grid([
           _cell(s.protocol, snap.protocol.isEmpty ? '—' : snap.protocol),
@@ -201,6 +209,12 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
             _cell(s.tunBackend, tun['backend'] ?? '—'),
             _cell(s.elevated, tun['elevated'] == 'true' ? s.yes : s.no),
             _cell(s.windowsVersion, tun['windows'] ?? '—'),
+            _cell(
+              s.egress,
+              snap.phase == EnginePhase.connected
+                  ? (tun['egress'] ?? '—')
+                  : '—',
+            ),
           ],
           _cell(
             'MTU',

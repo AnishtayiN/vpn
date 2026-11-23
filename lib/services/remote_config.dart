@@ -6,6 +6,65 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'license_service.dart';
 
+/// The egress gate's remote settings: how strictly a failed verification
+/// is treated, and which probe URLs the device path is measured with.
+/// Server-driven so a gate that misfires in the field (like the v1.9.0
+/// DNS-dependent probe) can be softened without a new release.
+enum GateMode { enforce, warn, off }
+
+class GateConfig {
+  const GateConfig({this.mode = GateMode.enforce, this.probes = const []});
+
+  /// Default: enforce, built-in probe list (see SocksProbe).
+  static const defaults = GateConfig();
+
+  /// `enforce`: a proven leak tears the TUN down (v1.9.0 behaviour).
+  /// `warn`: a proven leak is logged loudly and shown, but the tunnel
+  /// stays up. `off`: the gate is skipped entirely. A probe that cannot
+  /// run at all never tears the tunnel down in any mode — it leaves an
+  /// explicit "unverified" state instead.
+  final GateMode mode;
+
+  /// Probe URLs in try order. Empty = the built-in list.
+  final List<String> probes;
+
+  bool get isDefault => mode == GateMode.enforce && probes.isEmpty;
+
+  /// Tolerant parse: wrong values are dropped, never thrown.
+  factory GateConfig.fromJson(Map<String, dynamic> json) {
+    GateMode mode = GateMode.enforce;
+    final m = json['mode'];
+    if (m is String) {
+      mode = switch (m.trim().toLowerCase()) {
+        'warn' => GateMode.warn,
+        'off' => GateMode.off,
+        _ => GateMode.enforce,
+      };
+    }
+    final probes = <String>[];
+    final rawProbes = json['probes'];
+    if (rawProbes is List) {
+      for (final p in rawProbes) {
+        if (probes.length >= 8) break;
+        if (p is! String) continue;
+        final u = p.trim();
+        if (u.length > 200) continue;
+        final uri = Uri.tryParse(u);
+        if (uri == null) continue;
+        if (uri.scheme != 'http' && uri.scheme != 'https') continue;
+        if (uri.host.isEmpty || uri.path.isEmpty) continue;
+        probes.add(u);
+      }
+    }
+    return GateConfig(mode: mode, probes: probes);
+  }
+
+  Map<String, dynamic> toJson() => {
+        'mode': mode.name,
+        if (probes.isNotEmpty) 'probes': probes,
+      };
+}
+
 /// Server-driven app config (`GET /api/config` on the license Worker):
 /// the small values that should not need a new release — an announcement
 /// banner, a changelog override for the "what's new" notice, the list of
@@ -23,6 +82,7 @@ class RemoteConfig {
     this.changelog,
     this.coreOnlyVersions = const [],
     this.flags = const {},
+    this.gate = GateConfig.defaults,
   });
 
   static const empty = RemoteConfig();
@@ -44,6 +104,10 @@ class RemoteConfig {
 
   /// Simple boolean feature flags.
   final Map<String, bool> flags;
+
+  /// Egress-gate settings (mode + probe URLs). Defaults to enforce with
+  /// the built-in probe list when the server says nothing.
+  final GateConfig gate;
 
   bool flag(String name, {bool defaultValue = false}) =>
       flags[name] ?? defaultValue;
@@ -96,12 +160,23 @@ class RemoteConfig {
       }
     }
 
+    GateConfig gate = GateConfig.defaults;
+    final rawGate = json['gate'];
+    if (rawGate is Map) {
+      try {
+        gate = GateConfig.fromJson(Map<String, dynamic>.from(rawGate));
+      } catch (_) {
+        gate = GateConfig.defaults;
+      }
+    }
+
     return RemoteConfig(
       announcement: str('announcement', 500),
       announcementId: str('announcementId', 64),
       changelog: str('changelog', 4000),
       coreOnlyVersions: versions,
       flags: flags,
+      gate: gate,
     );
   }
 
@@ -112,6 +187,7 @@ class RemoteConfig {
         if (coreOnlyVersions.isNotEmpty)
           'coreOnlyVersions': coreOnlyVersions,
         if (flags.isNotEmpty) 'flags': flags,
+        if (!gate.isDefault) 'gate': gate.toJson(),
       };
 }
 
