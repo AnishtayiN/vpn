@@ -340,6 +340,17 @@ HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion
       expect(TunBackend.tun2socksLegacy.fileName, 'tun2socks-legacy.exe');
       expect(TunBackend.hev.fileName, 'hev-socks5-tunnel.exe');
     });
+
+    test('a chain hop prefers hev — the only bridge with mapdns', () {
+      for (final build in [9600, 22631]) {
+        final plan = TunPlan.order(
+          build: WindowsBuild(build),
+          available: TunBackend.values,
+          preferMapDns: true,
+        );
+        expect(plan.first, TunBackend.hev, reason: 'build $build');
+      }
+    });
   });
 
   group('hev config', () {
@@ -376,6 +387,29 @@ HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion
         contains("ipv6: 'fc00::1'"),
       );
     });
+
+    test('mapdns block only when asked, with the Android values', () {
+      final plain = HevConfig.yaml(
+        adapterName: 'Voidrau',
+        mtu: 1400,
+        socksPort: 1821,
+      );
+      expect(plain, isNot(contains('mapdns')));
+      final hop = HevConfig.yaml(
+        adapterName: 'Voidrau',
+        mtu: 1400,
+        socksPort: 1821,
+        mapDns: true,
+      );
+      expect(hop, contains('mapdns:'));
+      expect(hop, contains('address: ${HevConfig.mapDnsAddress}'));
+      expect(hop, contains('network: ${HevConfig.mapDnsNetwork}'));
+      expect(hop, contains('netmask: ${HevConfig.mapDnsNetmask}'));
+      expect(hop, contains('cache-size: 10000'));
+      // The constants are the Android ones (NimbusVpnService.kt).
+      expect(HevConfig.mapDnsAddress, '198.18.0.2');
+      expect(HevConfig.mapDnsNetwork, '240.0.0.0');
+    });
   });
 
   group('exit codes', () {
@@ -386,6 +420,46 @@ HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion
       expect(ExitCodes.describe(-1073741515), contains('DLL'));
       expect(ExitCodes.describe(-1073741511), contains('API'));
       expect(ExitCodes.describe(1), isNull);
+    });
+  });
+
+  group('hasIpv6DefaultRoute', () {
+    test('finds a global ::/0 default in route print -6 output', () {
+      const table = '''
+IPv6 Route Table
+===========================================================================
+Active Routes:
+ If Metric Network Destination      Gateway
+ 12    281 ::/0                     fe80::1
+  1    331 ::1/128                  On-link
+ 12    281 2001:db8:1::/64          On-link
+ 12    281 fe80::/64                On-link
+===========================================================================
+Persistent Routes:
+  None
+''';
+      expect(Netsh.hasIpv6DefaultRoute(table), isTrue);
+    });
+
+    test('link-local only means nothing to leak', () {
+      const table = '''
+IPv6 Route Table
+===========================================================================
+Active Routes:
+ If Metric Network Destination      Gateway
+  1    331 ::1/128                  On-link
+ 12    281 fe80::/64                On-link
+ 12    281 ff00::/8                 On-link
+===========================================================================
+Persistent Routes:
+  None
+''';
+      expect(Netsh.hasIpv6DefaultRoute(table), isFalse);
+    });
+
+    test('empty and unrelated output is not a default route', () {
+      expect(Netsh.hasIpv6DefaultRoute(''), isFalse);
+      expect(Netsh.hasIpv6DefaultRoute('IPv4 Route Table'), isFalse);
     });
   });
 }

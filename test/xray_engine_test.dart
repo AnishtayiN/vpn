@@ -20,11 +20,17 @@ Endpoint = 203.0.113.7:51820
 ''';
 
 void main() {
-  group('Xray is Android-only', () {
+  group('Xray platform support', () {
     test('the engine refuses to start where no Xray binary exists', () {
-      // This test runs on the host (Linux), not Android.
+      // This test runs on the host (Linux): neither Android nor Windows.
       expect(XrayEngine.supported, isFalse);
       expect(XrayEngine.requireSupported, throwsUnsupportedError);
+    });
+
+    test('no Windows binary is staged on the test host', () {
+      // xray.exe ships beside the app exe / in third_party/windows on
+      // Windows builds; the Linux test host has neither.
+      expect(XrayEngine.windowsBinary(), isNull);
     });
   });
 

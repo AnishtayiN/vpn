@@ -266,6 +266,23 @@ class Netsh {
     }
     return null;
   }
+
+  /// True when `route print -6` shows a global IPv6 default route (`::/0`).
+  ///
+  /// The IPv6 table has a different column order (`If Metric Network
+  /// Destination Gateway`), so this does not reuse [parseRouteLines]: it
+  /// looks for `::/0` as a standalone token, which only the destination
+  /// column of a default route produces. A machine with link-local IPv6
+  /// only has no `::/0` row and nothing to leak; a machine with one sends
+  /// dual-stack traffic out of the physical interface unless the tunnel
+  /// captures or blocks it.
+  static bool hasIpv6DefaultRoute(String routePrint6) {
+    for (final raw in routePrint6.split(RegExp(r'\r?\n'))) {
+      final tokens = raw.trim().split(RegExp(r'\s+'));
+      if (tokens.contains('::/0')) return true;
+    }
+    return false;
+  }
 }
 
 /// Process elevation ("is this instance really running as Administrator?").
@@ -304,17 +321,32 @@ class TunPlan {
   /// written against it); below Windows 10 it goes **last**, because a
   /// Go ≥ 1.21 binary cannot even start there and burning 20 s on it is how
   /// the user ends up staring at "adapter never appeared".
+  ///
+  /// [preferMapDns] (a Psiphon/Tor chain hop is in the path) puts hev
+  /// first regardless: it is the only bridge with mapdns, and without
+  /// mapdns DNS-over-UDP cannot ride the TCP-only hop (see [HevConfig]).
   static List<TunBackend> order({
     required WindowsBuild build,
     required Iterable<TunBackend> available,
+    bool preferMapDns = false,
   }) {
     final list = available.toList();
     if (list.length < 2) return list;
-    list.sort((a, b) => _rank(a, build).compareTo(_rank(b, build)));
+    list.sort((a, b) =>
+        _rank(a, build, preferMapDns: preferMapDns)
+            .compareTo(_rank(b, build, preferMapDns: preferMapDns)));
     return list;
   }
 
-  static int _rank(TunBackend backend, WindowsBuild build) {
+  static int _rank(TunBackend backend, WindowsBuild build,
+      {bool preferMapDns = false}) {
+    if (preferMapDns) {
+      return switch (backend) {
+        TunBackend.hev => 0,
+        TunBackend.tun2socks => 1,
+        TunBackend.tun2socksLegacy => 2,
+      };
+    }
     if (!build.isKnown) {
       // Unknown version: try the modern bridge, then the legacy one, then hev.
       return switch (backend) {
@@ -342,15 +374,35 @@ class TunPlan {
 
 /// `hev-socks5-tunnel` is configured by a YAML file, not by flags.
 class HevConfig {
+  /// HEV mapdns listener (inside the TUN's /30) and its fake-IP network —
+  /// the same values the Android side uses (`NimbusVpnService.kt`).
+  /// 240.0.0.0/4 is reserved space that is never routed on the public
+  /// internet, so a fake-IP destination can only mean "the bridge knows
+  /// the domain name behind this address".
+  static const String mapDnsAddress = '198.18.0.2';
+  static const String mapDnsNetwork = '240.0.0.0';
+  static const String mapDnsNetmask = '240.0.0.0';
+
   /// Deliberately **no** `tunnel.ipv4`: hev would stamp a /32 on the adapter
   /// and then fight with the `netsh ... set address` (/30) that the routing
   /// code needs. VoidrauVPN owns address, DNS and routes for every bridge, so the
   /// two bridges stay interchangeable.
+  ///
+  /// [mapDns] (a Psiphon/Tor chain hop is in the path): the hop's SOCKS
+  /// listener has no UDP associate, so DNS sent as UDP through the bridge
+  /// dies while cached names keep working ("some sites don't open").
+  /// mapdns answers lookups locally with fake IPs and the bridge CONNECTs
+  /// by domain name instead, which rides TCP through the hop — the exact
+  /// block Android ships in `NimbusVpnService.kt`, keys verified against
+  /// hev-socks5-tunnel 2.17.1 (the pinned build). The caller must also
+  /// point the adapter DNS at [mapDnsAddress] and route [mapDnsNetwork]/4
+  /// into the TUN, or the fake IPs never reach the bridge.
   static String yaml({
     required String adapterName,
     required int mtu,
     required int socksPort,
     bool ipv6 = false,
+    bool mapDns = false,
     String logLevel = 'info',
 
     /// Speed profile: the bridge moves the packets, so the buffers it splices
@@ -385,6 +437,15 @@ class HevConfig {
       ..writeln("  address: '127.0.0.1'")
       ..writeln('  port: $socksPort')
       ..writeln("  udp: 'udp'");
+    if (mapDns) {
+      b
+        ..writeln('mapdns:')
+        ..writeln('  address: $mapDnsAddress')
+        ..writeln('  port: 53')
+        ..writeln('  network: $mapDnsNetwork')
+        ..writeln('  netmask: $mapDnsNetmask')
+        ..writeln('  cache-size: 10000');
+    }
     return b.toString();
   }
 }

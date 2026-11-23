@@ -108,38 +108,70 @@ class WindowsSystemProxy {
 
   /// The state VoidrauVPN applies while its proxy mode is connected: point the
   /// system proxy at our own loopback listener, keeping loopback direct.
+  ///
+  /// The `socks=` prefix is load-bearing: a bare `host:port` ProxyServer
+  /// value means an **HTTP** proxy to WinINET, and browsers would send
+  /// HTTP CONNECT to a SOCKS5 listener and fail every page. The core's
+  /// listener speaks SOCKS5 (its HTTP CONNECT listener is a separate,
+  /// opt-in port), so the value must name the protocol.
   static ProxyState loopback(int port) => ProxyState(
         enabled: true,
-        server: '127.0.0.1:$port',
+        server: 'socks=127.0.0.1:$port',
         overrideList: '127.0.0.1;localhost;<local>',
       );
 
   /// Points the system proxy at the VoidrauVPN loopback listener [port].
-  Future<void> enableOurs(int port) => apply(loopback(port));
+  /// Returns whether the write was verified (see [apply]).
+  Future<bool> enableOurs(int port) => apply(loopback(port));
 
   /// Turns the system proxy off entirely (direct connection).
-  Future<void> clearOurs() => apply(ProxyState.direct);
+  Future<bool> clearOurs() => apply(ProxyState.direct);
 
-  /// Writes [state] to the registry and announces the change to WinINet.
-  /// Best effort: failures are logged, never thrown, so a proxy hiccup can
-  /// not break the tunnel itself.
-  Future<void> apply(ProxyState state) async {
+  /// Writes [state] to the registry, announces the change to WinINet, and
+  /// **verifies** it by reading the settings back.
+  ///
+  /// The verification is the point: `reg.exe` failures used to be
+  /// swallowed here, so the engine published "connected — system proxy
+  /// on" over a machine whose traffic was never captured at all (the
+  /// exact leak where every site shows the user's real IP while the app
+  /// shows the tunnel exit). Callers that claim capture must check the
+  /// returned value; failures are also logged, never thrown.
+  Future<bool> apply(ProxyState state) async {
     try {
-      await _regAdd('ProxyEnable', 'REG_DWORD', state.enabled ? '1' : '0');
-      if (state.server != null) {
-        await _regAdd('ProxyServer', 'REG_SZ', state.server!);
-      } else {
-        await _regDel('ProxyServer');
-      }
-      if (state.overrideList != null) {
-        await _regAdd('ProxyOverride', 'REG_SZ', state.overrideList!);
-      } else {
-        await _regDel('ProxyOverride');
+      // Adds must succeed; deletes are best-effort (deleting a value that
+      // is already absent exits non-zero, which is the desired end state
+      // anyway) — the read-back below is the authority either way.
+      final adds = <ProcessResult>[
+        await _regAdd('ProxyEnable', 'REG_DWORD', state.enabled ? '1' : '0'),
+        if (state.server != null)
+          await _regAdd('ProxyServer', 'REG_SZ', state.server!),
+        if (state.overrideList != null)
+          await _regAdd('ProxyOverride', 'REG_SZ', state.overrideList!),
+      ];
+      if (state.server == null) await _regDel('ProxyServer');
+      if (state.overrideList == null) await _regDel('ProxyOverride');
+      final failed = adds.where((r) => r.exitCode != 0).toList();
+      if (failed.isNotEmpty) {
+        _log('system proxy write failed: '
+            '${failed.map((r) => '${r.stdout}${r.stderr}'.trim()).join(' | ')}');
+        return false;
       }
       _announce();
-      _log(state.enabled ? 'system proxy → ${state.server}' : 'system proxy → off');
+      final back = await read();
+      // When disabled, a remembered-but-inert ProxyServer value is
+      // harmless (Windows ignores it while ProxyEnable is 0, and restore
+      // writes it back on purpose), so only the enable flag is judged.
+      final verified = back.enabled == state.enabled &&
+          (!state.enabled ||
+              state.server == null ||
+              back.server == state.server);
+      _log(state.enabled
+          ? 'system proxy → ${state.server}${verified ? '' : ' (read-back mismatch: enabled=${back.enabled} server=${back.server})'}'
+          : 'system proxy → off${verified ? '' : ' (read-back mismatch: still enabled)'}');
+      return verified;
     } catch (e) {
       _log('system proxy change failed: $e');
+      return false;
     }
   }
 

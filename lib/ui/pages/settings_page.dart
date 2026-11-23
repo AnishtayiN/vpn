@@ -7,6 +7,7 @@ import '../../models/settings.dart';
 import '../../services/license_service.dart';
 import '../../services/links.dart';
 import '../../services/vpn_controller.dart';
+import '../../services/xray_engine.dart';
 import '../../theme/voidrau_theme.dart';
 import '../widgets/mode_cards.dart';
 import '../widgets/telegram_button.dart';
@@ -102,13 +103,13 @@ class SettingsPage extends StatelessWidget {
             ),
           ],
         ),
-        // ── Xray engine (Android only) ─────────────────────────────────
+        // ── Xray engine (Android + Windows) ────────────────────────────
         // m29: this used to sit at the very bottom, after the Telegram
         // buttons. It now comes before Updates — it is a connection setting,
         // not an afterthought. Aether stays the default everywhere; the
         // Xray modes are an opt-in second engine, so the section is hidden
-        // on Windows/iOS entirely.
-        if (Platform.isAndroid)
+        // where no Xray build exists (iOS).
+        if (XrayEngine.supported)
           ..._lockedSection(
             locked: locked,
             children: [

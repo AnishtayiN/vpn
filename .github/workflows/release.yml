@@ -18,6 +18,11 @@ on:
         required: false
         type: boolean
         default: false
+      core_only:
+        description: "Mark this release core-only in core-manifest.json (Windows in-place core update)"
+        required: false
+        type: boolean
+        default: false
   push:
     tags:
       - "v*"
@@ -47,22 +52,26 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       notes: ${{ steps.v.outputs.notes }}
       prerelease: ${{ steps.v.outputs.prerelease }}
+      core_only: ${{ steps.v.outputs.core_only }}
     steps:
       - id: v
         env:
           INPUT_VERSION: ${{ github.event.inputs.version }}
           INPUT_NOTES: ${{ github.event.inputs.notes }}
           INPUT_PRE: ${{ github.event.inputs.prerelease }}
+          INPUT_CORE_ONLY: ${{ github.event.inputs.core_only }}
         run: |
           set -euo pipefail
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             VERSION="${INPUT_VERSION:-}"
             NOTES="${INPUT_NOTES:-}"
             PRE="${INPUT_PRE:-false}"
+            CORE_ONLY="${INPUT_CORE_ONLY:-false}"
           else
             VERSION="${GITHUB_REF_NAME#v}"
             NOTES=""
             PRE="false"
+            CORE_ONLY="false"
           fi
           VERSION="${VERSION#v}"
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -72,6 +81,7 @@ jobs:
           {
             echo "version=${VERSION}"
             echo "prerelease=${PRE}"
+            echo "core_only=${CORE_ONLY}"
             echo "notes<<EOF"
             echo "${NOTES}"
             echo "EOF"
@@ -358,6 +368,55 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+      - name: Core manifest
+        env:
+          CORE_ONLY: ${{ needs.version.outputs.core_only }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.version.outputs.version }}"
+          mkdir -p release
+          ZIP=$(find dist -name '*-Windows-x64-Portable.zip' -print -quit)
+          if [[ -z "$ZIP" ]]; then
+            echo "::warning::portable zip not found; skipping core-manifest.json"
+            exit 0
+          fi
+          # core-manifest.json declares whether this release is core-only and
+          # hashes the tunnel-core sidecars inside the portable zip, so the
+          # Windows app can refresh just those files in place. Best effort:
+          # a failure here must never block the release itself.
+          python3 - "$ZIP" "$VERSION" "${CORE_ONLY:-false}" <<'PYEOF' || echo "::warning::core-manifest generation failed; continuing without it"
+          import hashlib, json, sys, zipfile
+          zip_path, version = sys.argv[1], sys.argv[2]
+          core_only = sys.argv[3] == "true"
+          CORE_PATHS = [
+              "aether.exe",
+              "pt/psiphon-tunnel-core.exe",
+              "pt/lyrebird.exe",
+              "tun2socks.exe",
+              "tun2socks-legacy.exe",
+              "hev-socks5-tunnel.exe",
+              "msys-2.0.dll",
+              "wintun.dll",
+              "xray.exe",
+              "geoip.dat",
+              "geosite.dat",
+          ]
+          files = []
+          with zipfile.ZipFile(zip_path) as z:
+              names = {n.replace("\\", "/").lower(): n for n in z.namelist()}
+              for path in CORE_PATHS:
+                  entry = names.get(path)
+                  if entry is None:
+                      continue
+                  digest = hashlib.sha256(z.read(entry)).hexdigest()
+                  files.append({"path": path, "sha256": digest, "source": "portable-zip"})
+          manifest = {"version": version, "coreOnly": core_only, "files": files}
+          with open("release/core-manifest.json", "w", encoding="utf-8") as f:
+              json.dump(manifest, f, indent=2)
+              f.write("\n")
+          print(f"core-manifest.json: {len(files)} core files, coreOnly={core_only}")
+          PYEOF
+          cat release/core-manifest.json 2>/dev/null || true
       - name: Checksums and publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

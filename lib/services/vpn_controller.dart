@@ -13,11 +13,13 @@ import '../models/engine_state.dart';
 import '../models/settings.dart';
 import 'core_args.dart';
 import 'core_errors.dart';
+import 'core_update.dart';
 import 'country_ping.dart';
 import 'license_service.dart';
 import 'exit_pin.dart';
 import 'ios_policy.dart';
 import 'platform_engine.dart';
+import 'remote_config.dart';
 import 'secure_store.dart';
 import 'socks_probe.dart';
 import 'speed.dart';
@@ -38,8 +40,8 @@ class VpnController extends ChangeNotifier {
   final engine = PlatformEngine();
   final updates = UpdateService();
 
-  /// Second engine (Android only). Aether keeps working unchanged; Xray is
-  /// only started when [VpnSettings.xrayMode] is not [XrayMode.off].
+  /// Second engine (Android + Windows). Aether keeps working unchanged;
+  /// Xray is only started when [VpnSettings.xrayMode] is not [XrayMode.off].
   final xray = XrayEngine();
 
   /// True while an Xray mode (not Aether) is the active tunnel.
@@ -90,6 +92,42 @@ class VpnController extends ChangeNotifier {
   /// writers, and only with a country and a round trip measured together.
   final countryPings = CountryPingStore();
   UpdateInfo? update;
+
+  /// Server-driven config (announcement, changelog override, core-only
+  /// versions, flags) — cached at boot, refreshed in the background.
+  RemoteConfig get remoteConfig => RemoteConfigService.instance.current;
+
+  /// "What's new" state: true on the first launch after an update,
+  /// until dismissed. [whatsNewNotes] is the text to show (remote
+  /// changelog override first, then the stored release notes).
+  bool whatsNewPending = false;
+  String whatsNewNotes = '';
+
+  /// The release the installed tunnel cores belong to (Windows
+  /// core-only updates). Empty until a core refresh lands.
+  String _coreVersion = '';
+  String get coreVersion => _coreVersion;
+
+  /// The pending release may be applied as a core-only refresh
+  /// (declared by its manifest or the remote config) — Windows only.
+  bool get coreOnlyUpdate {
+    final info = update;
+    if (info == null || !info.available || !Platform.isWindows) return false;
+    return (info.manifest?.isCoreOnlyFor(info.latest) ?? false) ||
+        remoteConfig.isCoreOnly(info.latest);
+  }
+
+  /// The announcement to show on the connect page, or null when there
+  /// is none / it was dismissed.
+  String? get announcementText {
+    final cfg = remoteConfig;
+    final key = cfg.announcementKey;
+    if (key == null || key == _dismissedAnnouncement) return null;
+    return cfg.announcement;
+  }
+
+  String? _dismissedAnnouncement;
+
   final logs = <LogLine>[];
   final apps = <Map<String, String>>[];
   bool busy = false;
@@ -224,6 +262,11 @@ class VpnController extends ChangeNotifier {
   /// Minimum gap between two *network* release checks.
   static const _minCheckGap = Duration(seconds: 45);
   static const _forceUpdateKey = 'forceUpdate';
+  static const _coreVersionKey = 'core.version';
+  static const _whatsNewSeenKey = 'whatsNew.seenVersion';
+  static const _whatsNewCoreSeenKey = 'whatsNew.coreSeenVersion';
+  static const _whatsNewNotesKey = 'whatsNew.notes';
+  static const _announcementDismissedKey = 'announcement.dismissedKey';
 
   /// How long the core gets to relocate itself when it already knows the exit
   /// rule (`AETHER_EXIT_LOC`). Waiting is cheaper than a teardown + rescan.
@@ -284,12 +327,24 @@ class VpnController extends ChangeNotifier {
       settings = VpnSettings.fromJson(jsonDecode(raw) as Map<String, dynamic>);
     }
     if (Platform.isIOS) IosPolicy.normalize(settings);
-    // Xray is Android-only: a stale xrayMode stored on another device must
-    // never survive on Windows. (There is no Windows policy class; boot is
-    // the one place settings are normalised per platform.)
-    if (Platform.isWindows) settings.xrayMode = XrayMode.off;
+    // Xray runs on Android and Windows; iOS has no Xray build, so a stale
+    // xrayMode stored on another device must never survive there.
+    if (Platform.isIOS) settings.xrayMode = XrayMode.off;
+    xray.onLog = _log;
+    xray.onUnexpectedExit = () {
+      if (_wantUp && !_userDisconnect) unawaited(engine.engageKillSwitch());
+    };
     // Last real pings per exit country, for the country picker.
     await countryPings.load();
+    // Remote config: cached copy first (offline-safe from the first
+    // frame), refreshed in the background when stale.
+    await RemoteConfigService.instance.load();
+    unawaited(RemoteConfigService.instance.refresh().then((changed) {
+      if (changed) notifyListeners();
+    }));
+    _coreVersion = prefs.getString(_coreVersionKey) ?? '';
+    _dismissedAnnouncement = prefs.getString(_announcementDismissedKey);
+    await _initWhatsNew(prefs);
     _events = engine.events().listen(_onEvent, onError: (_) {});
     if (Platform.isWindows) {
       _winLogs = WindowsEngine.instance.logs.listen((line) => _log(line));
@@ -299,6 +354,10 @@ class VpnController extends ChangeNotifier {
       // our dead listener. Undo any leftover that is unambiguously ours.
       unawaited(
           WindowsSystemProxy.instance.restore(ourPort: settings.socksPort));
+      // Same self-heal for the kill switch: a hard-killed run may have
+      // left the firewall blocking outbound. The snapshot file is the
+      // anchor; no snapshot → nothing of ours is in force.
+      unawaited(engine.sweepKillSwitch());
     }
     unawaited(engine.installedApps().then((list) {
       apps
@@ -391,10 +450,31 @@ class VpnController extends ChangeNotifier {
       return; // never hammer the update check
     }
     _lastReleaseCheck = now;
+    // Remote config rides the same cadence (its own 1 h TTL applies).
+    unawaited(RemoteConfigService.instance.refresh().then((changed) {
+      if (changed) notifyListeners();
+    }));
     final info = await updates.check();
     update = info;
     if (!info.checkFailed) {
-      if (info.available) {
+      // Remember this release's changelog on disk: after the user
+      // installs it, the "what's new" notice reads it back even
+      // offline. Keyed by version, pruned to the last few.
+      await _storeReleaseNotes(info);
+      // A pending notice armed at boot before any check ran may have
+      // no text yet (manual update via Telegram): fill it now.
+      if (whatsNewPending && whatsNewNotes.isEmpty) {
+        whatsNewNotes = await _notesFor(AppInfo.version);
+      }
+      // A core-only release whose cores are already refreshed is not
+      // an outdated build: the app code is unchanged by definition
+      // (verified at apply time), so the gate's intent — no old app
+      // code against new releases — is preserved. Any release that
+      // changes app code still blocks exactly as before.
+      final coresCurrent = info.available &&
+          coreOnlyUpdate &&
+          _coreVersion == info.latest;
+      if (info.available && !coresCurrent) {
         _outdated = true;
         _outdatedVersion = info.latest ?? '';
         _outdatedNotes = info.notes;
@@ -404,6 +484,7 @@ class VpnController extends ChangeNotifier {
         _outdatedVersion = '';
         _outdatedNotes = '';
         _outdatedUrl = null;
+        if (coresCurrent) _armWhatsNew(info);
       }
       await _persistForceUpdate();
       await engine.saveNativePrefs(settings, blocked: _outdated);
@@ -469,6 +550,105 @@ class VpnController extends ChangeNotifier {
     );
   }
 
+  // ── what's new + announcement ─────────────────────────────────────
+
+  /// First-launch-after-update detection: a stored seen-version that
+  /// differs from the running one arms the notice. A fresh install
+  /// (nothing stored) just records the version — no dialog.
+  Future<void> _initWhatsNew(SharedPreferences prefs) async {
+    _whatsNewCoreSeen = prefs.getString(_whatsNewCoreSeenKey) ?? '';
+    final seen = prefs.getString(_whatsNewSeenKey);
+    if (seen == null) {
+      await prefs.setString(_whatsNewSeenKey, AppInfo.version);
+      return;
+    }
+    if (seen != AppInfo.version) {
+      whatsNewPending = true;
+      whatsNewNotes = await _notesFor(AppInfo.version, prefs: prefs);
+    }
+  }
+
+  /// Arms the notice after a core-only refresh (the app version did
+  /// not change, so [_initWhatsNew] cannot see it). Guarded by the
+  /// core version the notice was last shown for, so the periodic
+  /// update check cannot re-arm it after dismissal.
+  void _armWhatsNew(UpdateInfo info) {
+    if (whatsNewPending) return;
+    if (_coreVersion.isEmpty || _coreVersion == _whatsNewCoreSeen) return;
+    whatsNewPending = true;
+    whatsNewNotes = remoteConfig.changelog ??
+        ReleaseNotes.userNotes(info.notes);
+  }
+
+  String _whatsNewCoreSeen = '';
+
+  Future<void> dismissWhatsNew() async {
+    whatsNewPending = false;
+    _whatsNewCoreSeen = _coreVersion;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_whatsNewSeenKey, AppInfo.version);
+    await prefs.setString(_whatsNewCoreSeenKey, _coreVersion);
+    notifyListeners();
+  }
+
+  Future<void> dismissAnnouncement() async {
+    _dismissedAnnouncement = remoteConfig.announcementKey;
+    final prefs = await SharedPreferences.getInstance();
+    if (_dismissedAnnouncement != null) {
+      await prefs.setString(
+          _announcementDismissedKey, _dismissedAnnouncement!);
+    }
+    notifyListeners();
+  }
+
+  /// Stores the extracted changelog for the release a check just saw,
+  /// so the post-install notice works offline. Keeps the newest 4.
+  Future<void> _storeReleaseNotes(UpdateInfo info) async {
+    final version = info.latest;
+    if (version == null || version.isEmpty) return;
+    final notes = ReleaseNotes.userNotes(info.notes);
+    if (notes.isEmpty) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_whatsNewNotesKey);
+      final map = <String, String>{};
+      if (raw != null && raw.isNotEmpty) {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) {
+          decoded.forEach((k, v) => map['$k'] = '$v');
+        }
+      }
+      map[version] = notes;
+      while (map.length > 4) {
+        map.remove(map.keys.first);
+      }
+      await prefs.setString(_whatsNewNotesKey, jsonEncode(map));
+    } catch (_) {}
+  }
+
+  /// The changelog text for [version]: remote override first, then
+  /// the stored release notes, then the live check's notes when they
+  /// are for this version.
+  Future<String> _notesFor(String version, {SharedPreferences? prefs}) async {
+    final override = remoteConfig.changelog;
+    if (override != null && override.isNotEmpty) return override;
+    try {
+      final p = prefs ?? await SharedPreferences.getInstance();
+      final raw = p.getString(_whatsNewNotesKey);
+      if (raw != null && raw.isNotEmpty) {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map && decoded[version] is String) {
+          return decoded[version] as String;
+        }
+      }
+    } catch (_) {}
+    final info = update;
+    if (info != null && info.latest == version) {
+      return ReleaseNotes.userNotes(info.notes);
+    }
+    return '';
+  }
+
   Future<void> openUpdate() async {
     // All user-facing update links point to Telegram — even though version check is from GitHub.
     final info = update;
@@ -486,10 +666,78 @@ class VpnController extends ChangeNotifier {
     }
   }
 
+  /// Windows core-only refresh: download the portable zip (hash-verified
+  /// like every update), replace just the tunnel core files in place,
+  /// and unblock — no installer run, settings untouched. Returns true
+  /// when the update was handled here; false falls back to the full
+  /// installer (the zip turned out to change app files after all).
+  Future<bool> _downloadCoreUpdate(UpdateInfo info) async {
+    if (snapshot.isActive || busy) {
+      // Core files are locked while the tunnel runs.
+      toast = s.coreUpdateBusy;
+      notifyListeners();
+      return true;
+    }
+    downloading = true;
+    downloadProgress = 0;
+    downloadFailed = false;
+    installStarted = false;
+    notifyListeners();
+    try {
+      final file = await updates.download(
+        url: info.zipUrl!,
+        expectedSha256: info.zipSha256,
+        onProgress: (p) {
+          downloadProgress = p;
+          notifyListeners();
+        },
+      );
+      final installDir = File(Platform.resolvedExecutable).parent.path;
+      final result = await CoreUpdater(onLog: _log)
+          .applyZip(zipFile: file, installDir: installDir);
+      switch (result.outcome) {
+        case CoreUpdateOutcome.applied:
+          _coreVersion = info.latest ?? '';
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString(_coreVersionKey, _coreVersion);
+          downloadedPath = file.path;
+          _log('core-only update applied: v$_coreVersion '
+              '(${result.changed.join(', ')})');
+          // Re-check: with the cores current the gate lifts and the
+          // what's-new notice arms.
+          await refreshUpdate(force: true);
+          toast = s.coreUpdateDone;
+          return true;
+        case CoreUpdateOutcome.notCoreOnly:
+          _log('core-only update refused (app files differ) — '
+              'falling back to the full installer');
+          return false;
+        case CoreUpdateOutcome.failed:
+          _log('core-only update failed: ${result.error}');
+          downloadFailed = true;
+          toast = s.coreUpdateFailed;
+          return true;
+      }
+    } catch (e) {
+      _log('core-only update download failed: $e');
+      downloadFailed = true;
+      toast = s.updateDownloadFailed;
+      return true;
+    } finally {
+      downloading = false;
+      notifyListeners();
+    }
+  }
+
   Future<void> downloadUpdate() async {
     if (Platform.isIOS) return;
     final info = update;
     if (info == null || downloading) return;
+    // A declared core-only release on Windows refreshes just the core
+    // files from the portable zip; anything else takes the installer.
+    if (coreOnlyUpdate && info.zipUrl != null) {
+      if (await _downloadCoreUpdate(info)) return;
+    }
     final url = Platform.isAndroid ? info.apkUrl : info.exeUrl;
     final sha = Platform.isAndroid ? info.apkSha256 : info.exeSha256;
     if (url == null) {
@@ -1253,7 +1501,9 @@ class VpnController extends ChangeNotifier {
     ));
     try {
       // One tunnel at a time: Aether must be down before Xray starts.
-      await engine.stop();
+      // On Windows this is a recovery teardown when the watchdog
+      // re-dials: keep the kill-switch block until Xray capture proves.
+      await engine.stop(keepBlock: settings.killSwitch);
       final uuid = await SecureStore.readWorkerUuid();
       WarpAccount? warp;
       final warpJson = await SecureStore.readWarpAccount();
@@ -1320,6 +1570,24 @@ class VpnController extends ChangeNotifier {
         ));
         return;
       }
+      if (Platform.isWindows) {
+        // xray.exe only serves SOCKS; the device capture in front of it
+        // (WinTUN + egress gate, or the verified system proxy) is the
+        // engine's job — the same capture the Aether path uses. Without
+        // it, "connected" would mean a SOCKS listener nobody uses.
+        await engine.startCaptureOnly(settings);
+        final st = await engine.status();
+        if (st['phase'] != EnginePhase.connected.name) {
+          await xray.stop();
+          await engine.stop(keepBlock: settings.killSwitch);
+          final why = '${st['message'] ?? ''}';
+          _setGen(gen, snapshot.copyWith(
+            phase: EnginePhase.error,
+            message: why.isNotEmpty ? why : s.xrayNoTraffic,
+          ));
+          return;
+        }
+      }
       _watchdogTries = 0;
       _lastHealthy = DateTime.now();
       _setGen(gen, snapshot.copyWith(
@@ -1368,6 +1636,9 @@ class VpnController extends ChangeNotifier {
         phase: EnginePhase.disconnecting, message: s.disconnecting));
     try {
       await xray.stop();
+      // Windows: the WinTUN/proxy capture in front of xray.exe is the
+      // engine's — tear it down too (user disconnect: full disengage).
+      await engine.stop();
     } finally {
       busy = false;
       _set(const EngineSnapshot());
@@ -1640,7 +1911,10 @@ class VpnController extends ChangeNotifier {
       leakRawCountry = raw.country;
       _log('raw line: ${raw.ip} (${raw.country.isEmpty ? '??' : raw.country})');
       if (snapshot.phase == EnginePhase.connected) {
-        final exit = await SocksProbe.exitInfo(port: settings.socksPort);
+        // The device-traffic listener (the hop in chain mode), not the
+        // bare WARP port: the check exists to prove device traffic exits
+        // where the UI says, and in chain mode those are different exits.
+        final exit = await SocksProbe.exitInfo(port: devicePort);
         leakTunnelIp = exit.ip;
         leakTunnelCountry = exit.country;
         _log('through the tunnel: ${exit.ip} '
