@@ -150,6 +150,10 @@ class S {
   String get tunBlocked => isFa
       ? 'چرا VPN دستگاه بالا نیامد'
       : 'Why the device VPN is down';
+  String get egress => isFa ? 'وضعیت خروجی' : 'Egress check';
+  String get egressUnverified => isFa
+      ? 'خروجی دستگاه تأیید نشد — تونل بالاست ولی سنجش‌ها نتوانستند ثابت کنند ترافیک از آن می‌گذرد؛ جزئیات را در لاگ ببینید'
+      : 'Device egress unverified — the tunnel is up but the probes could not confirm traffic leaves through it; see the log for details';
   String get yes => isFa ? 'بله' : 'Yes';
   String get no => isFa ? 'خیر' : 'No';
   String get selectApps => isFa ? 'انتخاب برنامه‌ها' : 'Select applications';

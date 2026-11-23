@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import '../models/engine_state.dart';
 import '../models/settings.dart';
 import 'core_args.dart';
+import 'remote_config.dart';
 import 'socks_probe.dart';
 import 'split.dart';
 import 'windows_killswitch.dart';
@@ -237,6 +238,14 @@ class WindowsEngine {
   String tunAdapter = '';
   int tunIndex = -1;
   String tunError = '';
+
+  /// What the egress gate concluded about the device path's capture:
+  /// `verified (<verdict>)` when the device egress was proven to leave
+  /// through the tunnel, `unverified: <reason>` when the tunnel is up
+  /// but the egress could not be proven (no probe could run, or the
+  /// measurement was inconclusive), `—` when no gate ran (proxy mode,
+  /// or before the first TUN attempt). Shown on the Diagnostics page.
+  String egressState = '—';
   bool? _elevated;
   WindowsBuild _winBuild = WindowsBuild.unknown;
   final _tunTail = <String>[];
@@ -322,6 +331,7 @@ class WindowsEngine {
         'backend': tunBackend.isEmpty ? '—' : tunBackend,
         'adapter': tunAdapter.isEmpty ? '—' : '$tunAdapter (#$tunIndex)',
         'error': tunError.isEmpty ? '—' : tunError,
+        'egress': egressState,
       };
 
   /// Relaunches VoidrauVPN through the UAC prompt and closes this instance, so
@@ -681,32 +691,71 @@ class WindowsEngine {
     // traffic goes direct — the UI shows the tunnel exit, every site
     // shows the user's real IP. So measure the egress of the device path
     // itself and compare it with the tunnel exit and the raw line address
-    // before claiming a system VPN. A leak (or an unverifiable egress)
-    // tears the TUN down and degrades to the verified system proxy
-    // instead of publishing "connected" over an uncaptured machine.
+    // before claiming a system VPN. A proven leak tears the TUN down and
+    // degrades to the verified system proxy instead of publishing
+    // "connected" over an uncaptured machine.
+    //
+    // The probe is DNS-independent: HTTPS IP-literal trace endpoints
+    // first (no lookup at all), plain-HTTP IP literals next, hostnames
+    // only as a last resort. v1.9.0 probed plain HTTP first, but
+    // `http://1.1.1.1/cdn-cgi/trace` answers 301 with an HTML body that
+    // carries no `ip=` line, so the IP-literal attempt could never parse
+    // an egress and the gate fell through to DNS — which on a filtered
+    // line answers WSANO_DATA (errno 11004) and killed a tunnel that may
+    // have been fine. A probe that cannot run at all is a measurement
+    // failure, not a leak: it leaves the tunnel up with an explicit
+    // "egress unverified" state instead of tearing it down. The gate's
+    // strictness is server-tunable (remote config `gate`: enforce /
+    // warn / off) so a misfiring gate can be softened without a release.
+    final gateCfg = RemoteConfigService.instance.current.gate;
     String? tunFail;
-    String deviceIp = '';
-    try {
-      deviceIp = (await SocksProbe.deviceExit()).ip;
-    } catch (e) {
-      tunFail = 'adapter came up but carried no traffic: $e';
-    }
-    if (tunFail == null) {
-      String? tunnelIp;
-      try {
-        tunnelIp = (await SocksProbe.exitInfo(port: _devicePort)).ip;
-      } catch (_) {}
-      final verdict = EgressCheck.evaluate(
-          deviceIp: deviceIp, tunnelIp: tunnelIp, rawIp: rawIp);
-      _logLine('device egress $deviceIp, tunnel exit ${tunnelIp ?? '?'}, '
-          'raw line ${rawIp ?? '?'} → $verdict');
-      if (!EgressCheck.ok(verdict)) {
-        _logLine(
-            'default routes: ${_defaultRouteSnapshot(await _routeTable())}');
-        tunFail = verdict == EgressVerdict.leaked
-            ? 'device traffic bypasses the tunnel '
-                '(egress $deviceIp is the raw line address)'
-            : 'device egress could not be verified (egress $deviceIp)';
+    if (gateCfg.mode == GateMode.off) {
+      _logLine('egress gate off (remote config) — capture unverified');
+      egressState = 'unverified: gate off (remote config)';
+    } else {
+      final res = await SocksProbe.deviceExitDetailed(
+        probeUrls: gateCfg.probes.isEmpty ? null : gateCfg.probes,
+      );
+      for (final a in res.attempts) {
+        _logLine('egress probe: $a');
+      }
+      if (res.ip == null || res.ip!.isEmpty) {
+        // Nothing could be measured: keep the tunnel, say so loudly.
+        _logLine('device egress probe failed: no probe could run — '
+            'tunnel kept up, egress UNVERIFIED');
+        egressState = 'unverified: all egress probes failed';
+      } else {
+        final deviceIp = res.ip!;
+        String? tunnelIp;
+        try {
+          tunnelIp = (await SocksProbe.exitInfo(port: _devicePort)).ip;
+        } catch (_) {}
+        final verdict = EgressCheck.evaluate(
+            deviceIp: deviceIp, tunnelIp: tunnelIp, rawIp: rawIp);
+        _logLine('device egress $deviceIp, tunnel exit ${tunnelIp ?? '?'}, '
+            'raw line ${rawIp ?? '?'} → $verdict');
+        if (verdict == EgressVerdict.leaked) {
+          if (gateCfg.mode == GateMode.warn) {
+            _logLine('egress gate WARN-ONLY: device traffic bypasses the '
+                'tunnel (egress $deviceIp is the raw line address) — '
+                'tunnel kept up per remote config');
+            egressState = 'unverified: leak suspected (warn-only)';
+          } else {
+            _logLine('default routes: '
+                '${_defaultRouteSnapshot(await _routeTable())}');
+            tunFail = 'device traffic bypasses the tunnel '
+                '(egress $deviceIp is the raw line address)';
+          }
+        } else if (!EgressCheck.ok(verdict)) {
+          // Measured but inconclusive (e.g. a v6 egress next to v4
+          // references): keep the tunnel, mark it unverified.
+          _logLine('default routes: '
+              '${_defaultRouteSnapshot(await _routeTable())}');
+          egressState =
+              'unverified: egress could not be verified (egress $deviceIp)';
+        } else {
+          egressState = 'verified ($verdict)';
+        }
       }
     }
     if (tunFail != null) {
@@ -728,7 +777,9 @@ class WindowsEngine {
     }
 
     phase = EnginePhase.connected;
-    message = 'System VPN active — $tunBackend';
+    message = egressState.startsWith('unverified')
+        ? 'System VPN active — $tunBackend (egress unverified)'
+        : 'System VPN active — $tunBackend';
     _emit();
   }
 
@@ -1072,6 +1123,7 @@ class WindowsEngine {
     tunAdapter = '';
     tunIndex = -1;
     tunError = '';
+    egressState = '—';
     _mapDnsActive = false;
 
     // The installed layout keeps every bridge next to `voidrauvpn.exe`; a
@@ -1352,6 +1404,26 @@ class WindowsEngine {
         'index=2',
       ]);
       if (dns2.exitCode != 0) _logLine('netsh add dns: ${_out(dns2)}');
+    }
+
+    // DNS preference: Windows answers lookups on the adapter with the
+    // lowest interface metric, and a WinTUN adapter's automatic metric
+    // (from its reported link speed) usually loses to Ethernet/Wi-Fi —
+    // so the physical adapter's ISP DNS answers first, and a filtered
+    // answer (WSANO_DATA, errno 11004) can break name resolution even
+    // while the tunnel itself is fine. Pin the TUN adapter to metric 1
+    // so its DNS (1.1.1.1, or the mapdns listener 198.18.0.2) is
+    // preferred. Best effort only: a failed write is logged, never
+    // fatal — the egress probe no longer needs DNS at all.
+    final metric = await _netsh([
+      'interface', 'ipv4', 'set', 'interface',
+      '@if@',
+      'metric=1',
+    ]);
+    if (metric.exitCode != 0) {
+      _logLine('netsh set interface metric: ${_out(metric)}');
+    } else {
+      _logLine('TUN adapter interface metric set to 1 (its DNS preferred)');
     }
     return null;
   }

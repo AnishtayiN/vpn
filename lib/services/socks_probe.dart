@@ -85,6 +85,31 @@ class SocksProbe {
     throw SocketException('device VPN data-plane proof failed: $lastError');
   }
 
+  /// Ordered egress-probe URLs for the device path. HTTPS IP literals
+  /// first: they need no DNS at all, and Cloudflare's edge certificate
+  /// carries the IP SANs (verified: `subjectAltName: host "1.1.1.1"
+  /// matched cert's IP address`), so Dart's TLS validation accepts them.
+  /// The IPv6 literal is appended only when the machine actually has a
+  /// global IPv6 address (see [deviceExitDetailed]). Plain-HTTP IP
+  /// literals follow — note `http://1.1.1.1/cdn-cgi/trace` answers 301
+  /// with an HTML body that carries no `ip=` line, so it can never prove
+  /// an egress on its own — and the hostname targets last, because they
+  /// depend on DNS, which is exactly the path that can bypass the tunnel
+  /// (WSANO_DATA, errno 11004, on a filtered line). Configurable via
+  /// remote config (the gate's `probes`); these built-ins are the fallback
+  /// when no server list arrives.
+  static const defaultEgressProbeUrls = <String>[
+    'https://1.1.1.1/cdn-cgi/trace',
+    'https://1.0.0.1/cdn-cgi/trace',
+    'http://1.1.1.1/cdn-cgi/trace',
+    'http://1.0.0.1/cdn-cgi/trace',
+    'https://www.cloudflare.com/cdn-cgi/trace',
+    'http://www.cloudflare.com/cdn-cgi/trace',
+  ];
+
+  static const _ipv6EgressProbeUrl =
+      'https://[2606:4700:4700::1111]/cdn-cgi/trace';
+
   /// The egress the **device** path presents: a plain HTTP GET (no proxy)
   /// to a Cloudflare trace target, parsed for `ip=`/`loc=`.
   ///
@@ -95,29 +120,88 @@ class SocksProbe {
   /// the two is how a TUN that routes nowhere is caught instead of being
   /// published as "connected" on the strength of the SOCKS probe alone.
   static Future<({String ip, String country, int pingMs})> deviceExit({
-    Duration timeout = const Duration(seconds: 12),
+    Duration timeout = const Duration(seconds: 8),
     int attempts = 2,
   }) async {
-    const targets = <List<String>>[
-      ['1.1.1.1', '/cdn-cgi/trace'],
-      ['www.cloudflare.com', '/cdn-cgi/trace'],
-    ];
-    Object? lastError;
+    final r = await deviceExitDetailed(timeout: timeout, attempts: attempts);
+    if (r.ip == null || r.ip!.isEmpty) {
+      throw SocketException(
+          'device egress lookup failed: ${r.attempts.isEmpty ? 'no probes configured' : r.attempts.last}');
+    }
+    return (ip: r.ip!, country: r.country, pingMs: r.pingMs ?? 0);
+  }
+
+  /// The device path's egress, measured without depending on DNS: HTTPS
+  /// IP-literal trace endpoints first, plain-HTTP IP literals next,
+  /// hostname targets only as a last resort. Never throws: when no probe
+  /// can run at all the result carries `ip == null` and the per-probe
+  /// attempts, so the caller can tell "nothing could be measured"
+  /// ([EgressVerdict.probeFailed]) apart from "measured and leaking"
+  /// ([EgressVerdict.leaked]).
+  ///
+  /// [probeUrls] overrides [defaultEgressProbeUrls] (remote-config gate
+  /// settings); an empty list falls back to the built-ins.
+  static Future<DeviceEgressResult> deviceExitDetailed({
+    List<String>? probeUrls,
+    Duration timeout = const Duration(seconds: 8),
+    int attempts = 2,
+  }) async {
+    final urls = List<String>.from(
+        (probeUrls == null || probeUrls.isEmpty)
+            ? defaultEgressProbeUrls
+            : probeUrls);
+    // The IPv6 literal only when the machine has a global IPv6 address,
+    // right after the IPv4 HTTPS literals so a working v4 tunnel wins.
+    if (await _hasGlobalIpv6() &&
+        !urls.any((u) => u.contains('2606:4700:4700::1111'))) {
+      final at = urls.indexWhere((u) => u.startsWith('http://'));
+      urls.insert(at == -1 ? urls.length : at, _ipv6EgressProbeUrl);
+    }
+    final log = <String>[];
     for (var attempt = 0; attempt < attempts; attempt++) {
-      for (final target in targets) {
+      for (final url in urls) {
+        final uri = Uri.tryParse(url);
+        if (uri == null ||
+            (uri.scheme != 'https' && uri.scheme != 'http')) {
+          log.add('$url → skipped (not an http(s) URL)');
+          continue;
+        }
         try {
-          final r = await _directGet(target[0], target[1], timeout: timeout);
+          final r = await _directGetUri(uri, timeout: timeout);
           final exit = traceExit(r.body);
           if (exit == null) {
-            throw const SocketException('no address in the trace answer');
+            log.add('$url → no address in the answer');
+            continue;
           }
-          return (ip: exit.ip, country: exit.country, pingMs: r.pingMs);
+          log.add('$url → ${exit.ip} '
+              '(${exit.country.isEmpty ? '??' : exit.country})');
+          return DeviceEgressResult(
+            ip: exit.ip,
+            country: exit.country,
+            pingMs: r.pingMs,
+            attempts: log,
+          );
         } catch (e) {
-          lastError = e;
+          log.add('$url → $e');
         }
       }
     }
-    throw SocketException('device egress lookup failed: $lastError');
+    return DeviceEgressResult(attempts: log);
+  }
+
+  /// True when an interface holds a global (non-link-local) IPv6 address.
+  /// Best effort: any failure means "no IPv6" and the v6 probe is skipped.
+  static Future<bool> _hasGlobalIpv6() async {
+    try {
+      final ifs = await NetworkInterface.list(
+          includeLoopback: false, includeLinkLocal: false);
+      for (final i in ifs) {
+        for (final a in i.addresses) {
+          if (a.type == InternetAddressType.IPv6) return true;
+        }
+      }
+    } catch (_) {}
+    return false;
   }
 
   /// `ip=`/`loc=` out of a Cloudflare trace body, or null when the body
@@ -151,6 +235,36 @@ class SocksProbe {
       sw.stop();
       if (response.statusCode < 200 || response.statusCode >= 400) {
         throw SocketException('HTTP ${response.statusCode} via the TUN device');
+      }
+      return (body: body, pingMs: sw.elapsedMilliseconds);
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// A direct GET (no proxy) against a full URL, https or http. Unlike
+  /// [_directGet] it rejects 3xx: a redirect body (e.g. the 301 HTML
+  /// `http://1.1.1.1/cdn-cgi/trace` answers) carries no trace address,
+  /// so accepting it would silently measure nothing.
+  static Future<({String body, int pingMs})> _directGetUri(
+    Uri uri, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final sw = Stopwatch()..start();
+    final client = HttpClient()..connectionTimeout = timeout;
+    try {
+      // Never inherit a proxy: the point is to test the adapter itself.
+      client.findProxy = (_) => 'DIRECT';
+      final request = await client.getUrl(uri).timeout(timeout);
+      request.followRedirects = false;
+      final response = await request.close().timeout(timeout);
+      final body = await response
+          .transform(utf8.decoder)
+          .join()
+          .timeout(timeout);
+      sw.stop();
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw SocketException('HTTP ${response.statusCode} from $uri');
       }
       return (body: body, pingMs: sw.elapsedMilliseconds);
     } finally {
@@ -451,9 +565,33 @@ enum EgressVerdict {
   /// Device egress == the raw line address: traffic bypasses the tunnel.
   leaked,
 
+  /// No probe could run at all — nothing was measured. Not a leak and
+  /// not a verification: the tunnel stays up with an explicit
+  /// "unverified" state instead of being torn down for a measurement
+  /// failure (the v1.9.0 gate killed healthy tunnels this way when DNS
+  /// answered WSANO_DATA on a filtered line).
+  probeFailed,
+
   /// Not enough measurements to tell. Unverified capture must not be
   /// published as connected.
   unknown,
+}
+
+/// The outcome of [SocksProbe.deviceExitDetailed]: the measured egress
+/// when a probe answered, plus one line per probe tried, in order —
+/// what the Diagnostics log shows when nothing could be measured.
+class DeviceEgressResult {
+  const DeviceEgressResult({
+    this.ip,
+    this.country = '',
+    this.pingMs,
+    this.attempts = const [],
+  });
+
+  final String? ip;
+  final String country;
+  final int? pingMs;
+  final List<String> attempts;
 }
 
 class EgressCheck {
@@ -471,16 +609,24 @@ class EgressCheck {
     final device = deviceIp.trim();
     if (device.isEmpty) return EgressVerdict.unknown;
     final raw = (rawIp ?? '').trim();
+    final tunnel = (tunnelIp ?? '').trim();
+    // Addresses of different families cannot be compared: a v6 device
+    // egress next to v4 tunnel/raw references proves nothing either way
+    // (a v6 leak must be judged against a v6 reference, not a v4 one).
+    final deviceV6 = device.contains(':');
+    bool sameFamily(String ref) =>
+        ref.isEmpty || ref.contains(':') == deviceV6;
     // A device egress equal to the line's own address is a leak even when
     // it also equals the probed exit (that only happens when the "tunnel"
     // itself exits via the user's address, which no Windows Aether mode
     // does) — so the leak test runs first.
-    if (raw.isNotEmpty && device == raw) return EgressVerdict.leaked;
-    final tunnel = (tunnelIp ?? '').trim();
-    if (tunnel.isNotEmpty && device == tunnel) {
+    if (raw.isNotEmpty && sameFamily(raw) && device == raw) {
+      return EgressVerdict.leaked;
+    }
+    if (tunnel.isNotEmpty && sameFamily(tunnel) && device == tunnel) {
       return EgressVerdict.verified;
     }
-    if (raw.isNotEmpty) return EgressVerdict.tunneled;
+    if (raw.isNotEmpty && sameFamily(raw)) return EgressVerdict.tunneled;
     return EgressVerdict.unknown;
   }
 

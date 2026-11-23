@@ -57,7 +57,7 @@
 //        core-only version list, feature flags; set by the admin with
 //        /appconfig in the bot. Never carries servers or keys.)
 
-const BOT_VERSION = '2.3.0';
+const BOT_VERSION = '2.3.1';
 
 const DEFAULT_PLANS = [
   { id: 'm1', label: '۱ ماهه — ۱۰۰ هزار تومان', days: 30, maxUsers: 1 },
@@ -88,6 +88,9 @@ const trialDaysOf = async (env) => {
 // list and never keys — the app ignores anything outside this shape.
 // Stored as one JSON object under KV `config:app`; set by the admin via
 // /appconfig in the bot. Sanitized on both write and read.
+// v2.3.1: the same object also carries the egress-gate settings (`gate`:
+// mode enforce/warn/off + probe URLs) so a misfiring gate can be tuned
+// server-side without a new release.
 const APP_CONFIG_KEY = 'config:app';
 
 function sanitizeAppConfig(raw) {
@@ -113,6 +116,23 @@ function sanitizeAppConfig(raw) {
       if (typeof v === 'boolean' && /^[a-zA-Z0-9_.-]{1,40}$/.test(k)) flags[k] = v;
     }
     if (Object.keys(flags).length) out.flags = flags;
+  }
+  // v2.3.1: egress-gate settings — the gate's strictness (enforce /
+  // warn / off) and the probe URLs it measures the device path with.
+  // Server-driven so a gate that misfires in the field can be softened
+  // without a new release. URLs only (http/https, ≤8, ≤200 chars); the
+  // app ignores anything outside this shape again on read.
+  if (raw.gate && typeof raw.gate === 'object' && !Array.isArray(raw.gate)) {
+    const g = {};
+    if (['enforce', 'warn', 'off'].includes(raw.gate.mode)) g.mode = raw.gate.mode;
+    if (Array.isArray(raw.gate.probes)) {
+      const ps = raw.gate.probes
+        .filter((p) => typeof p === 'string' && /^https?:\/\/[^/]+\/[^ ]*$/.test(p.trim()))
+        .map((p) => p.trim().slice(0, 200))
+        .slice(0, 8);
+      if (ps.length) g.probes = ps;
+    }
+    if (Object.keys(g).length) out.gate = g;
   }
   return out;
 }
@@ -2493,8 +2513,9 @@ async function ensureIndexed(env, tid) {
     }
     // v2.3: /appconfig — view/set the remote app config served at
     // GET /api/config (announcement, changelog override, coreOnlyVersions,
-    // flags). `/appconfig` shows it, `/appconfig clear` deletes it,
-    // `/appconfig <json>` replaces it (sanitized to the known shape).
+    // flags; v2.3.1 also `gate`: {mode, probes}). `/appconfig` shows it,
+    // `/appconfig clear` deletes it, `/appconfig <json>` replaces it
+    // (sanitized to the known shape).
     if (text === '/appconfig' || text.startsWith('/appconfig ')) {
       const arg = text.slice('/appconfig'.length).trim();
       if (!arg) {
