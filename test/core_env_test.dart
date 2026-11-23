@@ -473,4 +473,34 @@ void main() {
       expect(CoreStats.bytes('nonsense'), isNull);
     });
   });
+
+  group('TUN MTU default + migration', () {
+    test('a fresh install defaults to 1400', () {
+      expect(VpnSettings().tunMtu, 1400);
+      expect(VpnSettings().deviceMtu, 1400);
+    });
+
+    test('a stored old-default 1500 migrates to 1400 once', () {
+      final s = VpnSettings.fromJson({'tunMtu': 1500});
+      expect(s.tunMtu, 1400);
+      expect(s.tunMtuMigrated, isTrue);
+      // The marker is persisted, so the migration cannot fire twice.
+      expect(s.toJson()['tunMtuMigrated'], isTrue);
+    });
+
+    test('a deliberate 1500 set after migration sticks', () {
+      final s = VpnSettings.fromJson({'tunMtu': 1500, 'tunMtuMigrated': true});
+      expect(s.tunMtu, 1500);
+    });
+
+    test('other stored values are kept, missing takes the new default', () {
+      expect(VpnSettings.fromJson({'tunMtu': 1280}).tunMtu, 1280);
+      expect(VpnSettings.fromJson({}).tunMtu, 1400);
+    });
+
+    test('deviceMtu still clamps to the IPv6 floor and jumbo ceiling', () {
+      expect(VpnSettings(tunMtu: 900).deviceMtu, 1280);
+      expect(VpnSettings(tunMtu: 99999).deviceMtu, 9000);
+    });
+  });
 }

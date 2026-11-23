@@ -63,7 +63,7 @@ class NimbusVpnService : VpnService() {
     // stays on [socksPort] (the hop's upstream); the TUN bridge, the LAN
     // share and the traffic validation all use this port.
     @Volatile private var devicePort: Int = 1819
-    @Volatile private var tunMtu: Int = 1500
+    @Volatile private var tunMtu: Int = 1400
     @Volatile private var bridgeStarted: Boolean = false
     @Volatile private var h3GatewayUnavailable: Boolean = false
     @Volatile private var lastCoreError: String = ""
@@ -150,7 +150,7 @@ class NimbusVpnService : VpnService() {
             devicePort = extras?.getInt(EXTRA_DEVICE_PORT, -1)
                 ?.takeIf { it in 1024..65535 }
                 ?: devicePortFromEnv(env, socksPort)
-            tunMtu = extras?.getInt(EXTRA_MTU, 1500) ?: 1500
+            tunMtu = extras?.getInt(EXTRA_MTU, 1400) ?: 1400
             val bypassLan = extras?.getBoolean(EXTRA_BYPASS_LAN, true) != false
             val ipv6 = extras?.getBoolean(EXTRA_IPV6, false) == true
             val lanShare = extras?.getBoolean(EXTRA_LAN_SHARE, false) == true
@@ -647,7 +647,22 @@ class NimbusVpnService : VpnService() {
         } else {
             builder.addRoute("0.0.0.0", 0)
         }
-        if (dns) {
+        // A Psiphon/Tor hop anywhere in the path makes the device egress
+        // TCP-only: the hop's SOCKS listener has no UDP associate, so DNS
+        // sent as UDP through the bridge dies while cached names keep
+        // working ("some sites don't open"). HEV's mapdns answers lookups
+        // locally with fake IPs and hands the bridge domain-name CONNECTs
+        // instead, which ride TCP through the hop. Plain mode keeps the
+        // real resolvers (UDP works there and stays untouched).
+        val useMapDns = dns &&
+            (env["AETHER_PSIPHON"] != null || env["AETHER_TOR"] != null)
+        if (useMapDns) {
+            builder.addDnsServer(MAPDNS_ADDRESS)
+            // Fake-IP destinations must reach the bridge even when LAN
+            // bypass keeps reserved ranges out of the public routes.
+            builder.addRoute(MAPDNS_NETWORK, 4)
+            sendLog("DNS via HEV mapdns (TCP-only hop in path)")
+        } else if (dns) {
             // Both resolvers are public addresses covered by the tunnel
             // routes, so lookups — including Private DNS — ride the tunnel.
             builder.addDnsServer("1.1.1.1")
@@ -703,7 +718,7 @@ class NimbusVpnService : VpnService() {
             emit("status", "error", lastCoreError)
             return false
         }
-        val config = writeHevConfig(ipv6, env)
+        val config = writeHevConfig(ipv6, useMapDns, env)
         val started = try {
             TProxyService.TProxyStartService(config.absolutePath, descriptor.fd)
         } catch (e: UnsatisfiedLinkError) {
@@ -751,7 +766,11 @@ class NimbusVpnService : VpnService() {
      * core's own tier cannot help with traffic the bridge has not handed over
      * yet.
      */
-    private fun writeHevConfig(ipv6: Boolean, env: Map<String, String>): File {
+    private fun writeHevConfig(
+        ipv6: Boolean,
+        useMapDns: Boolean,
+        env: Map<String, String>,
+    ): File {
         val fast = env["AETHER_PERF_PROFILE"] == "high"
         val tcpBuffer = if (fast) 131072 else 65536
         // The TCP splice buffer is allocated on the worker's own stack, so the
@@ -778,6 +797,18 @@ class NimbusVpnService : VpnService() {
             writer.write("  address: '127.0.0.1'\n")
             writer.write("  port: $devicePort\n")
             writer.write("  udp: 'udp'\n")
+            if (useMapDns) {
+                // Keys verified against hev-socks5-tunnel 2.17.1 (the pinned
+                // build): mapdns answers A/AAAA locally from the fake-IP
+                // network and the bridge CONNECTs by domain name, so DNS
+                // never needs UDP through a TCP-only hop.
+                writer.write("mapdns:\n")
+                writer.write("  address: $MAPDNS_ADDRESS\n")
+                writer.write("  port: 53\n")
+                writer.write("  network: $MAPDNS_NETWORK\n")
+                writer.write("  netmask: 240.0.0.0\n")
+                writer.write("  cache-size: 10000\n")
+            }
         }
         return config
     }
@@ -1100,7 +1131,7 @@ class NimbusVpnService : VpnService() {
                     extras.getInt(EXTRA_SOCKS_PORT, 1819),
                 ),
             )
-            .putInt(EXTRA_MTU, extras.getInt(EXTRA_MTU, 1500))
+            .putInt(EXTRA_MTU, extras.getInt(EXTRA_MTU, 1400))
             .putBoolean(EXTRA_KILL, extras.getBoolean(EXTRA_KILL, true))
             .putBoolean(EXTRA_BYPASS_LAN, extras.getBoolean(EXTRA_BYPASS_LAN, true))
             .putBoolean(EXTRA_IPV6, extras.getBoolean(EXTRA_IPV6, false))
@@ -1128,7 +1159,7 @@ class NimbusVpnService : VpnService() {
             EXTRA_DEVICE_PORT,
             p.getInt(EXTRA_DEVICE_PORT, p.getInt(EXTRA_SOCKS_PORT, 1819)),
         )
-        b.putInt(EXTRA_MTU, p.getInt(EXTRA_MTU, 1500))
+        b.putInt(EXTRA_MTU, p.getInt(EXTRA_MTU, 1400))
         b.putBoolean(EXTRA_KILL, p.getBoolean(EXTRA_KILL, true))
         b.putBoolean(EXTRA_BYPASS_LAN, p.getBoolean(EXTRA_BYPASS_LAN, true))
         b.putBoolean(EXTRA_IPV6, p.getBoolean(EXTRA_IPV6, false))
@@ -1253,6 +1284,13 @@ class NimbusVpnService : VpnService() {
         const val EXTRA_IPV6 = "ipv6Tunnel"
         const val EXTRA_LAN_SHARE = "lanShare"
         const val PREFS = "nimbus_vpn"
+
+        /** HEV mapdns listener (inside the TUN's /30) and its fake-IP
+         *  network. 240.0.0.0/4 is reserved space that is never routed on
+         *  the internet, so a fake address can never collide with a real
+         *  destination. */
+        const val MAPDNS_ADDRESS = "198.18.0.2"
+        const val MAPDNS_NETWORK = "240.0.0.0"
 
         private const val SOCKS_TIMEOUT_MS = 60_000L
         private const val MASQUE_H3_PRIMARY_MS = 20_000L

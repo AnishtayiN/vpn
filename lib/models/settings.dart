@@ -232,7 +232,8 @@ class VpnSettings {
     this.httpProxy = false,
     this.socksPort = 1819,
     this.keepalive = 5,
-    this.tunMtu = 1500,
+    this.tunMtu = 1400,
+    this.tunMtuMigrated = true,
     this.coreMtu = 0,
     this.stallTimeout = 90,
     this.tcpConnectSecs = 15,
@@ -510,10 +511,21 @@ class VpnSettings {
   int keepalive;
 
   /// MTU of the local TUN device — the size apps may segment at before the
-  /// bridge sees the packet. This side is terminated inside the bridge, so it
-  /// is independent of the tunnel's own MTU and a larger value only means fewer
-  /// packets to move (8500 is what hev-socks5-tunnel itself defaults to).
+  /// bridge sees the packet. TCP is terminated inside the bridge, so for TCP
+  /// this side is independent of the tunnel's own MTU; UDP is not: datagrams
+  /// (QUIC, DNS) are forwarded as-is through SOCKS and then encapsulated by
+  /// the core (WireGuard/MASQUE), so a TUN MTU equal to the physical MTU
+  /// lets apps emit datagrams that no longer fit once encapsulated and
+  /// blackhole when path-MTU signalling does not flow (Google's QUIC-heavy
+  /// traffic is the visible victim). 1400 leaves headroom for the SOCKS +
+  /// core encapsulation while staying close to the physical MTU.
   int tunMtu;
+
+  /// One-time marker for the 1500 -> 1400 default migration in [fromJson]:
+  /// a stored 1500 from a pre-1.8.1 build is the old shipped default (it was
+  /// persisted by every install), not a deliberate pick, so it takes the new
+  /// default once; the marker then keeps a deliberate 1500 set afterwards.
+  bool tunMtuMigrated;
 
   /// Inner MTU handed to the core (`AETHER_MASQUE_MTU`, 576–1500).
   /// 0 = automatic: the core picks 1280 for QUIC (a datagram has to fit) and
@@ -646,8 +658,9 @@ class VpnSettings {
   }
 
   /// MTU the TUN device is created with. 1280 is the floor IPv6 requires and
-  /// 9000 is the largest jumbo frame worth offering; the default of 1500 keeps
-  /// the bridge from splitting every normal packet.
+  /// 9000 is the largest jumbo frame worth offering; the default of 1400
+  /// keeps UDP datagrams small enough to survive SOCKS + core encapsulation
+  /// (see [tunMtu]).
   int get deviceMtu {
     final v = tunMtu;
     if (v < 1280) return 1280;
@@ -743,6 +756,7 @@ class VpnSettings {
         'socksPort': socksPort,
         'keepalive': keepalive,
         'tunMtu': tunMtu,
+        'tunMtuMigrated': tunMtuMigrated,
         'coreMtu': coreMtu,
         'stallTimeout': stallTimeout,
         'tcpConnectSecs': tcpConnectSecs,
@@ -840,6 +854,16 @@ class VpnSettings {
     final xrayChainProxiesJson =
         json['xrayChainProxies'] ?? json['chainProxies'];
     final xrayChainExitIdJson = json['xrayChainExitId'] ?? json['chainExitId'];
+    // MIGRATION (TUN MTU default 1500 -> 1400): every pre-1.8.1 install
+    // persisted the then-default 1500, which lets UDP datagrams (QUIC/DNS)
+    // blackhole once SOCKS + core encapsulation is added. A stored 1500
+    // without the marker is that old default, not a deliberate pick, so it
+    // takes the new default once; the marker (written back by toJson) keeps
+    // a deliberate 1500 chosen afterwards.
+    final storedTunMtu = num('tunMtu', 1400);
+    final tunMtuMigrated = json['tunMtuMigrated'] == true;
+    final effectiveTunMtu =
+        (!tunMtuMigrated && storedTunMtu == 1500) ? 1400 : storedTunMtu;
 
     return VpnSettings(
       mode: parse(ConnectionMode.values, 'mode', ConnectionMode.vpn),
@@ -893,9 +917,8 @@ class VpnSettings {
       httpProxy: json['httpProxy'] == true,
       socksPort: num('socksPort', 1819),
       keepalive: num('keepalive', 5),
-      // A stored device MTU from an older build (1400, or a per-protocol cap)
-      // is kept: only a missing value takes the new default.
-      tunMtu: num('tunMtu', 1500),
+      tunMtu: effectiveTunMtu,
+      tunMtuMigrated: true,
       coreMtu: num('coreMtu', 0),
       stallTimeout: num('stallTimeout', 90),
       tcpConnectSecs: num('tcpConnectSecs', 15),

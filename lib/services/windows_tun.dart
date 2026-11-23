@@ -429,3 +429,41 @@ class ExitCodes {
     }
   }
 }
+
+/// Killing the tunnel core *and its helpers* on Windows.
+///
+/// The core spawns the Psiphon/Tor helpers (`pt\psiphon-tunnel-core.exe`,
+/// `pt\lyrebird.exe`) as child processes. Windows has no process-group
+/// signal: Dart's `Process.kill` terminates only the core itself, so a
+/// force-killed or crashed core leaves its helpers orphaned — and an
+/// orphaned psiphon keeps the BoltDB datastore lock in the runtime dir,
+/// which makes every later launch die with `tryDatastoreOpenDB ... timed
+/// out` / "psiphon stopped before it was ready". Two defences:
+///
+/// * [taskkillArgs] — `taskkill /T` walks the live process tree, so the
+///   helpers die with the core while the parent is still there to walk.
+/// * [sweepScript] — a path-scoped sweep for orphans whose parent is
+///   already gone (crash, force-close, older builds). It matches the
+///   *full executable path* of this install's own binaries only — never
+///   a bare image name — so another app's psiphon or a second install
+///   is never touched.
+class ProcessSweep {
+  /// PowerShell single-quoted literal: embedded quotes are doubled.
+  static String quote(String path) => "'${path.replaceAll("'", "''")}'";
+
+  /// `taskkill` arguments that force-kill [pid] and its whole tree.
+  static List<String> taskkillArgs(int pid) => ['/PID', '$pid', '/T', '/F'];
+
+  /// PowerShell one-liner that stops every running process whose
+  /// executable path is exactly one of [exePaths] (this install's core
+  /// and pt helpers) and prints one `sweep-kill <pid> <path>` line per
+  /// process it stops, so the caller can log what it healed.
+  static String sweepScript(List<String> exePaths) {
+    final targets = exePaths.map(quote).join(',');
+    return '\$targets = @($targets); '
+        'Get-Process -ErrorAction SilentlyContinue | '
+        'Where-Object { \$_.Path -and (\$targets -contains \$_.Path) } | '
+        'ForEach-Object { Write-Output "sweep-kill \$(\$_.Id) \$(\$_.Path)"; '
+        'Stop-Process -Id \$_.Id -Force -ErrorAction SilentlyContinue }';
+  }
+}

@@ -64,7 +64,7 @@ class XrayVpnService : VpnService() {
     private fun establishAndStart() {
         val builder = Builder()
             .setSession("VoidrauVPN")
-            .setMtu(1500)
+            .setMtu(1400)
             .setBlocking(false)
             .addAddress("198.18.0.1", 30)
             .addRoute("0.0.0.0", 0)
