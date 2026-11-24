@@ -33,18 +33,21 @@ void main() {
       expect(v, EgressVerdict.leaked);
     });
 
-    test('a pooled exit differing from the probe is tunneled, not a leak',
+    test('a pooled exit differing from the probe is unknown, not a leak',
         () {
-      // Tor circuits / anycast pools hand out more than one address: the
-      // device egress is not the raw line, so capture is proven even
-      // though it is not the exact address the SOCKS probe saw.
+      // Tor circuits / anycast pools hand out more than one address, but
+      // the raw address was measured once, before capture — an ISP/CGNAT
+      // reassignment reads exactly the same way. So a device egress that
+      // merely differs from the raw line proves nothing: only an exact
+      // match with the tunnel exit counts as tunneled. Unknown keeps the
+      // tunnel up, unverified (finding 4).
       final v = EgressCheck.evaluate(
         deviceIp: '203.0.113.8',
         tunnelIp: '203.0.113.7',
         rawIp: '198.51.100.9',
       );
-      expect(v, EgressVerdict.tunneled);
-      expect(EgressCheck.ok(v), isTrue);
+      expect(v, EgressVerdict.unknown);
+      expect(EgressCheck.ok(v), isFalse);
     });
 
     test('without a raw reference only an exact tunnel match proves capture',

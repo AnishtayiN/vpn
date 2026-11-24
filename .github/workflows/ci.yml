@@ -8,17 +8,14 @@ on:
 permissions:
   contents: read
 
-env:
-  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
-
 jobs:
   analyze:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
-          flutter-version: "3.27.4"
+          flutter-version: "3.35.7"
           channel: stable
       - run: flutter pub get
       # Both steps record their own status instead of failing fast: a test that
@@ -27,7 +24,7 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
-          flutter test 2>&1 | tee test.txt
+          flutter test --coverage 2>&1 | tee test.txt
           echo "${PIPESTATUS[0]}" > .test-status
       - name: Analyze
         shell: bash
@@ -45,7 +42,7 @@ jobs:
           exit "$rc"
       - name: Upload raw analyzer and test logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: flutter-findings-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -53,6 +50,44 @@ jobs:
             test.txt
           if-no-files-found: ignore
           retention-days: 14
+      # Finding 24: report-only checks. Every step here is non-blocking
+      # (continue-on-error): coverage is currently low so there is no
+      # passing threshold, and audit/secret findings must not turn a green
+      # build red until they are triaged.
+      - name: Print coverage summary
+        continue-on-error: true
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import pathlib
+
+          info = pathlib.Path("coverage/lcov.info")
+          if not info.exists():
+              print("::warning::coverage/lcov.info not found")
+              raise SystemExit(0)
+          found = hit = 0
+          for line in info.read_text(errors="replace").splitlines():
+              if line.startswith("LF:"):
+                  found += int(line[3:] or 0)
+              elif line.startswith("LH:"):
+                  hit += int(line[3:] or 0)
+          pct = (100.0 * hit / found) if found else 0.0
+          print(f"coverage: {hit}/{found} lines ({pct:.1f}%)")
+          PY
+      - name: Upload coverage report
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: coverage/lcov.info
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Dependency audit
+        continue-on-error: true
+        run: dart pub audit
+      - name: Secret scanning (gitleaks)
+        continue-on-error: true
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
       - name: Publish findings as check annotations
         if: failure()
         shell: bash
@@ -125,7 +160,7 @@ jobs:
   scripts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Shell syntax
         run: |
           set -euo pipefail

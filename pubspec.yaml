@@ -15,7 +15,13 @@ dependencies:
   # release zip is unpacked in-process; Windows 8.1 has no Expand-Archive).
   archive: ^4.0.0
   crypto: ^3.0.6
-  flutter_secure_storage: ^9.2.4
+  # 10.3.4, not 11.2.0, on purpose (finding 12): the v11 changelog says a
+  # direct jump from pre-v10 loses data saved with the deprecated ciphers
+  # ("upgrade to v10 first so existing data is migrated"), and v11 removes
+  # AndroidOptions.encryptedSharedPreferences, which lib/services/
+  # secure_store.dart still uses. v10 auto-migrates the stored data to the
+  # new ciphers, so the 11.x jump becomes safe in a later release.
+  flutter_secure_storage: ^10.3.4
   http: ^1.2.2
   http_parser: ^4.1.2
   package_info_plus: ^8.1.2

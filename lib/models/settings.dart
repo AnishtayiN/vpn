@@ -1,3 +1,11 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../services/proxy_uri.dart';
+
 enum ConnectionMode { vpn, proxy }
 
 enum Protocol { smart, masque, wg, gool, mim }
@@ -141,20 +149,94 @@ enum XrayMode {
 enum XrayVariant { normal, fragment, obfuscated }
 
 /// One user-entered chain proxy: a share link the user pasted, nothing
-/// bundled with the app. The link itself may carry credentials, so it is
-/// stored with the settings the user entered — never shipped, never logged.
+/// bundled with the app.
+///
+/// The full link may carry credentials (trojan/shadowsocks/SOCKS passwords,
+/// VLESS/Vmess UUIDs, WireGuard private keys), so it is NEVER written to
+/// the settings JSON: [link] lives only in memory and in secure storage
+/// (see [VpnSettings.saveChainSecrets], keyed by proxy id). What the
+/// settings JSON keeps is the non-secret descriptor — [protocol], [server]
+/// and [port] — so the UI can still tell a WireGuard proxy from a VLESS
+/// one and [VpnSettings.xrayChainExitFor] can still apply the UDP-only
+/// rule before the link has been hydrated from secure storage.
 class ChainProxy {
-  const ChainProxy({required this.id, required this.name, required this.link});
+  const ChainProxy({
+    required this.id,
+    required this.name,
+    required this.link,
+    this.protocol = '',
+    this.server = '',
+    this.port = 0,
+  });
 
   final String id;
   final String name;
 
   /// The share link as entered (vless://, vmess://, trojan://, ss://,
   /// socks://, http://, wireguard://, hysteria2://) or a WireGuard config
-  /// converted to a wireguard:// link.
+  /// converted to a wireguard:// link. In-memory only — never persisted
+  /// (see [toJson]).
   final String link;
 
-  Map<String, dynamic> toJson() => {'id': id, 'name': name, 'link': link};
+  /// Non-secret descriptor, derived from [link] when it is known and
+  /// persisted in the settings JSON instead of the link. Empty until the
+  /// link is parsed (old-format blobs) or hydrated (new-format blobs).
+  final String protocol;
+  final String server;
+  final int port;
+
+  /// The settings-JSON form: id, name and the non-secret descriptor only.
+  /// The raw link and every secret it carries are excluded by design.
+  Map<String, dynamic> toJson() {
+    final meta = link.isNotEmpty
+        ? _metaOf(link)
+        : (protocol: protocol, server: server, port: port);
+    return {
+      'id': id,
+      'name': name,
+      'meta': {
+        'protocol': meta.protocol,
+        'server': meta.server,
+        'port': meta.port,
+      },
+    };
+  }
+
+  /// Non-secret descriptor of [link] (protocol, server, port). Never
+  /// throws: an unparseable link yields an empty descriptor, and the link
+  /// itself is still saved to secure storage by [VpnSettings.saveChainSecrets].
+  static ({String protocol, String server, int port}) _metaOf(String link) {
+    try {
+      final p = ProxyUri.parse(link);
+      return (protocol: p.protocol, server: p.server, port: p.port);
+    } catch (_) {
+      try {
+        final uri = Uri.parse(link.trim());
+        return (
+          protocol: uri.scheme.toLowerCase(),
+          server: uri.host,
+          port: uri.hasPort ? uri.port : 0,
+        );
+      } catch (_) {
+        return (protocol: '', server: '', port: 0);
+      }
+    }
+  }
+
+  /// True when this proxy is UDP-only (WireGuard / Hysteria2): it can only
+  /// ride on WARP, never through the TCP-only Worker relay. Uses the live
+  /// link when present, otherwise the persisted non-secret descriptor.
+  bool get isUdp {
+    if (link.isNotEmpty) return isUdpLink(link);
+    return protocol == 'wireguard' || protocol == 'hysteria2';
+  }
+
+  /// `host:port` (an IPv6 host in brackets), from the persisted descriptor.
+  /// Empty when nothing is known yet.
+  String get displayAddress {
+    if (server.isEmpty) return '';
+    return '${server.contains(':') ? '[$server]' : server}:$port';
+  }
 
   /// True when the link is a UDP-only proxy (WireGuard / Hysteria2): it can
   /// only ride on WARP, never through the TCP-only Worker relay.
@@ -169,9 +251,40 @@ class ChainProxy {
   static ChainProxy? parse(Object? v) {
     if (v is! Map) return null;
     final id = '${v['id'] ?? ''}';
+    if (id.isEmpty) return null;
+    final name = '${v['name'] ?? id}';
+    // Old format: the raw link is stored in the blob. It is kept in memory
+    // so the connection keeps working this session; the load migration
+    // (see VpnSettings.fromJson) moves it into secure storage and re-saves
+    // the stripped form.
     final link = '${v['link'] ?? ''}';
-    if (id.isEmpty || link.isEmpty) return null;
-    return ChainProxy(id: id, name: '${v['name'] ?? id}', link: link);
+    if (link.isNotEmpty) {
+      final meta = _metaOf(link);
+      return ChainProxy(
+        id: id,
+        name: name,
+        link: link,
+        protocol: meta.protocol,
+        server: meta.server,
+        port: meta.port,
+      );
+    }
+    // New format: only the non-secret descriptor is stored; the link
+    // itself is hydrated from secure storage after load.
+    final meta = v['meta'];
+    if (meta is Map) {
+      return ChainProxy(
+        id: id,
+        name: name,
+        link: '',
+        protocol: '${meta['protocol'] ?? ''}',
+        server: '${meta['server'] ?? ''}',
+        port: meta['port'] is int
+            ? meta['port'] as int
+            : int.tryParse('${meta['port'] ?? 0}') ?? 0,
+      );
+    }
+    return null;
   }
 }
 
@@ -547,8 +660,12 @@ class VpnSettings {
   // Secrets live OUTSIDE this object: the Cloudflare API token, the Worker
   // VLESS UUID and the WARP private key are kept in secure storage
   // (see SecureStore) and never in SharedPreferences, logs or git.
+  // Chain-proxy links are secrets too (finding 8): the full link lives in
+  // secure storage keyed by proxy id (see [saveChainSecrets]) and only the
+  // non-secret descriptor (protocol/server/port) is stored here, so the
+  // UI can still show a proxy without its credentials.
   // What is stored here is only what the UI needs to show: domains, ids,
-  // flags and the user's own chain-proxy links.
+  // flags and the chain proxies' non-secret descriptors.
 
   /// Which engine a connect takes. [XrayMode.off] = Aether, unchanged.
   XrayMode xrayMode;
@@ -603,13 +720,128 @@ class VpnSettings {
   ChainProxy? xrayChainExitFor(XrayMode mode) {
     if (mode == XrayMode.serverless) return null;
     final usable = xrayChainProxies
-        .where((c) => !ChainProxy.isUdpLink(c.link) || mode == XrayMode.warp)
+        .where((c) => !c.isUdp || mode == XrayMode.warp)
         .toList();
     if (usable.isEmpty) return null;
     for (final c in usable) {
       if (c.id == xrayChainExitId) return c;
     }
     return usable.first;
+  }
+
+  // ── Chain-proxy secrets (finding 8) ───────────────────────────────────
+  //
+  // A chain-proxy link embeds its credentials (password, UUID, WireGuard
+  // private key, preshared key, Hysteria2 auth) in a per-format shape —
+  // base64 JSON for vmess, base64 userinfo for shadowsocks — so the
+  // secret fields cannot be split out and rebuilt reliably. The whole
+  // link is therefore stored verbatim in secure storage, keyed by proxy
+  // id; the settings JSON keeps only the non-secret descriptor (see
+  // [ChainProxy.toJson]). The value in secure storage is the complete
+  // link, i.e. it contains the password / private key; the settings blob
+  // contains none of it.
+  static const _chainStorage = FlutterSecureStorage(
+    // No encryptedSharedPreferences parameter: in v10 it is deprecated and
+    // ignored (data auto-migrates to the custom ciphers on first access),
+    // and v11 removes it.
+    aOptions: AndroidOptions(),
+    iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
+  );
+  static String _chainSecretKey(String id) => 'chainproxy.$id';
+  static const _chainSecretPrefix = 'chainproxy.';
+
+  /// Writes every in-memory chain-proxy link to secure storage (keyed by
+  /// proxy id) and deletes the stored secrets of proxies that are no
+  /// longer in the list. Called by `VpnController.persist()` before the
+  /// stripped settings JSON is written, so adding a proxy saves its
+  /// secret and removing one does not leave the secret behind. Never
+  /// throws: secure storage may be unavailable (no keystore, unit tests)
+  /// and that must never break saving the rest of the settings.
+  static Future<void> saveChainSecrets(List<ChainProxy> proxies) async {
+    for (final p in proxies) {
+      if (p.link.isEmpty) continue;
+      try {
+        await _chainStorage.write(key: _chainSecretKey(p.id), value: p.link);
+      } catch (_) {}
+    }
+    try {
+      final all = await _chainStorage.readAll();
+      final keep = {for (final p in proxies) _chainSecretKey(p.id)};
+      for (final key in all.keys) {
+        if (key.startsWith(_chainSecretPrefix) && !keep.contains(key)) {
+          try {
+            await _chainStorage.delete(key: key);
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+  }
+
+  /// Fills in the in-memory links of proxies loaded from a new-format
+  /// blob (descriptor only) from secure storage. Returns true when at
+  /// least one link was restored. Never throws.
+  static Future<bool> hydrateChainProxies(VpnSettings settings) async {
+    var changed = false;
+    final list = settings.xrayChainProxies;
+    for (var i = 0; i < list.length; i++) {
+      final p = list[i];
+      if (p.link.isNotEmpty) continue;
+      try {
+        final link = await _chainStorage.read(key: _chainSecretKey(p.id));
+        if (link != null && link.isNotEmpty) {
+          list[i] = ChainProxy(
+            id: p.id,
+            name: p.name,
+            link: link,
+            protocol: p.protocol,
+            server: p.server,
+            port: p.port,
+          );
+          changed = true;
+        }
+      } catch (_) {}
+    }
+    return changed;
+  }
+
+  /// Load migration for chain proxies (finding 8), run fire-and-forget
+  /// from [fromJson]: an old blob's raw links are moved into secure
+  /// storage, new-format proxies get their links hydrated, and the stored
+  /// blob is re-saved in the stripped form — but only when the blob on
+  /// disk is still the one that was loaded (same proxy ids in the same
+  /// order), so a newer save is never clobbered. Never throws.
+  static Future<void> _migrateChainProxiesOnLoad(
+      VpnSettings settings) async {
+    try {
+      await saveChainSecrets(settings.xrayChainProxies);
+      await hydrateChainProxies(settings);
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('settings');
+      if (raw == null) return;
+      final stored = jsonDecode(raw);
+      if (stored is! Map<String, dynamic>) return;
+      final list = stored['xrayChainProxies'] ?? stored['chainProxies'];
+      if (list is! List) return;
+      final hasLinks = list.any((e) =>
+          e is Map &&
+          e['link'] is String &&
+          (e['link'] as String).isNotEmpty);
+      if (!hasLinks) return;
+      final storedIds = [
+        for (final e in list)
+          if (e is Map) '${e['id'] ?? ''}',
+      ];
+      final loadedIds = [for (final p in settings.xrayChainProxies) p.id];
+      if (storedIds.length != loadedIds.length) return;
+      for (var i = 0; i < storedIds.length; i++) {
+        if (storedIds[i] != loadedIds[i]) return;
+      }
+      stored['xrayChainProxies'] = [
+        for (final p in settings.xrayChainProxies) p.toJson(),
+      ];
+      stored.remove('chainProxies');
+      await prefs.setString('settings', jsonEncode(stored));
+    } catch (_) {}
   }
 
   /// What the core is actually given for `AETHER_PERF_PROFILE`, or null when
@@ -865,7 +1097,13 @@ class VpnSettings {
     final effectiveTunMtu =
         (!tunMtuMigrated && storedTunMtu == 1500) ? 1400 : storedTunMtu;
 
-    return VpnSettings(
+    final xrayChainProxies = (xrayChainProxiesJson is List
+        ? xrayChainProxiesJson
+            .map(ChainProxy.parse)
+            .whereType<ChainProxy>()
+            .toList()
+        : const <ChainProxy>[]);
+    final settings = VpnSettings(
       mode: parse(ConnectionMode.values, 'mode', ConnectionMode.vpn),
       protocol: parse(Protocol.values, 'protocol', Protocol.wg),
       scan: parse(ScanMode.values, 'scan', ScanMode.turbo),
@@ -937,14 +1175,18 @@ class VpnSettings {
       warpEndpoints: lines(json['warpEndpoints']),
       serverlessFragment: json['serverlessFragment'] != false,
       serverlessNoise: json['serverlessNoise'] != false,
-      xrayChainProxies: (xrayChainProxiesJson is List
-          ? xrayChainProxiesJson
-              .map(ChainProxy.parse)
-              .whereType<ChainProxy>()
-              .toList()
-          : const <ChainProxy>[]),
+      xrayChainProxies: xrayChainProxies,
       xrayChainExitId: xrayChainExitIdJson?.toString() ?? '',
     );
+    // MIGRATION (finding 8): when the loaded blob held chain proxies —
+    // raw links from an older build, or descriptors whose links live in
+    // secure storage — move the secrets and re-save the stripped blob in
+    // the background. The in-memory links are already usable, so the
+    // connection keeps working while the migration runs.
+    if (xrayChainProxies.isNotEmpty) {
+      unawaited(_migrateChainProxiesOnLoad(settings));
+    }
+    return settings;
   }
 
   VpnSettings copyWithProtocol(Protocol p) {

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -71,6 +73,15 @@ class _VoidrauAppState extends State<VoidrauApp> with WidgetsBindingObserver {
       // upgrades the plan server-side; this refresh unlocks UI without
       // requiring the user to re-enter the key.
       _refreshLicense();
+    }
+    if (state == AppLifecycleState.detached) {
+      // Exit handler: the process is going away — tear the tunnel down
+      // now so the system proxy is restored instead of left pointing at
+      // the dead listener (Chrome ERR_PROXY_CONNECTION_FAILED after a
+      // hard close). Best effort: the engine may already be detaching,
+      // and the on-disk proxy snapshot is the backstop for a close that
+      // outruns this cleanup.
+      unawaited(controller.disconnect().catchError((_) {}));
     }
   }
 

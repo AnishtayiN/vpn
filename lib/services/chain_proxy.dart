@@ -100,6 +100,11 @@ String newChainId() {
 /// links, one per line, or a WireGuard config (`[Interface]` / `[Peer]`),
 /// named [fileName] without its extension when it comes from a file.
 /// Throws [FormatException] when none is found.
+///
+/// The returned proxies carry the full link in memory only (finding 8):
+/// the link may embed credentials, so it is never written to the settings
+/// JSON — `VpnController.persist()` moves it into secure storage keyed by
+/// proxy id and the JSON keeps only the non-secret descriptor.
 List<ChainProxy> parseChainProxies(String text, {String? fileName}) {
   if (text.contains('[Interface]')) {
     return [wireGuardConfToChain(text, name: fileName)];

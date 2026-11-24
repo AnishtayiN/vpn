@@ -352,8 +352,18 @@ class VpnController extends ChangeNotifier {
       // Self-heal: a run that ended hard (window closed, crash) cannot
       // clean up after itself, so it may leave the system proxy pointing at
       // our dead listener. Undo any leftover that is unambiguously ours.
-      unawaited(
-          WindowsSystemProxy.instance.restore(ourPort: settings.socksPort));
+      // The proxy is set with the *device* port (the hop's listener in
+      // chain mode), never the raw SOCKS port — heal that one, plus every
+      // other loopback listener the app can point the proxy at.
+      unawaited(WindowsSystemProxy.instance.restore(
+        ourPort: settings.devicePort,
+        ourPorts: {
+          settings.socksPort,
+          settings.httpProxyPort,
+          settings.hopPort,
+          settings.hopHttpPort,
+        },
+      ));
       // Same self-heal for the kill switch: a hard-killed run may have
       // left the firewall blocking outbound. The snapshot file is the
       // anchor; no snapshot → nothing of ours is in force.
@@ -414,6 +424,12 @@ class VpnController extends ChangeNotifier {
 
   Future<void> persist() async {
     if (Platform.isIOS) IosPolicy.normalize(settings);
+    // Finding 8: chain-proxy links carry credentials, so their secrets
+    // are written to secure storage (keyed by proxy id) BEFORE the
+    // settings blob is saved — the blob itself only ever holds the
+    // non-secret descriptors (see ChainProxy.toJson). Removed proxies'
+    // secrets are pruned at the same time.
+    await VpnSettings.saveChainSecrets(settings.xrayChainProxies);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('settings', jsonEncode(settings.toJson()));
     await engine.saveNativePrefs(settings);

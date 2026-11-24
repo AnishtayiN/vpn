@@ -154,10 +154,13 @@ class WindowsKillSwitch {
     return KillSwitchPlan.parseFirewallPolicy('${r.stdout}');
   }
 
-  /// Engages the block. Returns true only when the blocking policy is
-  /// verified in place (read back, like the system-proxy writes — a
-  /// silently failed netsh must never be reported as "traffic blocked").
-  /// [exePaths] are the tunnel core executables allowed to re-dial.
+  /// Engages the block. Returns true only when every allow rule landed
+  /// *and* the blocking policy is verified in place (read back, like the
+  /// system-proxy writes — a silently failed netsh must never be
+  /// reported as "traffic blocked"). [exePaths] are the tunnel core
+  /// executables allowed to re-dial. A failed allow rule fails engage()
+  /// outright: flipping the policy without it would lock the core out
+  /// while blocked, so the rules that did land are removed again.
   Future<bool> engage(List<String> exePaths) async {
     if (_engaged) return true;
     final before = await _currentPolicy();
@@ -172,10 +175,31 @@ class WindowsKillSwitch {
     }
     _ruleCount = exePaths.length;
     for (final cmd in KillSwitchPlan.engageCommands(exePaths)) {
+      // The policy flip is the last command; everything before it is an
+      // allow rule the core needs to re-dial through the block.
+      final isFlip = cmd.contains('firewallpolicy');
       final r = await _netsh(cmd);
       if (r == null || r.exitCode != 0) {
         _log('kill switch: netsh ${cmd.join(' ')} → '
             '${r == null ? 'did not run' : '${r.stdout}${r.stderr}'.trim()}');
+        if (!isFlip) {
+          _log('kill switch: allow rule failed — NOT engaging (the tunnel '
+              'core would be locked out while blocked)');
+          // Undo the rules that did land so a retry does not stack
+          // duplicates under the same names; the policy was never
+          // flipped, so restoring it here is a no-op write.
+          for (final cleanup in KillSwitchPlan.disengageCommands(
+              restorePolicy: before ?? KillSwitchPlan.defaultPolicy,
+              ruleCount: _ruleCount)) {
+            await _netsh(cleanup);
+          }
+          try {
+            await File(_snapshotPath).delete();
+          } catch (_) {}
+          _ruleCount = 0;
+          return false;
+        }
+        // A failed flip is caught by the policy read-back below.
       }
     }
     final after = await _currentPolicy();
