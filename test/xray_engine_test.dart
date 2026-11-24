@@ -317,7 +317,16 @@ void main() {
       expect(loaded.warpRegistered, isTrue);
       expect(loaded.warpEndpoints, ['162.159.192.4:2408']);
       expect(loaded.xrayChainProxies.length, 1);
-      expect(loaded.xrayChainProxies.first.link, _vlessLink);
+      // Finding 8: the raw link (with its credentials) never survives in
+      // the settings blob — only the non-secret descriptor does. The link
+      // is empty until hydrated from secure storage; the descriptor (id,
+      // name, protocol/server/port) is what the round-trip preserves.
+      expect(loaded.xrayChainProxies.first.link, isEmpty);
+      expect(loaded.xrayChainProxies.first.id, 'a');
+      expect(loaded.xrayChainProxies.first.name, 'x');
+      expect(loaded.xrayChainProxies.first.protocol, 'vless');
+      expect(loaded.xrayChainProxies.first.server, 'example.com');
+      expect(loaded.xrayChainProxies.first.port, 443);
       expect(loaded.xrayChainExitId, 'a');
     });
 

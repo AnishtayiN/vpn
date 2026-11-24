@@ -937,7 +937,11 @@ class _ConfigPageState extends State<ConfigPage> {
     ValueChanged<String> onChanged,
   ) {
     return DropdownButtonFormField<String>(
-      value: items.containsKey(value) ? value : items.keys.first,
+      // `value:` is deprecated since Flutter 3.33 and fails `flutter analyze`
+      // on 3.35.7: `initialValue:` + a value key keeps the field in sync
+      // when the parent state changes the selection from elsewhere.
+      key: ValueKey(value),
+      initialValue: items.containsKey(value) ? value : items.keys.first,
       items: items.entries
           .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value)))
           .toList(),

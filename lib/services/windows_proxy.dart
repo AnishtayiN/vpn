@@ -1,16 +1,18 @@
+import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 
 /// Snapshot of the current user's WinINET ("system proxy") settings —
 /// exactly what Settings → Network → Proxy shows: ProxyEnable (0/1),
 /// ProxyServer (host:port, or http=...;https=...) and ProxyOverride
-/// (bypass list), under
+/// (bypass list), plus AutoConfigURL (the PAC script URL) — all under
 /// HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings.
 class ProxyState {
   const ProxyState({
     this.enabled = false,
     this.server,
     this.overrideList,
+    this.autoConfigUrl,
   });
 
   /// Direct connection: manual proxy off, nothing configured.
@@ -19,6 +21,32 @@ class ProxyState {
   final bool enabled;
   final String? server;
   final String? overrideList;
+
+  /// Automatic-configuration (PAC) script URL, when the machine uses one.
+  final String? autoConfigUrl;
+
+  Map<String, dynamic> toJson() => {
+        'enabled': enabled,
+        if (server != null) 'server': server,
+        if (overrideList != null) 'overrideList': overrideList,
+        if (autoConfigUrl != null) 'autoConfigUrl': autoConfigUrl,
+      };
+
+  /// Tolerant parse: a corrupt snapshot reads as "direct" instead of
+  /// crashing the boot self-heal that depends on it.
+  factory ProxyState.fromJson(Map<String, dynamic> json) {
+    String? str(String key) {
+      final v = json[key];
+      return v is String && v.isNotEmpty ? v : null;
+    }
+
+    return ProxyState(
+      enabled: json['enabled'] == true,
+      server: str('server'),
+      overrideList: str('overrideList'),
+      autoConfigUrl: str('autoConfigUrl'),
+    );
+  }
 }
 
 /// Owns the Windows **system proxy** for the lifetime of a VoidrauVPN session,
@@ -53,6 +81,19 @@ class WindowsSystemProxy {
 
   ProxyState? _original;
 
+  /// Per-user writable dir holding the proxy snapshot file (the engine
+  /// sets this to its runtime dir — the same place the kill-switch
+  /// snapshot lives). Without it the snapshot is memory-only, as before.
+  String? stateDir;
+
+  /// File the pre-session proxy state is persisted to, so a hard-killed
+  /// run can still be undone on the next boot.
+  String get _snapshotPath {
+    final dir = stateDir;
+    if (dir == null || dir.isEmpty) return '';
+    return '$dir${Platform.pathSeparator}proxy.snapshot';
+  }
+
   /// Optional sink for log lines (the engine wires this to its log stream,
   /// which the UI's live log already shows).
   void Function(String line)? onLog;
@@ -81,6 +122,7 @@ class WindowsSystemProxy {
     bool? enabled;
     String? server;
     String? overrideList;
+    String? autoConfigUrl;
     for (final rawLine in text.split('\n')) {
       // "    ProxyServer    REG_SZ    127.0.0.1:1819"
       final m =
@@ -97,12 +139,15 @@ class WindowsSystemProxy {
           server = m.group(2)!.trim();
         case 'ProxyOverride':
           overrideList = m.group(2)!.trim();
+        case 'AutoConfigURL':
+          autoConfigUrl = m.group(2)!.trim();
       }
     }
     return ProxyState(
       enabled: enabled ?? false,
       server: server,
       overrideList: overrideList,
+      autoConfigUrl: autoConfigUrl,
     );
   }
 
@@ -147,9 +192,16 @@ class WindowsSystemProxy {
           await _regAdd('ProxyServer', 'REG_SZ', state.server!),
         if (state.overrideList != null)
           await _regAdd('ProxyOverride', 'REG_SZ', state.overrideList!),
+        if (state.autoConfigUrl != null)
+          await _regAdd('AutoConfigURL', 'REG_SZ', state.autoConfigUrl!),
       ];
       if (state.server == null) await _regDel('ProxyServer');
       if (state.overrideList == null) await _regDel('ProxyOverride');
+      // A state without a PAC script must not leave one behind: while we
+      // own the proxy (or run proxy-free in device-VPN mode) a leftover
+      // AutoConfigURL could re-route WinINET apps around the tunnel.
+      // restore() writes the snapshotted URL back.
+      if (state.autoConfigUrl == null) await _regDel('AutoConfigURL');
       final failed = adds.where((r) => r.exitCode != 0).toList();
       if (failed.isNotEmpty) {
         _log('system proxy write failed: '
@@ -190,31 +242,77 @@ class WindowsSystemProxy {
   }
 
   /// One-shot snapshot of whatever the user had before this session.
+  /// Persisted to disk as well as memory: a run that is hard-killed
+  /// cannot restore from memory, so the next boot's [restore] reads the
+  /// file (next to the kill-switch snapshot) instead.
   Future<void> rememberOriginal() async {
     if (_original != null) return;
     _original = await read();
+    await _writeDiskSnapshot(_original!);
     _log(_original!.enabled
         ? 'system proxy snapshot: ${_original!.server}'
         : 'system proxy snapshot: off');
   }
 
+  Future<void> _writeDiskSnapshot(ProxyState state) async {
+    final path = _snapshotPath;
+    if (path.isEmpty) return;
+    try {
+      await File(path).writeAsString(jsonEncode(state.toJson()));
+    } catch (e) {
+      _log('system proxy snapshot: cannot write $path: $e');
+    }
+  }
+
+  /// The snapshot a hard-killed run left on disk, or null. A corrupt
+  /// file is deleted instead of being retried on every boot.
+  Future<ProxyState?> _readDiskSnapshot() async {
+    final path = _snapshotPath;
+    if (path.isEmpty) return null;
+    try {
+      final file = File(path);
+      if (!await file.exists()) return null;
+      final raw = await file.readAsString();
+      return ProxyState.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+    } catch (_) {
+      await _deleteDiskSnapshot();
+      return null;
+    }
+  }
+
+  Future<void> _deleteDiskSnapshot() async {
+    final path = _snapshotPath;
+    if (path.isEmpty) return;
+    try {
+      await File(path).delete();
+    } catch (_) {}
+  }
+
   /// Undoes this session's proxy changes on disconnect:
   ///
-  ///  * with a snapshot → restore it exactly (your own manual proxy, or
+  ///  * with a snapshot (memory, or the disk file a hard-killed run left
+  ///    behind) → restore it exactly (your own manual proxy or PAC, or
   ///    plain "off");
-  ///  * without one (the previous run was hard-closed) → remove only a
-  ///    proxy that still points at our own listener [ourPort]; the user's
-  ///    own proxy on a different port is left untouched.
-  Future<void> restore({int? ourPort}) async {
-    final s = _original;
+  ///  * without one → remove only a proxy that still points at one of
+  ///    our own loopback listeners ([ourPort] and/or [ourPorts]); the
+  ///    user's own proxy on a different port is left untouched.
+  Future<void> restore({int? ourPort, Set<int>? ourPorts}) async {
+    final s = _original ?? await _readDiskSnapshot();
     _original = null;
     if (s != null) {
       await apply(s);
+      await _deleteDiskSnapshot();
       return;
     }
-    if (ourPort == null) return;
+    final ports = <int>{
+      if (ourPort != null) ourPort,
+      ...?ourPorts,
+    };
+    if (ports.isEmpty) return;
     final cur = await read();
-    if (cur.enabled && pointsAt(cur.server, ourPort)) {
+    if (cur.enabled &&
+        cur.server != null &&
+        ports.any((p) => pointsAt(cur.server, p))) {
       await clearOurs();
     }
   }

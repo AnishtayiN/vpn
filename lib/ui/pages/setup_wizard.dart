@@ -395,7 +395,10 @@ class _SetupWizardPageState extends State<SetupWizardPage> {
       if (_accounts.isNotEmpty) ...[
         const SizedBox(height: 12),
         DropdownButtonFormField<String>(
-          value: _accountId,
+          // `value:` is deprecated since Flutter 3.33 and fails `flutter analyze`
+          // on 3.35.7: `initialValue:` + a value key keeps the field in sync.
+          key: ValueKey(_accountId),
+          initialValue: _accountId,
           decoration: InputDecoration(
             labelText: s.wizardAccount,
             border: const OutlineInputBorder(),

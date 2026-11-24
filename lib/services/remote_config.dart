@@ -51,7 +51,9 @@ class GateConfig {
         if (u.length > 200) continue;
         final uri = Uri.tryParse(u);
         if (uri == null) continue;
-        if (uri.scheme != 'http' && uri.scheme != 'https') continue;
+        // HTTPS only: a plain-HTTP probe answer can be forged by an
+        // on-path attacker to fake a "verified" egress.
+        if (uri.scheme != 'https') continue;
         if (uri.host.isEmpty || uri.path.isEmpty) continue;
         probes.add(u);
       }

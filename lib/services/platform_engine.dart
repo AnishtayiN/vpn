@@ -189,6 +189,9 @@ class WindowsEngine {
   WindowsEngine._() {
     // Proxy changes are visible in the same live log as the core's output.
     WindowsSystemProxy.instance.onLog = (line) => _logs.add(line);
+    // Crash-recovery anchor for the proxy snapshot, next to the
+    // kill-switch snapshot file (see WindowsSystemProxy.rememberOriginal).
+    WindowsSystemProxy.instance.stateDir = runtimeDir;
   }
 
   static final instance = WindowsEngine._();
@@ -211,6 +214,11 @@ class WindowsEngine {
   int _devicePort = 1819;
   bool _bypassLan = true;
   final _bypass = <String>{};
+
+  /// True once [_bypassUpstreams] has installed the bypass routes: an
+  /// endpoint IP discovered after that point needs its route installed
+  /// immediately (see [_onLog]), not on the next connect.
+  bool _bypassRoutesInstalled = false;
   final _lanBypass = <String>[];
   final _rangeRoutes = <String>[];
   String _runDir = '';
@@ -696,8 +704,8 @@ class WindowsEngine {
     // "connected" over an uncaptured machine.
     //
     // The probe is DNS-independent: HTTPS IP-literal trace endpoints
-    // first (no lookup at all), plain-HTTP IP literals next, hostnames
-    // only as a last resort. v1.9.0 probed plain HTTP first, but
+    // first (no lookup at all), the hostname target only as a last
+    // resort. v1.9.0 probed plain HTTP first, but
     // `http://1.1.1.1/cdn-cgi/trace` answers 301 with an HTML body that
     // carries no `ip=` line, so the IP-literal attempt could never parse
     // an egress and the gate fell through to DNS — which on a filtered
@@ -730,31 +738,39 @@ class WindowsEngine {
         try {
           tunnelIp = (await SocksProbe.exitInfo(port: _devicePort)).ip;
         } catch (_) {}
-        final verdict = EgressCheck.evaluate(
-            deviceIp: deviceIp, tunnelIp: tunnelIp, rawIp: rawIp);
+        // Keep/teardown table lives in EgressGate.decide (pure, tested);
+        // the engine only renders the outcome's log lines here.
+        final decision = EgressGate.decide(
+          mode: gateCfg.mode,
+          deviceIp: deviceIp,
+          tunnelIp: tunnelIp,
+          rawIp: rawIp,
+        );
         _logLine('device egress $deviceIp, tunnel exit ${tunnelIp ?? '?'}, '
-            'raw line ${rawIp ?? '?'} → $verdict');
-        if (verdict == EgressVerdict.leaked) {
-          if (gateCfg.mode == GateMode.warn) {
+            'raw line ${rawIp ?? '?'} → ${decision.verdict}');
+        switch (decision.outcome) {
+          case EgressGateOutcome.warnLeak:
             _logLine('egress gate WARN-ONLY: device traffic bypasses the '
                 'tunnel (egress $deviceIp is the raw line address) — '
                 'tunnel kept up per remote config');
-            egressState = 'unverified: leak suspected (warn-only)';
-          } else {
+            egressState = decision.egressState;
+          case EgressGateOutcome.teardownLeak:
             _logLine('default routes: '
-                '${_defaultRouteSnapshot(await _routeTable())}');
-            tunFail = 'device traffic bypasses the tunnel '
-                '(egress $deviceIp is the raw line address)';
-          }
-        } else if (!EgressCheck.ok(verdict)) {
-          // Measured but inconclusive (e.g. a v6 egress next to v4
-          // references): keep the tunnel, mark it unverified.
-          _logLine('default routes: '
-              '${_defaultRouteSnapshot(await _routeTable())}');
-          egressState =
-              'unverified: egress could not be verified (egress $deviceIp)';
-        } else {
-          egressState = 'verified ($verdict)';
+                '${defaultRouteSnapshot(await _routeTable())}');
+            tunFail = decision.tunFail;
+          case EgressGateOutcome.unverified:
+            // Measured but inconclusive (e.g. a v6 egress next to v4
+            // references): keep the tunnel, mark it unverified.
+            _logLine('default routes: '
+                '${defaultRouteSnapshot(await _routeTable())}');
+            egressState = decision.egressState;
+          case EgressGateOutcome.verified:
+            egressState = decision.egressState;
+          case EgressGateOutcome.gateOff:
+          case EgressGateOutcome.probeFailed:
+            // Unreachable here: gate-off is handled above, and a failed
+            // probe never reaches this branch (res.ip is non-null).
+            egressState = decision.egressState;
         }
       }
     }
@@ -1044,19 +1060,23 @@ class WindowsEngine {
       final ip = _extractIp(line);
       if (ip != null) {
         endpoint = ip;
-        _bypass.add(ip);
+        // A gateway/endpoint discovered after the bypass routes went in
+        // needs its route now, not on the next connect — otherwise the
+        // core's own traffic to it loops into the TUN.
+        if (_bypass.add(ip) && _bypassRoutesInstalled) {
+          unawaited(_installBypassRoute(ip));
+        }
       }
       final counters = CoreStats.parse(line);
       if (counters != null) {
         downloadBytes = counters.downBytes;
         uploadBytes = counters.upBytes;
       }
+      // lastError comes only from the engine's own structured error
+      // paths (core exit, missing files, failed capture) — never from
+      // a log line that merely contains "error"/"failed"/"refused":
+      // a stale transient line used to overwrite the real failure.
       final lower = line.toLowerCase();
-      if (lower.contains('error') ||
-          lower.contains('failed') ||
-          lower.contains('refused')) {
-        lastError = line;
-      }
       if (lower.contains('scan') ||
           lower.contains('hunting') ||
           lower.contains('identity ready')) {
@@ -1084,7 +1104,12 @@ class WindowsEngine {
 
   static final _ipRe = RegExp(r'\b(\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?\b');
 
-  String? _extractIp(String line) {
+  /// The endpoint IP out of a core log line, or null when the line names
+  /// no usable upstream: loopback, the tunnel's own address and 0.0.0.0
+  /// are not upstreams, and a line that never mentions a peer/endpoint/
+  /// gateway carries no endpoint at all. Pure, so the bypass set it feeds
+  /// is unit-testable without a running core.
+  static String? extractEndpointIp(String line) {
     if (!RegExp(r'peer|endpoint|gateway|connected|using', caseSensitive: false)
         .hasMatch(line)) {
       return null;
@@ -1097,6 +1122,8 @@ class WindowsEngine {
     }
     return ip;
   }
+
+  String? _extractIp(String line) => extractEndpointIp(line);
 
   Future<void> _captureGateway() async {
     final r = await Process.run('route', ['print']);
@@ -1328,7 +1355,13 @@ class WindowsEngine {
     if (cfg != null) return cfg;
 
     // Upstreams must be bypassed *before* the default route goes in.
-    await _bypassUpstreams(settings);
+    if (!await _bypassUpstreams(settings)) {
+      return _TunAttempt.fail(
+          'no upstream gateway found — the tunnel\'s own upstreams cannot '
+          'be bypassed, so installing the default route would send the '
+          'core\'s own connection into the TUN',
+          fatal: true);
+    }
     final route = await _installDefaultRoute();
     if (route != null) {
       return _TunAttempt.fail('default route install failed: $route',
@@ -1506,16 +1539,19 @@ class WindowsEngine {
     return null;
   }
 
-  /// One-line summary of whatever default routes the table currently holds —
-  /// what gets appended to a failed install so the next "not in the table"
-  /// is diagnosable from the log instead of invisible.
-  String _defaultRouteSnapshot(String table) {
+  /// One-line summary of whatever default routes the table currently holds — what
+  /// gets appended to a failed install so the next "not in the table" is
+  /// diagnosable from the log instead of invisible. Pure (parses via
+  /// [Netsh.parseRouteLines]), so the summary is unit-testable.
+  static String defaultRouteSnapshot(String table) {
     final defaults = Netsh.parseRouteLines(table)
         .where((l) => l.destination == '0.0.0.0' && l.mask == '0.0.0.0')
         .map((l) => '${l.gateway}→${l.interfaceAddress} (m${l.metric})')
         .toList();
     return defaults.isEmpty ? 'no default route at all' : defaults.join(', ');
   }
+
+  String _defaultRouteSnapshot(String table) => defaultRouteSnapshot(table);
 
   /// Installs the default route through the tunnel.
   ///
@@ -1609,7 +1645,14 @@ class WindowsEngine {
       ['192.168.0.0', '255.255.0.0'],
     ];
     for (final row in lan) {
-      await Process.run('route', ['add', row[0], 'mask', row[1], gw]);
+      final r = await Process.run('route', ['add', row[0], 'mask', row[1], gw]);
+      if (r.exitCode != 0) {
+        // A failed add must not be recorded as bypassed: LAN traffic to
+        // this range would silently go through the tunnel instead.
+        _logLine('warning: LAN bypass route ${row[0]} failed: ${_out(r)} — '
+            'LAN traffic to ${row[0]} will go through the tunnel');
+        continue;
+      }
       _lanBypass.add(row[0]);
     }
   }
@@ -1628,7 +1671,13 @@ class WindowsEngine {
     if (routes.isEmpty || gw == null) return;
     for (final row in routes) {
       if (_lanBypass.contains(row[0])) continue;
-      await Process.run('route', ['add', row[0], 'mask', row[1], gw]);
+      final r =
+          await Process.run('route', ['add', row[0], 'mask', row[1], gw]);
+      if (r.exitCode != 0) {
+        _logLine('warning: split-tunnel bypass route ${row[0]} failed: '
+            '${_out(r)} — traffic to ${row[0]} will go through the tunnel');
+        continue;
+      }
       _lanBypass.add(row[0]);
       _logLine('split tunneling: ${row[0]}/${row[1]} bypasses the tunnel');
     }
@@ -1721,6 +1770,7 @@ class WindowsEngine {
       await Process.run('route', ['delete', ip]);
     }
     if (forgetUpstreams) _bypass.clear();
+    _bypassRoutesInstalled = false;
     _lanBypass.clear();
     _rangeRoutes.clear();
   }
@@ -1730,7 +1780,15 @@ class WindowsEngine {
   /// ranges are the full WARP candidate space the core can scan
   /// (the core's connectivity prober), collapsed into the documented /20
   /// ingress blocks.
-  Future<void> _bypassUpstreams(VpnSettings settings) async {
+  ///
+  /// Returns false when no upstream gateway exists: without one the
+  /// core's own connection has no bypass route, so the caller must abort
+  /// the TUN attempt instead of installing a default route that loops
+  /// the core's traffic into the tunnel. There is no legitimate
+  /// no-gateway case — a machine that can dial a tunnel has a default
+  /// gateway, and a failed attempt falls back to the verified system
+  /// proxy instead of leaving the user offline.
+  Future<bool> _bypassUpstreams(VpnSettings settings) async {
     const warpRanges = [
       ['162.159.192.0', '255.255.240.0'], // 162.159.192-207, every MASQUE CIDR
       ['188.114.96.0', '255.255.240.0'], // 188.114.96-111
@@ -1746,10 +1804,13 @@ class WindowsEngine {
     _bypass.addAll(_extraBypassIps);
     final gw = _originalGw;
     if (gw == null) {
-      _logLine('no upstream gateway found — WARP ranges are not bypassed');
-      return;
+      _logLine('no upstream gateway found — aborting the TUN attempt '
+          '(upstreams cannot be bypassed)');
+      return false;
     }
-    for (final ip in _bypass) {
+    // Copy: log lines arriving mid-loop add to _bypass, and iterating
+    // the live set would throw.
+    for (final ip in _bypass.toList()) {
       await Process.run(
           'route', ['add', ip, 'mask', '255.255.255.255', gw]);
     }
@@ -1757,6 +1818,22 @@ class WindowsEngine {
     for (final row in warpRanges) {
       await Process.run('route', ['add', row[0], 'mask', row[1], gw]);
       _rangeRoutes.add(row[0]);
+    }
+    _bypassRoutesInstalled = true;
+    return true;
+  }
+
+  /// Installs the bypass route for one endpoint IP discovered after the
+  /// bypass routes were installed (see [_onLog]): the core's own traffic
+  /// to it must leave through the physical gateway, not the TUN.
+  Future<void> _installBypassRoute(String ip) async {
+    final gw = _originalGw;
+    if (gw == null) return;
+    final r = await Process.run(
+        'route', ['add', ip, 'mask', '255.255.255.255', gw]);
+    if (r.exitCode != 0) {
+      _logLine('warning: bypass route for $ip failed: ${_out(r)} — the '
+          'core\'s traffic to $ip may loop into the TUN');
     }
   }
 

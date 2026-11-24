@@ -51,11 +51,18 @@ class LicenseService {
   static const _prefSessionId = 'license.sessionId';
   static const _gracePeriod = Duration(hours: 72);
 
+  /// Secure-storage key for the licence key itself (finding 7): the key
+  /// used to live in plaintext SharedPreferences (`_prefKey`) where any
+  /// local process could read it on Windows. It now lives in the same
+  /// secure store as the device id. The SharedPreferences key is kept only
+  /// as a one-time migration source — see [load].
+  static const _licenseKeyStorageKey = 'license.key';
+
   /// Secure-storage key for the stable per-device id (see [generateDeviceId]).
   static const deviceIdStorageKey = 'device.id';
 
   static const _deviceStorage = FlutterSecureStorage(
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+    aOptions: AndroidOptions(),
     iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
   );
 
@@ -263,7 +270,30 @@ class LicenseService {
   Future<void> load() async {
     if (_loaded) return;
     final prefs = await SharedPreferences.getInstance();
-    _key = prefs.getString(_prefKey);
+    // The licence key lives in secure storage (finding 7). On the first
+    // load after the upgrade, a key stored by an older build in plaintext
+    // SharedPreferences is moved into secure storage once and the
+    // plaintext copy is deleted — an existing activation keeps working.
+    // A secure-storage failure (e.g. no keystore / unit tests) must never
+    // block loading the rest of the cached licence state.
+    String? key;
+    try {
+      key = await _deviceStorage.read(key: _licenseKeyStorageKey);
+    } catch (_) {
+      key = null;
+    }
+    if (key == null || key.isEmpty) {
+      final legacy = prefs.getString(_prefKey);
+      if (legacy != null && legacy.isNotEmpty) {
+        key = legacy;
+        try {
+          await _deviceStorage.write(
+              key: _licenseKeyStorageKey, value: legacy);
+        } catch (_) {}
+        await prefs.remove(_prefKey);
+      }
+    }
+    _key = (key != null && key.isNotEmpty) ? key : null;
     final exp = prefs.getString(_prefExpires);
     _expiresAt = exp == null ? null : DateTime.tryParse(exp)?.toUtc();
     final chk = prefs.getString(_prefCheckedAt);
@@ -276,11 +306,21 @@ class LicenseService {
 
   Future<void> _save() async {
     final prefs = await SharedPreferences.getInstance();
+    // Finding 7: the key is written to secure storage, never to
+    // SharedPreferences. The legacy plaintext key is removed whenever it
+    // is found, so no plaintext copy survives a save. If secure storage
+    // is unavailable the key stays in memory only — a restart then asks
+    // for re-activation instead of silently writing the key to plaintext.
     if (_key == null) {
-      await prefs.remove(_prefKey);
+      try {
+        await _deviceStorage.delete(key: _licenseKeyStorageKey);
+      } catch (_) {}
     } else {
-      await prefs.setString(_prefKey, _key!);
+      try {
+        await _deviceStorage.write(key: _licenseKeyStorageKey, value: _key!);
+      } catch (_) {}
     }
+    await prefs.remove(_prefKey);
     if (_expiresAt == null) {
       await prefs.remove(_prefExpires);
     } else {

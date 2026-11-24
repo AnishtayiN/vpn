@@ -6,12 +6,16 @@ void main() {
   group('defaultEgressProbeUrls', () {
     test('HTTPS IP literals first, hostnames last', () {
       final urls = SocksProbe.defaultEgressProbeUrls;
-      expect(urls.first, 'https://1.1.1.1/cdn-cgi/trace');
-      expect(urls[1], 'https://1.0.0.1/cdn-cgi/trace');
-      expect(urls.last, 'http://www.cloudflare.com/cdn-cgi/trace');
-      // No probe in the chain depends on DNS except the last two.
+      expect(urls, [
+        'https://1.1.1.1/cdn-cgi/trace',
+        'https://1.0.0.1/cdn-cgi/trace',
+        'https://www.cloudflare.com/cdn-cgi/trace',
+      ]);
+      // HTTPS only: a plain-HTTP probe answer can be forged by an on-path
+      // attacker (finding 9). Only the hostname target depends on DNS.
+      expect(urls.every((u) => u.startsWith('https://')), isTrue);
       expect(
-        urls.take(4).every((u) => u.contains('1.1.1.1') || u.contains('1.0.0.1')),
+        urls.take(2).every((u) => u.contains('1.1.1.1') || u.contains('1.0.0.1')),
         isTrue,
       );
     });
